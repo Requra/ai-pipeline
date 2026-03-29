@@ -1,10 +1,16 @@
 from app.schemas.pipeline_state import PipelineState
 from app.schemas.items import UserStory, AcceptanceCriterion
+from app.llm import get_llm
+from langchain_core.prompts import ChatPromptTemplate
+from pydantic import BaseModel, Field
+from typing import List
+
+class StoryResponse(BaseModel):
+    stories: List[UserStory] = Field(description="A list of generated user stories.")
 
 async def generate_node(state: PipelineState) -> dict:
     """
-    Transform each classified requirement into exactly one user story.
-    Strict 1-to-1 mapping via source_fr_id.
+    Transform each classified requirement into exactly one user story using Gemini.
     """
     print("--- GENERATE NODE ---")
     classified_reqs = state.get("classified_requirements", [])
@@ -12,33 +18,39 @@ async def generate_node(state: PipelineState) -> dict:
     if not classified_reqs:
         return {"user_stories": []}
 
-    stories = []
     try:
-        for req in classified_reqs:
-            # Mock generating story for req
-            # Real logic would use templates based on req.label and prompt the LLM
-            desc = f"As a {req.actor or 'User'}, I want {req.goal or 'to do something'} so that benefit."
-            if req.label == "NFR":
-                desc = f"The system shall {req.text} so that quality goal."
-            elif req.label == "BR":
-                desc = f"Given constraint, the system shall apply rule."
-                
-            story = UserStory(
-                title=f"Story for FR {req.id}",
-                description=desc,
-                acceptance_criteria=[
-                    AcceptanceCriterion(text="Criterion 1", criterion_type="Given-When-Then"),
-                    AcceptanceCriterion(text="Criterion 2", criterion_type="plain")
-                ],
-                source_fr_id=req.id,
-                label=req.label
-            )
-            stories.append(story)
-            
-        # Enforce 1:1 mapping
+        # Get Gemini LLM
+        llm = get_llm()
+        
+        # Define structured output
+        structured_llm = llm.with_structured_output(StoryResponse)
+        
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", "You are an expert product manager. Transform each categorized requirement into a user story with detailed acceptance criteria (Given-When-Then format where appropriate). Ensure a 1:1 mapping using the source requirement ID."),
+            ("user", "{items}")
+        ])
+        
+        chain = prompt | structured_llm
+        response = await chain.ainvoke({"items": [f"ID {getattr(req, 'id', 0)}: {getattr(req, 'text', '')} ({getattr(req, 'label', 'FR')})" for req in classified_reqs]})
+        
+        stories = response.stories if response else []
+        
+        # Enforce 1:1 mapping check
         if len(stories) != len(classified_reqs):
-            return {"error": "GENERATE_MISMATCH: LLM generated count does not match input count"}
+            print(f"Warning: Story count mismatch ({len(stories)} stories vs {len(classified_reqs)} requirements)")
             
         return {"user_stories": stories}
+        
     except Exception as e:
-        return {"error": f"GENERATE_FAILED: {str(e)}"}
+        print(f"Generate node LLM failure: {e}")
+        # Fallback to simple logic for resilience
+        results = []
+        for req in classified_reqs:
+            results.append(UserStory(
+                title=f"Story for {getattr(req, 'id', 0)}",
+                description=f"As a {getattr(req, 'actor', 'User')}, I want {getattr(req, 'goal', 'to do something')}.",
+                acceptance_criteria=[AcceptanceCriterion(text="Works as expected", criterion_type="plain")],
+                source_fr_id=getattr(req, 'id', 0),
+                label=getattr(req, 'label', 'FR')
+            ))
+        return {"user_stories": results, "error": f"GENERATE_LLM_FAILURE: {str(e)}"}

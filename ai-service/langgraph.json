@@ -1,0 +1,9 @@
+{
+  "graphs": {
+    "pipeline": "app.graph.pipeline:graph"
+  },
+  "dependencies": ["."],
+  "env": ".env",
+  "python_version": "3.11",
+  "pip_config_file": "pyproject.toml"
+}

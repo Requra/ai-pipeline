@@ -45,3 +45,6 @@ def build_pipeline():
 
     app = workflow.compile()
     return app
+
+# Export graph for LangGraph Studio
+graph = build_pipeline()

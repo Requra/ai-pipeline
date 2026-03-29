@@ -1,14 +1,16 @@
 import os
-from langchain_openai import ChatOpenAI
-from langchain_anthropic import ChatAnthropic
 
-def get_llm(provider: str = "openai", model_name: str = "gpt-4o"):
+def get_llm():
     """
-    Factory to retrieve the appropriate Language Model client.
+    Retrieve the Gemini (Google GenAI) Language Model client.
+    Using gemini-1.5-flash as the standard free-tier model.
     """
-    if provider == "openai":
-        return ChatOpenAI(temperature=0, model=model_name, api_key=os.getenv("OPENAI_API_KEY"))
-    elif provider == "anthropic":
-        return ChatAnthropic(temperature=0, model=model_name, api_key=os.getenv("ANTHROPIC_API_KEY"))
-    else:
-        raise ValueError(f"Unsupported LLM provider: {provider}")
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    
+    # Using gemini-2.0-flash as the fast, modern free-tier model.
+    return ChatGoogleGenerativeAI(
+        model="gemini-2.5-flash-lite",
+        temperature=0,
+        google_api_key=os.getenv("GOOGLE_API_KEY")
+    )
+
