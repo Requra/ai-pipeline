@@ -7,9 +7,8 @@ def get_llm():
     """
     from langchain_google_genai import ChatGoogleGenerativeAI
     
-    # Using gemini-2.0-flash as the fast, modern free-tier model.
     return ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash-lite",
+        model="gemini-2.0-flash",
         temperature=0,
         google_api_key=os.getenv("GOOGLE_API_KEY")
     )

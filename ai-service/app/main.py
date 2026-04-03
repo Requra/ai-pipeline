@@ -1,11 +1,23 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Body
 from typing import Optional
 from app.graph.pipeline import build_pipeline
+from pydantic import BaseModel
 import json
+from dotenv import load_dotenv
+import os
+
+# Load environment variables from .env
+load_dotenv()
 
 app = FastAPI(title="AI Service Pipeline", description="LangGraph execution microservice")
 
 pipeline = build_pipeline()
+
+class ProcessRequest(BaseModel):
+    job_id: str
+    text: str
+    file_type: str = "pdf"
+    metadata: dict = {}
 
 @app.post("/process")
 async def process_document(
@@ -18,24 +30,53 @@ async def process_document(
         parsed_metadata = json.loads(metadata)
         
         initial_state = {
-            "file_bytes": file_bytes,
+            "job_id": "upload_" + str(hash(file.filename)),
+            "raw_bytes": file_bytes,
+            "raw_text": "", # Nodes will handle extraction
             "file_type": file_type,
             "metadata": parsed_metadata,
-            "raw_transcript": "",
-            "extracted_items": [],
-            "classifications": [],
-            "generated_content": None,
+            "functional_requirements": [],
+            "classified_requirements": [],
+            "user_stories": [],
             "summary": "",
             "status": "started",
-            "error_log": []
+            "error": None
         }
 
-        result_state = pipeline.invoke(initial_state)
+        result_state = await pipeline.ainvoke(initial_state)
 
-        # Truncate file bytes from output response to save bandwidth
-        result_state.pop("file_bytes", None)
+        # Truncate internal bytes from output response
+        result_state.pop("raw_bytes", None)
 
         return result_state
     
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/process-json")
+async def process_json(request: ProcessRequest):
+    """
+    Direct JSON endpoint if you already have the text.
+    """
+    try:
+        initial_state = {
+            "job_id": request.job_id,
+            "raw_bytes": b"", # No file upload
+            "raw_text": request.text,
+            "file_type": request.file_type,
+            "metadata": request.metadata,
+            "functional_requirements": [],
+            "classified_requirements": [],
+            "user_stories": [],
+            "summary": "",
+            "status": "started",
+            "error": None
+        }
+
+        result_state = await pipeline.ainvoke(initial_state)
+        result_state.pop("raw_bytes", None)
+
+        return result_state
+        
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
