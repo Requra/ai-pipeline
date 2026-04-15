@@ -15,6 +15,8 @@ class PipelineState(TypedDict):
     summary: str
     
     # Flow Control and Tracking
+    is_useful: bool
+    relevance_score: float
     error: Optional[str]
     started_at: float
     status: str

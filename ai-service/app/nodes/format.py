@@ -13,6 +13,8 @@ async def format_node(state: PipelineState) -> dict:
     
     if error and not stories and not reqs:
         status = "error"
+    elif state.get("is_useful") is False:
+        status = "rejected"
     elif error and (stories or reqs):
         status = "partial"
     else:
@@ -20,5 +22,7 @@ async def format_node(state: PipelineState) -> dict:
         
     return {
         "status": status,
+        "is_useful": state.get("is_useful", True),
+        "relevance_score": state.get("relevance_score", 0.0),
         "error": error
     }
