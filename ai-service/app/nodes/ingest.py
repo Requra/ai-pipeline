@@ -8,13 +8,34 @@ class RelevanceCheck(BaseModel):
     relevance_score: float = Field(description="Confidence score between 0 and 1.")
     reason: str = Field(description="Short reason why the document is accepted or rejected.")
 
+import fitz  # PyMuPDF
+import docx
+import io
+
 def extract_pdf(raw_bytes: bytes) -> str:
-    # Mock PDF extraction
-    return "The system shall process payments. The system must support user login. Performance must be under 2s."
+    """Extract plain text from PDF bytes using PyMuPDF."""
+    text = ""
+    try:
+        with fitz.open(stream=raw_bytes, filetype="pdf") as doc:
+            for page in doc:
+                text += page.get_text()
+        return text or ""
+    except Exception as e:
+        print(f"PDF extraction error: {e}")
+        return ""
 
 def extract_docx(raw_bytes: bytes) -> str:
-    # Mock DOCX extraction
-    return "Meeting Notes: We discussed adding a new search feature to the website for better discovery."
+    """Extract plain text from DOCX bytes using python-docx."""
+    try:
+        doc = docx.Document(io.BytesIO(raw_bytes))
+        full_text = []
+        for para in doc.paragraphs:
+            full_text.append(para.text)
+        return "\n".join(full_text)
+    except Exception as e:
+        print(f"DOCX extraction error: {e}")
+        return ""
+
 
 async def ingest_node(state: PipelineState) -> dict:
     """
