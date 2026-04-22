@@ -188,6 +188,44 @@ async def test_ingest_invalid_file(base_state):
     state["file_type"] = "pdf"
 
     result = await ingest.ingest_node(state)
-
     # It should either error or reject
     assert "error" in result or result.get("is_useful") is False
+
+
+@pytest.mark.asyncio
+async def test_ingest_only_uses_snippet_for_relevance(monkeypatch):
+    """Verify that only a snippet is sent to relevance check."""
+    captured_text = []
+
+    async def fake_relevance(text: str) -> ingest.RelevanceCheck:
+        captured_text.append(text)
+        return ingest.RelevanceCheck(is_useful=True, relevance_score=1.0, reason="ok")
+
+    monkeypatch.setattr(ingest, "_run_relevance_check", fake_relevance)
+    
+    large_text = "Software " * 1000 # very big
+    state = {
+        "file_type": "text",
+        "raw_bytes": large_text.encode("utf-8"),
+    }
+    
+    await ingest.ingest_node(state)
+    
+    assert len(captured_text[0]) <= ingest.RELEVANCE_SNIPPET_CHARS
+    assert captured_text[0] == large_text[:ingest.RELEVANCE_SNIPPET_CHARS]
+
+
+def test_route_after_ingest_logic():
+    """Test routing logic coverage."""
+    # 1. transcribe
+    assert ingest.route_after_ingest({"status": "to_transcribe"}) == "transcribe"
+    # 2. extract
+    assert ingest.route_after_ingest({"status": "ready_for_extract"}) == "extract"
+    # 3. audio -> transcribe
+    assert ingest.route_after_ingest({"file_type": "audio"}) == "transcribe"
+    # 4. error -> format
+    assert ingest.route_after_ingest({"error": "err"}) == "format"
+    # 5. rejected -> format
+    assert ingest.route_after_ingest({"status": "rejected"}) == "format"
+    # Default
+    assert ingest.route_after_ingest({}) == "extract"
