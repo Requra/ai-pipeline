@@ -6,22 +6,22 @@ class FunctionalRequirement(BaseModel):
     text: str
     actor: Optional[str] = None
     goal: Optional[str] = None
-    source_hint: str
+    source_hint: str = ""
 
 class ClassifiedRequirement(FunctionalRequirement):
     label: Literal["FR", "NFR", "BR"]
-    confidence: float
+    confidence: float = 1.0
 
 class AcceptanceCriterion(BaseModel):
     text: str
-    criterion_type: Literal["Given-When-Then", "plain"]
+    criterion_type: Literal["Given-When-Then", "plain"] = "plain"
 
 class UserStory(BaseModel):
     title: str
     description: str
     acceptance_criteria: List[AcceptanceCriterion]
     source_fr_id: int
-    label: Literal["FR", "NFR", "BR"]
+    label: Literal["FR", "NFR", "BR"] = "FR"
 
 class JobResult(BaseModel):
     job_id: str
