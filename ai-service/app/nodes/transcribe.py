@@ -785,8 +785,8 @@ async def transcribe_node(state: PipelineState) -> dict:
       - "groq"     → Groq Whisper large-v3 (default, best for Egyptian Arabic + English)
       - "deepgram" → Deepgram Nova-3 (native diarization, multilingual mode)
 
-    On primary provider failure, automatically falls back to the other provider
-    and returns TRANSCRIBE_*_FAILURE in the error field alongside the raw_text.
+    On primary provider failure, automatically falls back to the other provider.
+    Errors are appended to the 'error' field in the state.
 
     Input state keys:
         raw_bytes (bytes): The raw audio file content.
@@ -794,20 +794,22 @@ async def transcribe_node(state: PipelineState) -> dict:
 
     Output dict keys:
         raw_text (str | None): The cleaned transcript, ready for the extract node.
-        error    (str | None): Set on failure or fallback; None on clean success.
+        error    (str | None): Appended error messages.
+        status   (str):       Updated execution status.
     """
     print("--- TRANSCRIBE NODE ---")
 
     # ── Guard: non-audio files should never reach this node ──
     if state.get("file_type") != "audio":
         print(f"[Transcribe] Skipping: file_type={state.get('file_type')!r} is not audio.")
-        return {"raw_text": None, "error": None}
+        return {"raw_text": None, "status": "skipped_non_audio"}
 
     raw_bytes: Optional[bytes] = state.get("raw_bytes")
     if not raw_bytes:
         return {
             "raw_text": None,
             "error": "TRANSCRIBE_NO_BYTES: No audio data provided.",
+            "status": "failed_no_bytes"
         }
 
     # Infer a concrete file sub-type (mp3/wav/etc.) from file_type if possible.
@@ -842,7 +844,10 @@ async def transcribe_node(state: PipelineState) -> dict:
             
         elapsed = time.perf_counter() - t0
         print(f"[Transcribe] OK: {primary_name} done in {elapsed:.2f}s -- {len(raw_text)} chars.")
-        return {"raw_text": raw_text, "error": None}
+        return {
+            "raw_text": raw_text, 
+            "status": f"completed_via_{provider}"
+        }
 
     except Exception as primary_exc:
         print(f"[Transcribe] FAIL: {primary_name} failed: {primary_exc}")
@@ -855,18 +860,26 @@ async def transcribe_node(state: PipelineState) -> dict:
         raw_text = await fallback_fn(raw_bytes, file_subtype)
         elapsed = time.perf_counter() - t0
         print(f"[Transcribe] OK: {fallback_name} fallback done in {elapsed:.2f}s -- {len(raw_text)} chars.")
-        # Return text + note that the fallback was used
+        
+        # Append to existing error string if any
+        existing = state.get("error")
+        combined_error = f"{existing} | {primary_error_msg}" if existing else primary_error_msg
+        
         return {
             "raw_text": raw_text,
-            "error": f"{primary_error_msg} | Fallback to {fallback_name} succeeded.",
+            "error": combined_error,
+            "status": f"completed_via_fallback_{fallback_name}"
         }
 
     except Exception as fallback_exc:
         print(f"[Transcribe] FAIL: {fallback_name} fallback also failed: {fallback_exc}")
+        
+        fallback_error_msg = f"TRANSCRIBE_FALLBACK_FAILURE: {fallback_exc}"
+        existing = state.get("error")
+        combined_error = f"{existing} | {primary_error_msg} | {fallback_error_msg}" if existing else f"{primary_error_msg} | {fallback_error_msg}"
+        
         return {
             "raw_text": None,
-            "error": (
-                f"{primary_error_msg} | "
-                f"TRANSCRIBE_FALLBACK_FAILURE: {fallback_exc}"
-            ),
+            "error": combined_error,
+            "status": "failed_all_providers"
         }
