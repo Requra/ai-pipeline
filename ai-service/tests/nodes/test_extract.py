@@ -7,6 +7,19 @@ async def test_extract_node_real(base_state):
     state["raw_text"] = "The system shall process payments. The system must support user login. Performance must be under 2s."
     
     result = await extract_node(state)
+
+    print("\n=== FULL RESPONSE ===")
+    print(result)
+
+    print("\n=== EXTRACTED REQUIREMENTS ===")
+    for req in result.get("functional_requirements", []):
+        print(f"ID: {req.id}")
+        print(f"Text: {req.text}")
+        print(f"Actor: {req.actor}")
+        print(f"Goal: {req.goal}")
+        print(f"Source: {getattr(req, 'source_hint', '')}")
+        print("------")
+
     
     assert "functional_requirements" in result
     reqs = result["functional_requirements"]
