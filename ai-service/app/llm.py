@@ -20,4 +20,10 @@ def get_llm(model_name: str = "gemini-2.5-flash"):
             temperature=0,
             openai_api_key=os.getenv("OPENAI_API_KEY")
         )
-
+    elif model_name == "gpt-oss-20b":
+        return ChatOpenAI(
+            model="openai/gpt-oss-20b:free",
+            temperature=0,
+            api_key=os.getenv("GPT_OSS_API_KEY"),
+            base_url=os.getenv("BASE_URL_KEY")
+        ) # for testing only
