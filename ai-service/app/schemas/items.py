@@ -9,8 +9,8 @@ class FunctionalRequirement(BaseModel):
     source_hint: str = ""
 
 class ClassifiedRequirement(FunctionalRequirement):
-    label: Literal["FR", "NFR", "BR"]
-    confidence: float = 1.0
+    labels: List[Literal["FR", "NFR", "BR"]]
+    confidence: float
 
 class AcceptanceCriterion(BaseModel):
     text: str
@@ -21,7 +21,7 @@ class UserStory(BaseModel):
     description: str
     acceptance_criteria: List[AcceptanceCriterion]
     source_fr_id: int
-    label: Literal["FR", "NFR", "BR"] = "FR"
+    labels: List[Literal["FR", "NFR", "BR"]]
 
 class JobResult(BaseModel):
     job_id: str
