@@ -77,7 +77,7 @@ async def generate_node(state: PipelineState) -> dict:
         return {"user_stories": []}
 
     try:
-        llm = get_llm("gpt-oss-120b")
+        llm = get_llm()
 
         if llm is None:
             raise RuntimeError("LLM not initialized")

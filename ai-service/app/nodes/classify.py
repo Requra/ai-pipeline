@@ -145,7 +145,7 @@ async def classify_node(state: PipelineState) -> dict:
         return {"classified_requirements": []}
 
     try:
-        llm = get_llm("gpt-oss-120b")
+        llm = get_llm()
         if llm is None:
             raise RuntimeError("LLM not initialized")
 

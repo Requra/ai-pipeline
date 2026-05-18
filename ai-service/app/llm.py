@@ -1,9 +1,9 @@
 import os
 
-def get_llm(model_name: str = "gemini-2.5-flash"):
+def get_llm(model_name: str = "gpt-4o"):
     """
-    Retrieve the Gemini (Google GenAI) Language Model client.
-    Using gemini-2.5-flash as the standard free-tier model.
+    Retrieve the Language Model client.
+    Defaults to gpt-4o using the provided OpenAI key.
     """
     from langchain_google_genai import ChatGoogleGenerativeAI
     from langchain_openai import ChatOpenAI

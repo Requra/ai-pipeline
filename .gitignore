@@ -138,3 +138,9 @@ ai-service/.venv
 
 
 review
+
+openai_key.txt
+
+# Skills
+**/skills-lock.json
+**/skills/
