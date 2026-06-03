@@ -1,15 +1,25 @@
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Body
 from typing import Optional
 from app.graph.pipeline import build_pipeline
+from app.startup import run_startup_checks
+from contextlib import asynccontextmanager
 from pydantic import BaseModel
 import json
-from dotenv import load_dotenv
 import os
 
-# Load environment variables from .env
-load_dotenv()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Lifespan context manager for startup and shutdown events.
+    """
+    run_startup_checks()
+    yield
 
-app = FastAPI(title="AI Service Pipeline", description="LangGraph execution microservice")
+app = FastAPI(
+    title="AI Service Pipeline", 
+    description="LangGraph execution microservice",
+    lifespan=lifespan
+)
 
 pipeline = build_pipeline()
 

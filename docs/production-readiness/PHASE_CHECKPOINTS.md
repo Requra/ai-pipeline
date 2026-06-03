@@ -22,11 +22,14 @@ This document details the quality gates, pass/fail criteria, manual review check
 
 ## Phase 1 — Production Foundation and Dependency Safety
 
+* **Status**: **PASSED (Blockers Resolved)**
 * **Pass Criteria**: Python dependencies are pinned and build in docker. Startup key checks prevent server boot if any API keys are missing.
 * **Fail Criteria**: Code builds fail, or missing API keys trigger runtime exceptions during processing instead of boot failures.
 * **Manual Review Checklist**:
-  - [ ] Inspect the `Dockerfile` for `ffmpeg` and system utilities installation.
-  - [ ] Run the server without `GOOGLE_API_KEY` and verify it halts startup.
+  - [x] Inspect the `Dockerfile` for `ffmpeg` and system utilities installation.
+  - [x] Run the server without `OPENAI_API_KEY` when `LLM_PROVIDER=openai` (default) and verify it halts startup.
+  - [x] Run the server without `GOOGLE_API_KEY` when `LLM_PROVIDER=gemini` and verify it halts startup.
+  - [x] Run the server with invalid `LLM_PROVIDER` or `TRANSCRIBE_PROVIDER` and verify it halts startup.
 * **Rollback Criteria & Steps**:
   - **Trigger**: Docker build breaks or runtime initialization check blocks valid boot.
   - **Steps**: Revert dependency version updates in `pyproject.toml` and reset `Dockerfile` to baseline packages, but do not bypass key validation or allow unauthenticated execution paths.

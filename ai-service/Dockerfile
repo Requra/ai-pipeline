@@ -6,6 +6,10 @@ ENV PYTHONPATH=/app/ai-service
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1
 ENV PIP_NO_CACHE_DIR=1
 
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN pip install poetry
 
 COPY pyproject.toml poetry.lock* ./

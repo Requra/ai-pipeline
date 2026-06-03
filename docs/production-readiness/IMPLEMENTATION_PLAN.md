@@ -80,8 +80,14 @@ docker compose build ai-service
 ```
 
 ### Checkpoints
-- App fails to boot immediately if any of `GOOGLE_API_KEY`, `GROQ_API_KEY`, or `DEEPGRAM_API_KEY` is missing, showing a descriptive error.
-- Checkpoint approval obtained.
+- [x] App fails to boot immediately if any active provider keys (based on `LLM_PROVIDER` and `TRANSCRIBE_PROVIDER`) are missing, showing a descriptive error. (Verified via startup.py)
+- [x] Checkpoint approval obtained.
+
+### Actual Results (Phase 1)
+- Added dependencies: `pymupdf`, `python-docx`, `groq`, `httpx`, `pydub`.
+- Docker: Added `ffmpeg`.
+- Startup: Implemented `run_startup_checks` in `app/startup.py` supporting `LLM_PROVIDER` and `TRANSCRIBE_PROVIDER` validation.
+- Validation: Verified strict failure in production mode (for invalid providers or missing keys) and warnings in development mode.
 
 ### Rollback Criteria & Steps
 - **Trigger**: Docker build breaks or runtime initialization check blocks valid boot.
