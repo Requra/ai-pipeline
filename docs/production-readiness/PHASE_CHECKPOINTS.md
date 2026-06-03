@@ -38,11 +38,12 @@ This document details the quality gates, pass/fail criteria, manual review check
 
 ## Phase 2 — API Contract and State Schema Redesign
 
+* **Status**: **PASSED**
 * **Pass Criteria**: `PipelineState` is defined as a TypedDict with explicit reducers (`operator.add`) for lists. API request/response models use Pydantic type definitions.
 * **Fail Criteria**: State lists overwrite previous values due to missing reducers, or untyped dictionaries pass through interfaces.
 * **Manual Review Checklist**:
-  - [ ] Verify Pydantic validation handles malformed client payloads gracefully.
-  - [ ] Trace list inputs through mock state updates to verify no entries are dropped.
+  - [x] Verify Pydantic validation handles malformed client payloads gracefully.
+  - [x] Trace list inputs through mock state updates to verify no entries are dropped.
 * **Rollback Criteria & Steps**:
   - **Trigger**: Pydantic validations fail to compile or break baseline compatibility.
   - **Steps**: Disable advanced model validations but preserve grounding checks, keeping Pydantic type safety active for output structures. Do not return raw state dictionary objects.

@@ -1,5 +1,140 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List, Literal
+
+# --- Production Constants & Types ---
+
+RequirementType = Literal["FR", "NFR", "BR", "Constraint", "Assumption", "Open Question", "Out-of-Scope"]
+
+# --- Core Production Models ---
+
+class DocumentSource(BaseModel):
+    filename: str
+    file_size_bytes: int
+    mime_type: str
+    page_count: Optional[int] = None
+    sha256_hash: str
+
+class SourceChunk(BaseModel):
+    chunk_id: str
+    text: str
+    start_char: int
+    end_char: int
+    page_number: Optional[int] = None
+    speaker: Optional[str] = None
+    start_time_sec: Optional[float] = None
+    end_time_sec: Optional[float] = None
+
+class EvidenceSpan(BaseModel):
+    chunk_id: str
+    quote: str
+    page_number: Optional[int] = None
+    speaker: Optional[str] = None
+    timestamp: Optional[str] = None
+
+class ExtractedRequirement(BaseModel):
+    id: int
+    text: str
+    actor: Optional[str] = None
+    goal: Optional[str] = None
+    candidate_labels: List[RequirementType] = Field(default_factory=list)
+    confidence: float
+    evidence: List[EvidenceSpan] = Field(
+        default_factory=list,
+        description="Non-empty list of raw text quotes backing this requirement for grounding."
+    )
+    needs_review: bool = False
+    review_reason: Optional[str] = None
+
+class ClassifiedRequirement(ExtractedRequirement):
+    labels: List[RequirementType]
+    classification_confidence: float = 0.0
+
+class RequirementCoverage(BaseModel):
+    requirement_id: int
+    coverage_type: Literal[
+        "covered_by_story",
+        "split_into_stories",
+        "merged_into_story",
+        "attached_as_acceptance_criteria",
+        "non_story_requirement",
+        "needs_review"
+    ]
+    story_ids: List[str] = []
+    acceptance_criteria_ids: List[str] = []
+    reason: Optional[str] = None
+
+class AcceptanceCriterion(BaseModel):
+    id: str = ""
+    text: str
+    criterion_type: Literal["Given-When-Then", "plain"] = "plain"
+
+class UserStory(BaseModel):
+    id: str = ""
+    title: str
+    description: str = Field(description="As a <actor>, I want <goal>, so that <benefit>.")
+    acceptance_criteria: List[AcceptanceCriterion]
+    source_requirement_ids: List[int] = Field(
+        default_factory=list,
+        description="IDs of source requirements mapping to this story. Supports many-to-one, one-to-many, etc."
+    )
+    labels: List[RequirementType]
+    evidence_reference: List[EvidenceSpan] = Field(default_factory=list)
+
+    # Legacy Fields (Backwards Compatibility)
+    source_fr_id: Optional[int] = None
+
+class QualityIssue(BaseModel):
+    item_id: int
+    item_type: Literal["requirement", "story", "coverage"]
+    severity: Literal["low", "medium", "high"]
+    rule_violated: str
+    details: str
+
+class PipelineWarning(BaseModel):
+    node_name: str
+    code: str
+    message: str
+
+class StructuredSummary(BaseModel):
+    executive_summary: str
+    key_decisions: List[str]
+    open_questions: List[str]
+    risks: List[str]
+    assumptions: List[str]
+    action_items: List[str]
+    stakeholders: List[str]
+    scope: List[str]
+    out_of_scope: List[str]
+
+class ExportRow(BaseModel):
+    requirement_id: int
+    requirement_text: str
+    requirement_type: str
+    confidence: float
+    user_story_ids: str              # Comma-separated list of Story IDs
+    user_story_titles: str           # Semicolon-separated titles
+    coverage_type: str               # covered_by_story, non_story_requirement, etc.
+    acceptance_criteria: str         # Newline separated criteria
+    source_quote: str                # Backing quote
+    needs_review: bool
+    review_reason: str
+
+class JobResult(BaseModel):
+    job_id: str
+    status: Literal["success", "partial", "rejected", "error", "needs_review"]
+    is_useful: bool
+    relevance_score: float
+    user_stories: List[UserStory]
+    requirements: List[ClassifiedRequirement]
+    requirement_coverages: List[RequirementCoverage]
+    summary: Optional[StructuredSummary] = None
+    export_rows: List[ExportRow]
+    quality_issues: List[QualityIssue]
+    warnings: List[PipelineWarning]
+    error_message: Optional[str] = None
+    processing_time_ms: int
+
+# --- Legacy Models (Backwards Compatibility) ---
 
 class FunctionalRequirement(BaseModel):
     id: int
@@ -7,27 +142,3 @@ class FunctionalRequirement(BaseModel):
     actor: Optional[str] = None
     goal: Optional[str] = None
     source_hint: str = ""
-
-class ClassifiedRequirement(FunctionalRequirement):
-    labels: List[Literal["FR", "NFR", "BR"]]
-    confidence: float
-
-class AcceptanceCriterion(BaseModel):
-    text: str
-    criterion_type: Literal["Given-When-Then", "plain"] = "plain"
-
-class UserStory(BaseModel):
-    title: str
-    description: str
-    acceptance_criteria: List[AcceptanceCriterion]
-    source_fr_id: int
-    labels: List[Literal["FR", "NFR", "BR"]]
-
-class JobResult(BaseModel):
-    job_id: str
-    status: Literal["success", "partial", "error"]
-    user_stories: List[UserStory]
-    requirements: List[ClassifiedRequirement]
-    summary: str
-    error_message: Optional[str] = None
-    processing_time_ms: int

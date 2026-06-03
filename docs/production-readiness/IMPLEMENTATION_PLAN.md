@@ -129,9 +129,15 @@ poetry run pytest tests/nodes/test_format.py
 ```
 
 ### Checkpoints
-- Verification of Pydantic object instantiation.
-- Reducers operate correctly in mock merges.
-- Checkpoint approval obtained.
+- [x] Verification of Pydantic object instantiation. (Verified via items.py)
+- [x] Reducers operate correctly in mock merges. (Verified via pipeline_state.py reducers)
+- [x] Checkpoint approval obtained.
+
+### Actual Results (Phase 2)
+- **Schemas**: Implemented 13 target Pydantic models in `items.py`, including `ExtractedRequirement`, `EvidenceSpan`, and `StructuredSummary`.
+- **PipelineState**: Updated with `operator.add` reducers for all list fields to support parallel processing.
+- **Compatibility**: Maintained `FunctionalRequirement` and added defaults to new models to preserve compatibility with existing nodes and tests.
+- **Validation**: Verified that existing tests in `test_classify.py` and `test_generate.py` pass with the new schema definitions.
 
 ### Rollback Criteria & Steps
 - **Trigger**: Pydantic validations fail to compile or break baseline compatibility.
