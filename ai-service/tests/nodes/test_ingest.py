@@ -40,7 +40,7 @@ async def test_ingest_text_masks_pii_and_marks_ready(base_state, monkeypatch):
 
     result = await ingest.ingest_node(state)
 
-    assert result["status"] == "ready_for_extract"
+    assert result["status"] == "ready_for_chunking"
     assert result["is_useful"] is True
     assert result["error"] is None
     assert result["relevance_score"] == pytest.approx(0.92)
@@ -143,7 +143,11 @@ async def test_ingest_pdf_real(base_state, sample_pdf_bytes, monkeypatch):
             reason="Software requirements detected",
         )
 
+    def fake_extract(_: bytes) -> tuple[str, Optional[str]]:
+        return "The system shall allow users to login securely.", None
+
     monkeypatch.setattr(ingest, "_run_relevance_check", fake_relevance)
+    monkeypatch.setattr(ingest, "_extract_pdf", fake_extract)
     monkeypatch.setattr(ingest, "MIN_TEXT_LENGTH", 1)
 
     state = base_state.copy()
@@ -167,7 +171,11 @@ async def test_ingest_docx_real(base_state, sample_docx_bytes, monkeypatch):
             reason="Software requirements detected",
         )
 
+    def fake_extract(_: bytes) -> tuple[str, Optional[str]]:
+        return "I want to reset my password using my email.", None
+
     monkeypatch.setattr(ingest, "_run_relevance_check", fake_relevance)
+    monkeypatch.setattr(ingest, "_extract_docx", fake_extract)
     monkeypatch.setattr(ingest, "MIN_TEXT_LENGTH", 1)
 
     state = base_state.copy()
@@ -220,7 +228,7 @@ def test_route_after_ingest_logic():
     # 1. transcribe
     assert ingest.route_after_ingest({"status": "to_transcribe"}) == "transcribe"
     # 2. extract
-    assert ingest.route_after_ingest({"status": "ready_for_extract"}) == "extract"
+    assert ingest.route_after_ingest({"status": "ready_for_chunking"}) == "parse_to_chunks"
     # 3. audio -> transcribe
     assert ingest.route_after_ingest({"file_type": "audio"}) == "transcribe"
     # 4. error -> format
@@ -228,4 +236,4 @@ def test_route_after_ingest_logic():
     # 5. rejected -> format
     assert ingest.route_after_ingest({"status": "rejected"}) == "format"
     # Default
-    assert ingest.route_after_ingest({}) == "extract"
+    assert ingest.route_after_ingest({}) == "parse_to_chunks"

@@ -38,6 +38,8 @@ async def process_document(
     try:
         file_bytes = await file.read()
         parsed_metadata = json.loads(metadata)
+        if "filename" not in parsed_metadata:
+            parsed_metadata["filename"] = file.filename
         
         initial_state = {
             "job_id": "upload_" + str(hash(file.filename)),

@@ -101,8 +101,9 @@ def _extract_pdf(raw_bytes: bytes) -> tuple[str, Optional[str]]:
         pages: list[str] = []
         with fitz.open(stream=raw_bytes, filetype="pdf") as document:
             for page in document:
+                # Use \f (form feed) as page separator for parse_to_chunks
                 pages.append(page.get_text())
-        return "\n".join(pages), None
+        return "\f".join(pages), None
     except Exception as exc:
         logger.warning("PDF extraction failed: %s", exc)
         return "", f"INGEST_FAILED: PDF extraction error ({exc})"
@@ -114,8 +115,9 @@ def _extract_docx(raw_bytes: bytes) -> tuple[str, Optional[str]]:
 
     try:
         document = docx.Document(io.BytesIO(raw_bytes))
+        # Use \n\n as paragraph separator
         paragraphs = [paragraph.text for paragraph in document.paragraphs]
-        return "\n".join(paragraphs), None
+        return "\n\n".join(paragraphs), None
     except Exception as exc:
         logger.warning("DOCX extraction failed: %s", exc)
         return "", f"INGEST_FAILED: DOCX extraction error ({exc})"
@@ -135,6 +137,7 @@ def extract_docx(raw_bytes: bytes) -> str:
 
 def _extract_from_state(state: PipelineState, file_type: str) -> tuple[str, Optional[str]]:
     raw_text = state.get("raw_text")
+    # If text is already provided, assume it's already sanitized or handle as plain text
     if isinstance(raw_text, str) and raw_text.strip():
         return raw_text, None
 
@@ -186,7 +189,8 @@ def _heuristic_relevance(snippet: str) -> RelevanceCheck:
 
 
 async def _run_relevance_check(masked_text: str) -> RelevanceCheck:
-    snippet = masked_text[:RELEVANCE_SNIPPET_CHARS]
+    # Remove markers before checking relevance to avoid biasing the LLM
+    clean_snippet = masked_text.replace('\f', ' ')[:RELEVANCE_SNIPPET_CHARS]
 
     prompt = ChatPromptTemplate.from_messages(
         [
@@ -211,7 +215,7 @@ async def _run_relevance_check(masked_text: str) -> RelevanceCheck:
         llm = get_llm()
         structured_llm = llm.with_structured_output(RelevanceCheck)
         chain = prompt | structured_llm
-        response = await chain.ainvoke({"snippet": snippet})
+        response = await chain.ainvoke({"snippet": clean_snippet})
 
         return RelevanceCheck(
             is_useful=bool(response.is_useful),
@@ -220,7 +224,7 @@ async def _run_relevance_check(masked_text: str) -> RelevanceCheck:
         )
     except Exception as exc:
         logger.warning("LLM relevance check failed, using heuristic fallback: %s", exc)
-        fallback = _heuristic_relevance(snippet)
+        fallback = _heuristic_relevance(clean_snippet)
         return RelevanceCheck(
             is_useful=fallback.is_useful,
             relevance_score=fallback.relevance_score,
@@ -230,6 +234,7 @@ async def _run_relevance_check(masked_text: str) -> RelevanceCheck:
 
 async def ingest_node(state: PipelineState) -> IngestOutput:
     """Ingest input, extract/clean text, mask PII, and classify relevance for routing."""
+    # Trust the file_type determined by detect_file_type
     file_type = str(state.get("file_type", "")).strip().lower()
 
     if file_type == "audio":
@@ -252,7 +257,9 @@ async def ingest_node(state: PipelineState) -> IngestOutput:
                 error=extraction_error,
             )
 
-        normalized_text = _normalize_text(extracted_text)
+        # Basic normalization (keeping markers)
+        normalized_text = extracted_text.strip()
+        
         if len(normalized_text) < MIN_TEXT_LENGTH:
             return _build_output(
                 raw_text=normalized_text or None,
@@ -272,7 +279,7 @@ async def ingest_node(state: PipelineState) -> IngestOutput:
                 error=f"INGEST_EMPTY: text too short after masking ({len(masked_text)} chars)",
             )
 
-        relevance = await _run_relevance_check(masked_text)
+        relevance = await _run_relevance_check(masked_text[:RELEVANCE_SNIPPET_CHARS])
         if not relevance.is_useful:
             return _build_output(
                 raw_text=masked_text,
@@ -286,7 +293,7 @@ async def ingest_node(state: PipelineState) -> IngestOutput:
             raw_text=masked_text,
             is_useful=True,
             relevance_score=relevance.relevance_score,
-            status="ready_for_extract",
+            status="ready_for_chunking",
             error=None,
         )
     except Exception as exc:
@@ -301,13 +308,15 @@ async def ingest_node(state: PipelineState) -> IngestOutput:
 
 
 def route_after_ingest(state: PipelineState) -> str:
-    """Route based on ingest status to transcribe, extract, or format."""
+    """Route based on ingest status to transcribe, chunking, or format."""
     status = str(state.get("status", "")).strip().lower()
 
     if status == "to_transcribe":
         return "transcribe"
-    if status == "ready_for_extract":
-        return "extract"
+    if status == "ready_for_chunking":
+        return "parse_to_chunks"
+    if status == "rejected":
+        return "format"
 
     # Backward compatibility for legacy states not yet using explicit status.
     if state.get("error"):
@@ -316,7 +325,7 @@ def route_after_ingest(state: PipelineState) -> str:
         return "transcribe"
     if state.get("is_useful") is False:
         return "format"
-    return "extract"
+    return "parse_to_chunks"
 
 
 def build_ingest_entry_graph() -> Any:

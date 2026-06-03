@@ -181,9 +181,16 @@ poetry run pytest tests/nodes/test_ingest.py
 ```
 
 ### Checkpoints
-- Text files chunked accurately.
-- PDF pages mapped correctly to chunks.
-- Checkpoint approval obtained.
+- [x] Text files chunked accurately. (Verified via test_phase3.py)
+- [x] PDF pages mapped correctly to chunks. (Verified via test_phase3.py)
+- [x] Checkpoint approval obtained.
+
+### Actual Results (Phase 3)
+- **Nodes**: Added `detect_file_type` and `parse_to_chunks`. Refactored `ingest` to handle sanitization and PII masking.
+- **Detection**: Implemented pure-Python magic byte detection for PDF, DOCX, Text, and Audio (MP3, WAV, OGG).
+- **Chunking**: Implemented page-aware chunking for PDF (using `\f` markers) and overlapping sliding window (3000 chars) for text/DOCX.
+- **Graph**: Updated `pipeline.py` to route through the new detection and parsing sequence.
+- **Validation**: Verified that all ingest tests and new Phase 3 tests pass.
 
 ### Rollback Criteria & Steps
 - **Trigger**: Binary document stream parsing causes persistent exceptions.
