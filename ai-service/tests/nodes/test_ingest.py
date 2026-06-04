@@ -1,4 +1,5 @@
 import pytest
+from typing import Optional
 
 import app.nodes.ingest as ingest
 

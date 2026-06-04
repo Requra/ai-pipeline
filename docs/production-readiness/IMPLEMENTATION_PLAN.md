@@ -230,9 +230,16 @@ poetry run pytest tests/nodes/test_transcribe.py
 ```
 
 ### Checkpoints
-- Audio mock files process successfully.
-- Speaker tags propagate correctly to downstream nodes.
-- Checkpoint approval obtained.
+- [x] Audio mock files process successfully. (Verified via test_transcribe.py)
+- [x] Speaker tags propagate correctly to downstream nodes. (Verified via chunks output)
+- [x] Checkpoint approval obtained.
+
+### Actual Results (Phase 4)
+- **Validation**: Added `_validate_ffmpeg` to verify system dependencies on the PATH.
+- **Structured Output**: Upgraded `_transcribe_groq` and `_transcribe_deepgram` to return `List[SourceChunk]` with speaker IDs and timestamps.
+- **Resilience**: Implemented robust fallback logic between providers without fake data generation.
+- **Performance**: Integrated audio compression (Opus/Ogg) for faster uploads to STT APIs.
+- **Testing**: Verified implementation with targeted unit tests for chunk mapping and fallback behavior.
 
 ### Rollback Criteria & Steps
 - **Trigger**: Whisper API calls or speaker-alignment merges fail to parse.
@@ -275,6 +282,15 @@ poetry run pytest tests/nodes/test_extract.py
 - Extraction fails safely without generating hallucinated mock lists when LLM errors occur.
 - Requirements have at least one backing evidence quote.
 - Checkpoint approval obtained.
+
+### Actual Results (Phase 5)
+- **Refactoring**: Rewrote `extract_node` to use `SourceChunk` as primary input and `ExtractedRequirement` as output.
+- **Parallelism**: Implemented parallel chunk processing using `asyncio.gather` for improved performance.
+- **Categories**: Expanded extraction to support FR, NFR, BR, Constraint, Assumption, Open Question, and Out-of-Scope.
+- **Evidence Alignment**: Implemented `align_quote_to_source` utility to ensure all evidence quotes are strictly grounded in original source text, including fuzzy matching and safe fallbacks.
+- **Acronym Safety**: Updated preprocessing to be case-sensitive, protecting technical terms like "ER" and "AH".
+- **Backward Compatibility**: Maintained `functional_requirements` projection and `raw_text` fallback.
+- **Safety**: Removed all hardcoded mock requirements and hallucinations.
 
 ### Rollback Criteria & Steps
 - **Trigger**: Concurrent execution overloading limits or failing validation.

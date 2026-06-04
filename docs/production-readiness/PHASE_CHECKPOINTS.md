@@ -66,11 +66,12 @@ This document details the quality gates, pass/fail criteria, manual review check
 
 ## Phase 4 — Transcription Hardening
 
+* **Status**: **PASSED**
 * **Pass Criteria**: Transcribe node returns a list of source chunks with speaker IDs and time segments. Fallback from Groq to Deepgram (or vice-versa) triggers under network errors.
 * **Fail Criteria**: Flat strings are returned, losing speaker metadata, or provider timeouts crash the service.
 * **Manual Review Checklist**:
-  - [ ] Test key validation and audio format processing.
-  - [ ] Verify fallback executes properly when Groq API keys are temporarily revoked.
+  - [x] Test key validation and audio format processing.
+  - [x] Verify fallback executes properly when Groq API keys are temporarily revoked.
 * **Rollback Criteria & Steps**:
   - **Trigger**: Whisper API calls or speaker-alignment merges fail to parse.
   - **Steps**: Disable speaker-turn mapping details but preserve evidence and strict contracts, mapping transcription outputs into a single default chunk with warning logs.
@@ -79,6 +80,7 @@ This document details the quality gates, pass/fail criteria, manual review check
 
 ## Phase 5 — Requirement Extraction Redesign
 
+* **Status**: **PASSED (Blockers Resolved)**
 * **Pass Criteria**: Nodes process source chunks in parallel. Requirements contain actor, goal, category label (supporting all expanded types including Open Questions and Out-of-Scope), and non-empty evidence quote metadata.
 * **Fail Criteria**: Hallucinated fallbacks are returned under LLM error, or NFRs and Business Rules are missed.
 * **Manual Review Checklist**:

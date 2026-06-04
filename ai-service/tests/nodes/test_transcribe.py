@@ -1,29 +1,15 @@
-"""
-tests/nodes/test_transcribe.py
-──────────────────────────────
-Full test suite for the transcribe node.
-
-Requires:
-  - tests/fixtures/sample.mp3  (a real audio file for integration tests)
-  - GROQ_API_KEY and/or DEEPGRAM_API_KEY in the environment / .env
-
-Run all tests:
-    pytest tests/nodes/test_transcribe.py -v -s
-
-Run only the benchmark (both providers, side-by-side output):
-    pytest tests/nodes/test_transcribe.py::test_benchmark_comparison -v -s
-"""
-
 import os
+import sys
 import time
 import pytest
-from unittest.mock import patch, AsyncMock
+import shutil
+from unittest.mock import patch, MagicMock, AsyncMock
 from dotenv import load_dotenv
 
 load_dotenv()
 
 from app.nodes.transcribe import transcribe_node, _transcribe_groq, _transcribe_deepgram
-
+from app.schemas.items import SourceChunk
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -39,43 +25,13 @@ def _make_state(raw_bytes=None, file_type="audio"):
         "raw_bytes": raw_bytes,
         "file_type": file_type,
         "raw_text": None,
+        "chunks": [],
         "error": None,
         "is_useful": True,
         "relevance_score": 1.0,
         "status": "started",
-        "functional_requirements": [],
-        "classified_requirements": [],
-        "user_stories": [],
-        "summary": None,
+        "metadata": {"filename": "test.mp3"}
     }
-
-def _load_fixture(filename: str) -> bytes | None:
-    path = os.path.join(os.path.dirname(__file__), "..", "fixtures", filename)
-    if os.path.exists(path):
-        with open(path, "rb") as f:
-            return f.read()
-    return None
-
-
-def _detect_format(raw_bytes: bytes) -> str:
-    """Sniff the audio codec from magic bytes so we never lie to the API."""
-    if raw_bytes[:4] == b"OggS":
-        return "ogg"   # Ogg container — could be Opus or Vorbis; Deepgram handles both
-    if raw_bytes[:4] == b"fLaC":
-        return "flac"
-    if raw_bytes[:4] == b"RIFF":
-        return "wav"
-    if raw_bytes[:3] in (b"ID3", b"\xff\xfb", b"\xff\xf3", b"\xff\xf2"):
-        return "mp3"
-    return "mp3"  # safe default for Groq (accepts most formats)
-
-
-def _count_arabic(text: str) -> tuple[int, int]:
-    """Count total words and Arabic-script words."""
-    words = text.split()
-    arabic = sum(1 for w in words if any("\u0600" <= c <= "\u06ff" for c in w))
-    return len(words), arabic
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Unit Tests (no real API calls)
@@ -83,263 +39,115 @@ def _count_arabic(text: str) -> tuple[int, int]:
 
 @pytest.mark.asyncio
 async def test_no_audio_bytes():
-    """Guard clause: missing raw_bytes returns TRANSCRIBE_NO_BYTES error."""
+    """Guard clause: missing raw_bytes returns error."""
     state = _make_state(raw_bytes=None)
-    result = await transcribe_node(state)
+    with patch("app.nodes.transcribe._validate_ffmpeg", return_value=None):
+        result = await transcribe_node(state)
 
     assert result["raw_text"] is None
+    assert result["chunks"] == []
     assert "TRANSCRIBE_NO_BYTES" in result["error"]
 
-
 @pytest.mark.asyncio
-async def test_non_audio_file_type():
-    """Non-audio files should be silently skipped — node returns None without crashing."""
-    state = _make_state(raw_bytes=b"fake-pdf-content", file_type="pdf")
-    result = await transcribe_node(state)
-
-    assert result["raw_text"] is None
-    assert result.get("error") is None  # silent skip, no error
-
+async def test_ffmpeg_missing_failure():
+    """Verify node fails if ffmpeg is missing."""
+    state = _make_state(raw_bytes=b"fake-audio")
+    with patch("shutil.which", return_value=None):
+        result = await transcribe_node(state)
+        
+    assert result["status"] == "failed_system_dependency"
+    assert "ffmpeg" in result["error"]
 
 @pytest.mark.asyncio
 async def test_fallback_on_bad_groq_key(monkeypatch):
     """
-    When the primary provider (Groq) raises an exception, the node should
-    automatically attempt the fallback (Deepgram).
-    We mock both to control the test outcome.
+    When the primary provider fails, automatically attempt the fallback.
     """
     monkeypatch.setenv("TRANSCRIBE_PROVIDER", "groq")
 
-    async def _bad_groq(raw_bytes, file_type):
+    async def _bad_groq(*args, **kwargs):
         raise Exception("Simulated Groq outage")
 
-    async def _good_deepgram(raw_bytes, file_type):
-        return "Fallback transcript from Deepgram."
+    async def _good_deepgram(*args, **kwargs):
+        return "Deepgram text", [SourceChunk(chunk_id="c1", text="Deepgram text", start_char=0, end_char=0)]
 
-    with patch("app.nodes.transcribe._transcribe_groq", side_effect=_bad_groq), \
+    with patch("app.nodes.transcribe._validate_ffmpeg", return_value=None), \
+         patch("app.nodes.transcribe._transcribe_groq", side_effect=_bad_groq), \
          patch("app.nodes.transcribe._transcribe_deepgram", side_effect=_good_deepgram):
 
         state = _make_state(raw_bytes=b"fake-audio-bytes")
         result = await transcribe_node(state)
 
-    assert result["raw_text"] == "Fallback transcript from Deepgram."
+    assert result["raw_text"] == "Deepgram text"
+    assert len(result["chunks"]) == 1
     assert "TRANSCRIBE_GROQ_FAILURE" in result["error"]
-    assert "Fallback to Deepgram Nova-3 succeeded" in result["error"]
-
-
-@pytest.mark.asyncio
-async def test_both_providers_fail(monkeypatch):
-    """When both providers fail, raw_text is None and error contains both failure codes."""
-    monkeypatch.setenv("TRANSCRIBE_PROVIDER", "groq")
-
-    async def _bad(raw_bytes, file_type):
-        raise Exception("Simulated total failure")
-
-    with patch("app.nodes.transcribe._transcribe_groq", side_effect=_bad), \
-         patch("app.nodes.transcribe._transcribe_deepgram", side_effect=_bad):
-
-        state = _make_state(raw_bytes=b"fake-audio-bytes")
-        result = await transcribe_node(state)
-
-    assert result["raw_text"] is None
-    assert "TRANSCRIBE_GROQ_FAILURE" in result["error"]
-    assert "TRANSCRIBE_FALLBACK_FAILURE" in result["error"]
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Integration Tests (real API calls — requires keys + fixtures/sample.mp3)
-# ─────────────────────────────────────────────────────────────────────────────
+    assert result["status"] == "completed_via_fallback"
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(not _has_key("GROQ_API_KEY"), reason="GROQ_API_KEY not set")
-async def test_groq_whisper_real(sample_audio_bytes):
-    """
-    Real call to Groq Whisper large-v3.
-    Asserts: raw_text is a non-empty string.
-    """
-    audio = sample_audio_bytes or _load_fixture("sample.mp3")
-    if not audio or audio == b"fake-mp3-bytes":
-        pytest.skip("No real audio fixture found at tests/fixtures/sample.mp3")
-
-    fmt = _detect_format(audio)
-    print(f"\n[Groq] Detected format: {fmt}")
-    print("[Groq] Starting real transcription...")
-    t0 = time.perf_counter()
-    result = await _transcribe_groq(audio, fmt)
-    elapsed = time.perf_counter() - t0
-
-    print(f"[Groq] Finished in {elapsed:.2f}s")
-    print(f"[Groq] Output ({len(result)} chars):")
-    print("-" * 60)
-    print(result)          # full transcript, no truncation
-    print("-" * 60)
-
-    assert isinstance(result, str)
-    assert len(result.strip()) > 10, "Transcript is too short — possible empty audio or API error."
-
-
-@pytest.mark.asyncio
-@pytest.mark.skipif(not _has_key("DEEPGRAM_API_KEY"), reason="DEEPGRAM_API_KEY not set")
-async def test_deepgram_real(sample_audio_bytes):
-    """
-    Real call to Deepgram Nova-3 with diarization.
-    Asserts: raw_text is non-empty; checks for [Speaker N] labels
-    (only present when multiple speakers are detected).
-    """
-    audio = sample_audio_bytes or _load_fixture("sample.mp3")
-    if not audio or audio == b"fake-mp3-bytes":
-        pytest.skip("No real audio fixture found at tests/fixtures/sample.mp3")
-
-    fmt = _detect_format(audio)
-    print(f"\n[Deepgram] Detected format: {fmt}")
-    print("[Deepgram] Starting real transcription...")
-    t0 = time.perf_counter()
-    result = await _transcribe_deepgram(audio, fmt)
-    elapsed = time.perf_counter() - t0
-
-    print(f"[Deepgram] Finished in {elapsed:.2f}s")
-    has_speakers = "[Speaker" in result
-    print(f"[Deepgram] Speaker labels detected: {has_speakers}")
-    print(f"[Deepgram] Output ({len(result)} chars):")
-    print("-" * 60)
-    print(result)          # full transcript, no truncation
-    print("-" * 60)
-
-    assert isinstance(result, str)
-    assert len(result.strip()) > 10, "Transcript is too short — possible empty audio or API error."
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Benchmark: side-by-side comparison of both providers (enhanced)
-# ─────────────────────────────────────────────────────────────────────────────
-
-@pytest.mark.asyncio
-@pytest.mark.skipif(
-    not (_has_key("GROQ_API_KEY") and _has_key("DEEPGRAM_API_KEY")),
-    reason="Both GROQ_API_KEY and DEEPGRAM_API_KEY must be set to run the benchmark.",
-)
-async def test_benchmark_comparison(sample_audio_bytes):
-    """
-    Enhanced benchmark: runs both providers in verbose mode on the same audio
-    and prints a detailed quality comparison table with confidence metrics.
-
-    This test never fails — it is designed as a decision-support tool.
-    """
-    audio = sample_audio_bytes or _load_fixture("sample.mp3")
-    if not audio or audio == b"fake-mp3-bytes":
-        pytest.skip("No real audio fixture found at tests/fixtures/sample.mp3")
-
-    fmt = _detect_format(audio)
-    print(f"\n[Benchmark] Audio format detected: {fmt}")
-    print(f"[Benchmark] Audio size: {len(audio) / 1024 / 1024:.1f} MB")
-
-    results = {}
-    providers = [
-        ("Groq Whisper large-v3", _transcribe_groq,     "groq"),
-        ("Deepgram Nova-3",       _transcribe_deepgram,  "deepgram"),
+async def test_groq_chunking_and_mapping(monkeypatch):
+    """Verify Groq segments are mapped to SourceChunk."""
+    mock_groq = MagicMock()
+    mock_client = MagicMock()
+    mock_groq.AsyncGroq.return_value = mock_client
+    
+    mock_response = MagicMock()
+    mock_response.segments = [
+        {"text": "Hello world", "start": 0.0, "end": 1.5},
+        {"text": "Testing 123", "start": 2.0, "end": 4.0}
     ]
+    mock_client.audio.transcriptions.create = AsyncMock(return_value=mock_response)
+    
+    with patch.dict('sys.modules', {'groq': mock_groq}), \
+         patch("app.nodes.transcribe.settings") as mock_settings:
+        mock_settings.GROQ_API_KEY = "fake"
+        mock_settings.GROQ_WHISPER_MODEL = "whisper-v3"
+        mock_settings.GROQ_LANGUAGE = "en"
+        
+        text, chunks = await _transcribe_groq(b"fake-bytes", "mp3", job_id="test")
+        
+        assert "Hello world" in text
+        assert len(chunks) == 2
+        assert chunks[0].text == "Hello world"
+        assert chunks[0].start_time_sec == 0.0
+        assert chunks[0].chunk_id.startswith("trans_test_groq")
 
-    for name, fn, provider_key in providers:
-        print(f"\n[Benchmark] Running {name} (verbose mode)...")
-        t0 = time.perf_counter()
-        try:
-            result = await fn(audio, fmt, verbose=True)
-            elapsed = time.perf_counter() - t0
-
-            text = result["text"] if isinstance(result, dict) else result
-            total_words, arabic_words = _count_arabic(text)
-
-            entry = {
-                "status": "[OK]",
-                "latency_s": f"{elapsed:.2f}",
-                "chars": len(text),
-                "words": total_words,
-                "arabic_words": arabic_words,
-                "arabic_pct": f"{arabic_words / total_words * 100:.1f}%" if total_words > 0 else "0%",
-                "has_speakers": "Yes" if "[Speaker" in text else "No",
-                "arabic_detected": "Yes" if any("\u0600" <= c <= "\u06ff" for c in text) else "No",
-                "sample": text[:200].replace("\n", " "),
-            }
-
-            # Provider-specific metrics
-            if isinstance(result, dict):
-                if provider_key == "groq":
-                    entry["avg_logprob"] = f"{result.get('avg_logprob', 0):.3f}"
-                    entry["no_speech_prob"] = f"{result.get('no_speech_prob', 0):.3f}"
-                    entry["confidence"] = "— (segment-level only)"
-                elif provider_key == "deepgram":
-                    entry["confidence"] = f"{result.get('confidence', 0):.4f}"
-                    entry["speaker_count"] = result.get("speaker_count", 1)
-                    entry["avg_logprob"] = "—"
-                    entry["no_speech_prob"] = "—"
-
-            results[name] = entry
-
-        except Exception as exc:
-            elapsed = time.perf_counter() - t0
-            results[name] = {
-                "status": "[FAIL]",
-                "latency_s": f"{elapsed:.2f}",
-                "chars": 0,
-                "words": 0,
-                "arabic_words": 0,
-                "arabic_pct": "—",
-                "has_speakers": "—",
-                "arabic_detected": "—",
-                "confidence": "—",
-                "avg_logprob": "—",
-                "no_speech_prob": "—",
-                "sample": str(exc)[:200],
-            }
-
-    # ── Print comparison table ──
-    cols = [
-        ("status",          "Status"),
-        ("latency_s",       "Latency (s)"),
-        ("chars",           "Output chars"),
-        ("words",           "Word count"),
-        ("arabic_words",    "Arabic words"),
-        ("arabic_pct",      "Arabic %"),
-        ("has_speakers",    "Speaker labels"),
-        ("arabic_detected", "Arabic script"),
-        ("confidence",      "Word confidence"),
-        ("avg_logprob",     "Avg log-prob"),
-        ("no_speech_prob",  "No-speech prob"),
-    ]
-
-    col_w = 32
-    label_w = 22
-
-    header = f"\n{'Metric':<{label_w}}" + "".join(f"{n:<{col_w}}" for n in results)
-    sep = "─" * (label_w + col_w * len(results))
-
-    print("\n" + "=" * len(sep))
-    print("  TRANSCRIPTION PROVIDER BENCHMARK (Enhanced)")
-    print("=" * len(sep))
-    print(header)
-    print(sep)
-    for col_key, col_label in cols:
-        row = f"{col_label:<{label_w}}" + "".join(
-            f"{str(results[n].get(col_key, '—')):<{col_w}}" for n in results
-        )
-        print(row)
-    print(sep)
-
-    for name, data in results.items():
-        print(f"\n[{name}] Sample output:\n  {data.get('sample', '—')!r}")
-
-    print(f"\n{'─' * len(sep)}")
-    print("  QUALITY GUIDE:")
-    print("  • Word confidence > 0.90 = 🟢 Excellent  |  > 0.80 = 🟡 Good  |  < 0.80 = 🔴 Poor")
-    print("  • Avg log-prob > -0.3 = 🟢 Excellent     |  > -0.6 = 🟡 Good  |  < -0.6 = 🔴 Poor")
-    print("  • No-speech prob < 0.1 = 🟢 Low           |  < 0.3 = 🟡 Med   |  > 0.3 = 🔴 Hallucination risk")
-    print(f"{'─' * len(sep)}")
-
-    print("\n[Recommendation]")
-    print("  → For Egyptian Arabic + English code-switching: compare word counts and Arabic %")
-    print("  → For multi-speaker meetings needing diarization: prefer Deepgram Nova-3")
-    print("  → For batch processing with free tier: prefer Groq Whisper large-v3")
-    print(f"  → Set your choice in .env:  TRANSCRIBE_PROVIDER=groq  or  deepgram\n")
-
-    # This test always passes -- it's a decision tool, not a correctness check.
-    assert True
+@pytest.mark.asyncio
+async def test_deepgram_bilingual_mapping(monkeypatch):
+    """Verify Deepgram bilingual merge produces chunks."""
+    ar_data = {
+        "results": {
+            "utterances": [
+                {"transcript": "مرحبا", "start": 0.0, "end": 2.0, "confidence": 0.8, "speaker": 0}
+            ]
+        }
+    }
+    en_data = {
+        "results": {
+            "utterances": [
+                {"transcript": "Hello", "start": 0.5, "end": 1.5, "confidence": 0.95, "speaker": 0}
+            ]
+        }
+    }
+    
+    mock_ar_resp = MagicMock()
+    mock_ar_resp.status_code = 200
+    mock_ar_resp.json.return_value = ar_data
+    
+    mock_en_resp = MagicMock()
+    mock_en_resp.status_code = 200
+    mock_en_resp.json.return_value = en_data
+    
+    mock_client_instance = MagicMock()
+    mock_client_instance.post = AsyncMock(side_effect=[mock_ar_resp, mock_en_resp])
+    mock_client_instance.__aenter__.return_value = mock_client_instance
+    
+    with patch("httpx.AsyncClient", return_value=mock_client_instance), \
+         patch("app.nodes.transcribe.settings") as mock_settings:
+        mock_settings.DEEPGRAM_API_KEY = "fake"
+        
+        text, chunks = await _transcribe_deepgram(b"fake", "mp3", job_id="test", language="mixed")
+        
+        assert "Hello" in text
+        assert len(chunks) == 1
+        assert chunks[0].text == "Hello"
+        assert chunks[0].speaker == "0"

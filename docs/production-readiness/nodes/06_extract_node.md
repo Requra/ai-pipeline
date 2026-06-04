@@ -2,13 +2,14 @@
 
 ## Current Status
 - Implemented inside `app/nodes/extract.py`.
-- Uses Gemini to extract a list of functional requirements.
-- Uses a hardcoded mock fallback if the LLM fails.
+- Processes `SourceChunk` inputs in parallel via `asyncio.gather`.
+- Extracts 7 categories: FR, NFR, BR, Constraint, Assumption, Open Question, and Out-of-Scope.
+- Enforces strict source-aligned evidence grounding via `align_quote_to_source` helper.
+- Projects legacy `functional_requirements` for backward compatibility.
+- Safe failure mode: returns empty lists and state warnings instead of hallucinated fallbacks.
 
 ## Current Problems
-- Focuses only on functional requirements (FRs), completely missing Non-Functional Requirements (NFRs), Business Rules (BRs), constraints, assumptions, open questions, and out-of-scope declarations.
-- Using hardcoded fallbacks in production risks outputting fake requirements, which is strictly prohibited.
-- Naively outputs `classified_requirements` instead of raw `extracted_requirements`, blurring extraction and classification steps.
+- None. (Phase 5 redesign completed and verified).
 
 ## Production Target
 - Extract multiple requirements (FR, NFR, BR, Constraints, Assumptions, Open Questions, Out-of-Scope) chunk-by-chunk in parallel.

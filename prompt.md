@@ -1,130 +1,105 @@
-Phase 2 is approved, so the next prompt is **Phase 3 implementation**.
+Phase 5 is **NO-GO for Phase 6** right now.
 
-````md id="phase3-prompt"
-You are implementing Phase 3 only for Requra.AI.
+The blockers are real:
+
+```txt id="p5-blockers"
+1. preprocess_text can damage technical terms like ER diagram / AH header
+2. EvidenceSpan.quote may come from cleaned text, not exact original chunk text
+```
+
+Do **not** move to Phase 6 until this is fixed.
+
+Use this compact blocker-fix prompt:
+
+````md id="phase5-blocker-fix"
+You are fixing Phase 5 blockers only.
 
 Repo: `Requra/ai-pipeline`
 Branch: `review/full-pipeline-merge`
 
-Phase:
-`Phase 3 — File Type Detection and Source-Aware Parsing`
+Do NOT start Phase 6.
+Do NOT modify classify/generate/summarize/format.
+Do NOT implement deduplication.
+Do NOT implement evidence_grounding node.
 
-Do NOT start Phase 4.
-Do NOT modify extraction, classification, generation, quality gate, repair, summary, or formatter logic.
-Do NOT implement RAG.
-Do NOT change schema contracts unless a tiny compatibility fix is required.
-
-Read first:
-- `rules.md`
-- `docs/production-readiness/IMPLEMENTATION_PLAN.md`
+Read:
+- `ai-service/app/nodes/extract.py`
+- `ai-service/tests/nodes/test_extract.py`
+- `docs/production-readiness/nodes/06_extract_node.md`
 - `docs/production-readiness/PHASE_CHECKPOINTS.md`
-- `docs/production-readiness/API_CONTRACT_TARGET.md`
-- `docs/production-readiness/nodes/03_detect_file_type_node.md`
-- `docs/production-readiness/nodes/04_parse_to_chunks_node.md`
-- `ai-service/app/graph/pipeline.py`
-- `ai-service/app/graph/router.py`
-- `ai-service/app/nodes/ingest.py`
-- `ai-service/app/schemas/items.py`
-- `ai-service/app/schemas/pipeline_state.py`
+- `docs/production-readiness/IMPLEMENTATION_PLAN.md`
 
-Goal:
-Implement backend file type detection and source-aware parsing/chunking.
+Fix only these blockers:
 
-Allowed changes:
-- `ai-service/app/nodes/detect_file_type.py` NEW
-- `ai-service/app/nodes/parse_to_chunks.py` NEW
-- `ai-service/app/nodes/ingest.py` minimal refactor only
-- `ai-service/app/graph/pipeline.py`
-- `ai-service/app/graph/router.py` only if needed
-- `ai-service/app/schemas/*` only tiny compatibility fixes
-- tests for Phase 3
+## 1. Preprocessing acronym bug
+Current issue:
+`preprocess_text` removes fillers case-insensitively, so technical acronyms like `ER` and `AH` can be damaged.
 
-Implement:
-1. `detect_file_type_node`
-   - inspect bytes, not frontend `file_type`
-   - detect PDF, DOCX, text, audio
-   - reject empty/unsupported/too-large files
-   - output `file_type` and `DocumentSource`
-   - do not trust client file_type
+Required:
+- Preserve uppercase acronyms like `ER`, `AH`.
+- Do not remove meaningful technical terms.
+- Make filler removal safe and conservative.
+- Add tests:
+  - `"ER diagram"` remains `"ER diagram"`
+  - `"AH header"` remains `"AH header"`
+  - lowercase filler words like `"um"` / `"uh"` can still be cleaned when safe
 
-2. `parse_to_chunks_node`
-   - PDF: page-aware chunks
-   - DOCX: paragraph/table-aware chunks
-   - text: token/paragraph-aware chunks
-   - audio: do not transcribe yet; preserve route for Phase 4
-   - output `List[SourceChunk]`
-   - include `chunk_id`, text, char offsets, page/paragraph/time metadata when available
-   - no exactly-5-equal-word splitting
+## 2. Evidence quote must align with original source chunk
+Current issue:
+Evidence fallback may use `clean_text[:200]`, which may not exist exactly in `chunk.text`.
 
-3. Graph update
-   - add `detect_file_type`
-   - add `parse_to_chunks`
-   - route document/text files through parse_to_chunks
-   - keep audio transcription behavior compatible until Phase 4
-   - do not break existing `/process`
+Required:
+- `EvidenceSpan.quote` must come from the original `SourceChunk.text`, not cleaned/preprocessed text.
+- If LLM returns an evidence quote that exists in original chunk, keep it.
+- If LLM evidence quote does not exist exactly, try a safe normalized match against original chunk text.
+- If no safe match exists, use a real source substring from original chunk as fallback and mark `needs_review=True` with clear `review_reason`.
+- Never use cleaned text as final evidence quote unless it maps back to original source text.
+- Add tests proving every `EvidenceSpan.quote` is found in original `chunk.text`.
 
-Before editing, print:
-```md
-## Phase 3 Scope Summary
-- Files to change:
-- Nodes to add:
-- Graph changes:
-- Compatibility risks:
-````
+Allowed files:
+- `ai-service/app/nodes/extract.py`
+- `ai-service/tests/nodes/test_extract.py`
+- Phase 5 docs/checkpoints only
 
 Run:
-
 ```bash
 cd ai-service
-poetry install --no-root
-poetry run python -m compileall app
 python -m compileall app
+poetry run python -m compileall app
+poetry run pytest tests/nodes/test_extract.py -vv
 poetry run pytest
-```
+````
 
 Final report:
 
 ```md
-# Phase 3 Implementation Report
+# Phase 5 Blocker Fix Report
 
 ## Files Changed
 ...
 
-## Nodes Added
-...
+## Fix 1 — Preprocessing Acronym Safety
+Before:
+After:
+Tests:
 
-## Graph Changes
-...
-
-## Parsing Behavior
-...
-
-## Backwards Compatibility
-...
+## Fix 2 — Evidence Quote Source Alignment
+Before:
+After:
+Tests:
 
 ## Commands Run
 | Command | Result | Notes |
 |---|---|---|
 
-## Issues Found
+## Remaining Issues
 ...
 
-## Phase 3 Checklist
-- [ ] Backend detects file type from bytes
-- [ ] Unsupported files rejected safely
-- [ ] PDF chunks preserve page metadata
-- [ ] DOCX chunks preserve paragraph/table structure
-- [ ] Text chunks avoid cutting words/sentences badly
-- [ ] No naive 5 equal chunks
-- [ ] Existing endpoints still compile
-- [ ] No extraction/classification/generation changes
-- [ ] Tests pass or failures explained
-
-## Final GO/NO-GO for Phase 4
+## Final GO/NO-GO for Phase 6
 GO/NO-GO
 ```
 
 ```
 
-One note: Phase 1 already reached GO after fixing OpenAI/default LLM validation and transcription provider validation, so Phase 3 can proceed after the Phase 2 approval you posted. :contentReference[oaicite:0]{index=0}
+Important: do **not** push the quote-alignment problem to Phase 8 only. Phase 8 can verify grounding later, but Phase 5 must already produce evidence quotes that are source-aligned.
 ```
