@@ -49,35 +49,16 @@ def validate_environment():
     """
     Verify that required environment variables are set based on active providers.
     """
-    # 1. Validate LLM Provider
-    allowed_llm_providers = {"openai", "gemini"}
-    llm_provider = settings.LLM_PROVIDER
-    
-    if llm_provider not in allowed_llm_providers:
-        error_msg = f"Invalid LLM_PROVIDER '{settings.LLM_PROVIDER}'. Allowed values are: 'openai', 'gemini'."
+    # 1. Validate LLM keys
+    # For the MVP we standardize on OpenAI for all reasoning nodes. Do not
+    # require other provider keys in production.
+    if not settings.OPENAI_API_KEY:
+        error_msg = "OPENAI_API_KEY is missing. OPENAI_API_KEY is required for LLM reasoning nodes."
         if settings.ENV == "production":
             logger.error(f"CRITICAL: {error_msg}")
             sys.exit(1)
         else:
             logger.warning(f"WARN: {error_msg}")
-            
-    # Check corresponding key based on provider
-    if llm_provider == "openai":
-        if not settings.OPENAI_API_KEY:
-            error_msg = "OPENAI_API_KEY is missing. It is required when LLM_PROVIDER is set to 'openai'."
-            if settings.ENV == "production":
-                logger.error(f"CRITICAL: {error_msg}")
-                sys.exit(1)
-            else:
-                logger.warning(f"WARN: {error_msg}")
-    elif llm_provider == "gemini":
-        if not settings.GOOGLE_API_KEY:
-            error_msg = "GOOGLE_API_KEY is missing. It is required when LLM_PROVIDER is set to 'gemini'."
-            if settings.ENV == "production":
-                logger.error(f"CRITICAL: {error_msg}")
-                sys.exit(1)
-            else:
-                logger.warning(f"WARN: {error_msg}")
 
     # 2. Validate Transcription Provider
     allowed_transcribe_providers = {"groq", "deepgram"}

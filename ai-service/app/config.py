@@ -13,12 +13,16 @@ class Settings:
     GROQ_API_KEY: Optional[str] = os.getenv("GROQ_API_KEY")
     DEEPGRAM_API_KEY: Optional[str] = os.getenv("DEEPGRAM_API_KEY")
     OPENAI_API_KEY: Optional[str] = os.getenv("OPENAI_API_KEY")
+    # Default OpenAI model for LLM reasoning nodes
+    OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     
     # Testing / OSS Keys
     GPT_OSS_API_KEY: Optional[str] = os.getenv("GPT_OSS_API_KEY")
     BASE_URL_KEY: Optional[str] = os.getenv("BASE_URL_KEY")
     
     # LLM Settings
+    # NOTE: For the MVP, OpenAI is the single LLM reasoning provider. This
+    # setting remains for backward compatibility but is ignored by the runtime.
     LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "openai").lower().strip()
     
     # Transcribe Settings

@@ -2,35 +2,17 @@ from typing import Optional
 from app.config import settings
 
 def get_llm(model_name: Optional[str] = None):
+    """Return an OpenAI-backed Chat client for all LLM reasoning nodes.
+
+    For the MVP we standardize on OpenAI as the single provider for reasoning.
+    The model can be overridden via `model_name` or the `OPENAI_MODEL` setting.
     """
-    Retrieve the Language Model client.
-    Defaults to the model corresponding to settings.LLM_PROVIDER (or gpt-4o).
-    """
-    from langchain_google_genai import ChatGoogleGenerativeAI
+    # Import here to avoid importing heavy providers at module import time in tests
     from langchain_openai import ChatOpenAI
-    
-    if model_name is None:
-        if settings.LLM_PROVIDER == "gemini":
-            model_name = "gemini-2.5-flash"
-        else:
-            model_name = "gpt-4o"
-    
-    if model_name == "gemini-2.5-flash":
-        return ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",
-            temperature=0,
-            google_api_key=settings.GOOGLE_API_KEY
-        )
-    elif model_name == "gpt-4o":
-        return ChatOpenAI(
-            model="gpt-4o",
-            temperature=0,
-            openai_api_key=settings.OPENAI_API_KEY
-        )
-    elif model_name == "gpt-oss-120b":
-        return ChatOpenAI(
-            model="openai/gpt-oss-120b:free",
-            temperature=0,
-            api_key=settings.GPT_OSS_API_KEY,
-            base_url=settings.BASE_URL_KEY
-        ) # for testing only
+
+    model = model_name or settings.OPENAI_MODEL or "gpt-4o-mini"
+    return ChatOpenAI(
+        model=model,
+        temperature=0,
+        openai_api_key=settings.OPENAI_API_KEY,
+    )
