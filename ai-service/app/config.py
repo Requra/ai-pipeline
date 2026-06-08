@@ -21,13 +21,16 @@ class Settings:
     BASE_URL_KEY: Optional[str] = os.getenv("BASE_URL_KEY")
     
     # LLM Settings
-    # NOTE: For the MVP, OpenAI is the single LLM reasoning provider. This
-    # setting remains for backward compatibility but is ignored by the runtime.
+    # Default reasoning provider. Can be 'openai' or 'groq'.
     LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "openai").lower().strip()
     
     # Transcribe Settings
     TRANSCRIBE_PROVIDER: str = os.getenv("TRANSCRIBE_PROVIDER", "groq").lower().strip()
     GROQ_WHISPER_MODEL: str = os.getenv("GROQ_WHISPER_MODEL", "whisper-large-v3")
     GROQ_LANGUAGE: Optional[str] = os.getenv("GROQ_LANGUAGE")
+    # Groq LLM model name (when using Groq as LLM_PROVIDER)
+    GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+    # Groq base URL for OpenAI-compatible chat completions
+    GROQ_BASE_URL: str = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
 
 settings = Settings()
