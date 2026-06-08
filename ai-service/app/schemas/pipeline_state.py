@@ -9,6 +9,7 @@ from app.schemas.items import (
     UserStory,
     QualityIssue,
     PipelineWarning,
+    JobResult,
     StructuredSummary,
     ExportRow,
     FunctionalRequirement
@@ -36,6 +37,8 @@ class PipelineState(TypedDict):
     export_rows: Annotated[List[ExportRow], operator.add]
     
     summary: Optional[StructuredSummary]
+    # Final serialized job result produced by `format` node
+    job_result: Optional[JobResult]
     
     # --- Flow Control and Tracking ---
     is_useful: bool

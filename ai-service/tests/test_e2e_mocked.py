@@ -1,10 +1,13 @@
 import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
 from app.graph.pipeline import build_pipeline
+from fastapi.testclient import TestClient
+from app.main import app as fastapi_app
 from app.nodes.extract import ExtractionResponse, ExtractedRequirement, EvidenceSpan
 from app.nodes.classify import RequirementClassification, ClassificationResponse
 from app.nodes.generate import GenerationResponse, StoryResponse
 from app.schemas.items import JobResult
+from app.nodes.ingest import RelevanceCheck
 
 
 class FakePrompt:
@@ -71,9 +74,13 @@ async def test_process_json_end_to_end_mocked():
     # Fake LLM and prompt plumbing
     mock_llm = MagicMock()
     mock_llm.with_structured_output.return_value = MagicMock()
-
     with patch("app.llm.get_llm", return_value=mock_llm), \
-         patch("langchain_core.prompts.ChatPromptTemplate.from_messages", side_effect=lambda m: FakePrompt(m)):
+         patch("app.nodes.extract.get_llm", return_value=mock_llm), \
+         patch("app.nodes.classify.get_llm", return_value=mock_llm), \
+         patch("app.nodes.generate.get_llm", return_value=mock_llm), \
+         patch("app.nodes.summarize.get_llm", return_value=mock_llm), \
+         patch("langchain_core.prompts.ChatPromptTemplate.from_messages", side_effect=lambda m: FakePrompt(m)), \
+         patch("app.nodes.ingest._run_relevance_check", new=AsyncMock(return_value=RelevanceCheck(is_useful=True, relevance_score=1.0, reason="test mocked"))):
 
         initial_state = {
             "job_id": "e2e-json-1",
@@ -121,9 +128,13 @@ async def test_pdf_end_to_end_mocked():
 
     mock_llm = MagicMock()
     mock_llm.with_structured_output.return_value = MagicMock()
-
     with patch("app.llm.get_llm", return_value=mock_llm), \
-         patch("langchain_core.prompts.ChatPromptTemplate.from_messages", side_effect=lambda m: FakePrompt(m)):
+         patch("app.nodes.extract.get_llm", return_value=mock_llm), \
+         patch("app.nodes.classify.get_llm", return_value=mock_llm), \
+         patch("app.nodes.generate.get_llm", return_value=mock_llm), \
+         patch("app.nodes.summarize.get_llm", return_value=mock_llm), \
+         patch("langchain_core.prompts.ChatPromptTemplate.from_messages", side_effect=lambda m: FakePrompt(m)), \
+         patch("app.nodes.ingest._run_relevance_check", new=AsyncMock(return_value=RelevanceCheck(is_useful=True, relevance_score=1.0, reason="test mocked"))):
 
         initial_state = {
             "job_id": "e2e-pdf-1",
@@ -156,3 +167,36 @@ async def test_pdf_end_to_end_mocked():
         jr = result["job_result"]
         assert isinstance(jr, JobResult)
         assert len(jr.user_stories) == 2
+        # Ensure requirement ids are unique
+        ids = [r.id for r in jr.requirements]
+        assert len(ids) == len(set(ids))
+
+
+def test_api_process_json_returns_job_result(monkeypatch):
+    # Reuse the same FakePrompt behavior by patching get_llm and prompt builder
+    mock_llm = MagicMock()
+    mock_llm.with_structured_output.return_value = MagicMock()
+
+    monkeypatch.setattr("app.llm.get_llm", lambda *a, **k: mock_llm)
+    monkeypatch.setattr("app.nodes.extract.get_llm", lambda *a, **k: mock_llm)
+    monkeypatch.setattr("app.nodes.classify.get_llm", lambda *a, **k: mock_llm)
+    monkeypatch.setattr("app.nodes.generate.get_llm", lambda *a, **k: mock_llm)
+    monkeypatch.setattr("app.nodes.summarize.get_llm", lambda *a, **k: mock_llm)
+    monkeypatch.setattr("langchain_core.prompts.ChatPromptTemplate.from_messages", lambda m: FakePrompt(m))
+
+    client = TestClient(fastapi_app)
+    payload = {
+        "job_id": "api-json-1",
+        "text": "The system shall process payments.",
+        "file_type": "text",
+        "metadata": {}
+    }
+
+    resp = client.post("/process-json", json=payload)
+    assert resp.status_code == 200
+    body = resp.json()
+    # Should be the JobResult model fields (job_id and status present)
+    assert body.get("job_id") == "api-json-1"
+    assert "status" in body
+    # Ensure internal raw_bytes not returned
+    assert "raw_bytes" not in body

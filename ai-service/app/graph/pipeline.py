@@ -9,6 +9,8 @@ from app.nodes.classify import classify_node
 from app.nodes.generate import generate_node
 from app.nodes.summarize import summarize_node
 from app.nodes.format import format_node
+from app.nodes.evidence_grounding import evidence_grounding_node
+from app.nodes.quality_gate import quality_gate_node
 from app.graph.router import route_after_ingest
 
 def build_pipeline():
@@ -22,6 +24,8 @@ def build_pipeline():
     workflow.add_node("extract", extract_node)
     workflow.add_node("classify", classify_node)
     workflow.add_node("generate", generate_node)
+    workflow.add_node("evidence_grounding", evidence_grounding_node)
+    workflow.add_node("quality_gate", quality_gate_node)
     workflow.add_node("summarize", summarize_node)
     workflow.add_node("format", format_node)
 
@@ -49,8 +53,13 @@ def build_pipeline():
 
     # Standard sequential edges
     workflow.add_edge("extract", "classify")
-    workflow.add_edge("classify", "generate")
-    workflow.add_edge("generate", "summarize")
+    # After classification, ensure evidence grounding
+    workflow.add_edge("classify", "evidence_grounding")
+    workflow.add_edge("evidence_grounding", "generate")
+
+    # After generation, run quality gate before summarization
+    workflow.add_edge("generate", "quality_gate")
+    workflow.add_edge("quality_gate", "summarize")
     workflow.add_edge("summarize", "format")
     workflow.add_edge("format", END)
 

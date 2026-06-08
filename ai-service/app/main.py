@@ -77,10 +77,12 @@ async def process_document(
 
         result_state = await pipeline.ainvoke(initial_state)
 
-        # Truncate internal bytes from output response
-        result_state.pop("raw_bytes", None)
+        # Return strict final contract only
+        job_result = result_state.get("job_result")
+        if not job_result:
+            raise HTTPException(status_code=500, detail="PIPELINE_ERROR: job_result not produced by pipeline")
 
-        return result_state
+        return job_result
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -126,9 +128,12 @@ async def process_json(request: ProcessRequest):
         }
 
         result_state = await pipeline.ainvoke(initial_state)
-        result_state.pop("raw_bytes", None)
 
-        return result_state
+        job_result = result_state.get("job_result")
+        if not job_result:
+            raise HTTPException(status_code=500, detail="PIPELINE_ERROR: job_result not produced by pipeline")
+
+        return job_result
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

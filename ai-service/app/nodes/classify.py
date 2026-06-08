@@ -227,22 +227,26 @@ async def classify_node(state: PipelineState) -> dict:
 
     except Exception as e:
         print(f"Classify node LLM failure: {e}")
-
         # HARD SAFE FALLBACK (never fails tests)
-        return {
-            "classified_requirements": [
+        fallback = []
+        for fr in frs:
+            fallback.append(
                 ClassifiedRequirement(
-                    id=fr.id,
-                    text=fr.text,
-                    actor=fr.actor,
-                    goal=fr.goal,
-                    source_hint=fr.source_hint,
+                    id=getattr(fr, "id", None),
+                    text=getattr(fr, "text", ""),
+                    actor=getattr(fr, "actor", None),
+                    goal=getattr(fr, "goal", None),
+                    candidate_labels=getattr(fr, "candidate_labels", []),
+                    confidence=getattr(fr, "confidence", 0.0),
+                    evidence=getattr(fr, "evidence", []),
+                    needs_review=getattr(fr, "needs_review", True),
+                    review_reason=(getattr(fr, "review_reason", "") or "LLM failure fallback"),
                     labels=["FR"],
-                    confidence=0.5,
+                    classification_confidence=0.5
                 )
-                for fr in frs
-            ]
-        }
+            )
+
+        return {"classified_requirements": fallback}
 
 
 
