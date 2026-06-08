@@ -41,18 +41,38 @@ async def process_document(
         if "filename" not in parsed_metadata:
             parsed_metadata["filename"] = file.filename
         
+        import time
+
         initial_state = {
             "job_id": "upload_" + str(hash(file.filename)),
             "raw_bytes": file_bytes,
             "raw_text": "", # Nodes will handle extraction
             "file_type": file_type,
             "metadata": parsed_metadata,
-            "functional_requirements": [],
+
+            # Intermediate reducers and collections
+            "source_metadata": None,
+            "chunks": [],
+            "extracted_requirements": [],
             "classified_requirements": [],
+            "requirement_coverages": [],
             "user_stories": [],
-            "summary": "",
+            "quality_issues": [],
+            "warnings": [],
+            "export_rows": [],
+
+            "summary": None,
+
+            # Flow control
+            "is_useful": False,
+            "relevance_score": 0.0,
             "status": "started",
-            "error": None
+            "error": None,
+            "started_at": time.time(),
+            "processing_time_ms": 0,
+
+            # Legacy
+            "functional_requirements": []
         }
 
         result_state = await pipeline.ainvoke(initial_state)
@@ -71,18 +91,38 @@ async def process_json(request: ProcessRequest):
     Direct JSON endpoint if you already have the text.
     """
     try:
+        import time
+
         initial_state = {
             "job_id": request.job_id,
             "raw_bytes": b"", # No file upload
             "raw_text": request.text,
             "file_type": request.file_type,
             "metadata": request.metadata,
-            "functional_requirements": [],
+
+            # Intermediate reducers and collections
+            "source_metadata": None,
+            "chunks": [],
+            "extracted_requirements": [],
             "classified_requirements": [],
+            "requirement_coverages": [],
             "user_stories": [],
-            "summary": "",
+            "quality_issues": [],
+            "warnings": [],
+            "export_rows": [],
+
+            "summary": None,
+
+            # Flow control
+            "is_useful": False,
+            "relevance_score": 0.0,
             "status": "started",
-            "error": None
+            "error": None,
+            "started_at": time.time(),
+            "processing_time_ms": 0,
+
+            # Legacy
+            "functional_requirements": []
         }
 
         result_state = await pipeline.ainvoke(initial_state)

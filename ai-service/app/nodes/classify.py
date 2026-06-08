@@ -109,11 +109,12 @@ class ClassificationResponse(BaseModel):
 
 def _format_requirement(fr) -> str:
     return (
-        f"id: {fr.id}\n"
-        f"text: {fr.text}\n"
-        f"actor: {fr.actor}\n"
-        f"goal: {fr.goal}\n"
-        f"source_hint: {fr.source_hint}"
+        f"id: {getattr(fr,'id','')}\n"
+        f"text: {getattr(fr,'text','')}\n"
+        f"actor: {getattr(fr,'actor',None)}\n"
+        f"goal: {getattr(fr,'goal',None)}\n"
+        f"candidate_labels: {getattr(fr,'candidate_labels', [])}\n"
+        f"evidence: {getattr(fr,'evidence', [])}"
     )
 
 
@@ -140,7 +141,8 @@ async def _classify_batch(chain, batch):
 async def classify_node(state: PipelineState) -> dict:
     print("--- CLASSIFY NODE (MULTI-LABEL) ---")
 
-    frs = state.get("functional_requirements", [])
+    # Prefer new extracted_requirements; fall back to legacy functional_requirements
+    frs = state.get("extracted_requirements") or state.get("functional_requirements", [])
     if not frs:
         return {"classified_requirements": []}
 
@@ -189,30 +191,35 @@ async def classify_node(state: PipelineState) -> dict:
         for fr in frs:
             data = grouped.get(fr.id)
 
+            # gather base fields present on both ExtractedRequirement and FunctionalRequirement
+            base_kwargs = {
+                "id": fr.id,
+                "text": getattr(fr, "text", ""),
+                "actor": getattr(fr, "actor", None),
+                "goal": getattr(fr, "goal", None),
+                "candidate_labels": getattr(fr, "candidate_labels", []),
+                "confidence": getattr(fr, "confidence", 0.0),
+                "evidence": getattr(fr, "evidence", []),
+                "needs_review": getattr(fr, "needs_review", False),
+                "review_reason": getattr(fr, "review_reason", None),
+            }
+
             if not data:
-                # fallback per item
+                # fallback per item: mark as FR with medium confidence
                 classified.append(
                     ClassifiedRequirement(
-                        id=fr.id,
-                        text=fr.text,
-                        actor=fr.actor,
-                        goal=fr.goal,
-                        source_hint=fr.source_hint,
+                        **base_kwargs,
                         labels=["FR"],
-                        confidence=0.5,
+                        classification_confidence=0.5,
                     )
                 )
                 continue
 
             classified.append(
                 ClassifiedRequirement(
-                    id=fr.id,
-                    text=fr.text,
-                    actor=fr.actor,
-                    goal=fr.goal,
-                    source_hint=fr.source_hint,
+                    **base_kwargs,
                     labels=list(data["labels"]),
-                    confidence=_clamp_confidence(data["confidence"]),
+                    classification_confidence=_clamp_confidence(data["confidence"]),
                 )
             )
 

@@ -64,7 +64,27 @@ async def detect_file_type_node(state: PipelineState) -> dict:
     metadata = state.get("metadata", {})
     filename = metadata.get("filename", "unknown_file")
 
+    # Allow text-only inputs: if no raw bytes but raw_text exists, treat as text
     if not raw_bytes:
+        raw_text = state.get("raw_text")
+        if raw_text:
+            file_type = "text"
+            mime_type = "text/plain"
+            file_size = 0
+            sha256_hash = hashlib.sha256(raw_text.encode("utf-8")).hexdigest()
+            source_metadata = DocumentSource(
+                filename=filename,
+                file_size_bytes=0,
+                mime_type=mime_type,
+                sha256_hash=sha256_hash
+            )
+
+            return {
+                "file_type": file_type,
+                "source_metadata": source_metadata,
+                "status": "type_detected"
+            }
+
         return {
             "status": "rejected",
             "error": "FILE_TYPE_REJECTED: empty file payload"

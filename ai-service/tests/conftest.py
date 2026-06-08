@@ -33,15 +33,28 @@ def sample_audio_bytes():
 
 @pytest.fixture
 def base_state():
+    import time
     return {
         "job_id": "test-job-123",
-        "error_log": [],
-        "status": "started",
+        "raw_bytes": b"",
         "raw_text": None,
+        "file_type": "text",
+        "metadata": {},
+        "source_metadata": None,
+        "chunks": [],
+        "extracted_requirements": [],
         "functional_requirements": [],
         "classified_requirements": [],
+        "requirement_coverages": [],
         "user_stories": [],
+        "quality_issues": [],
+        "warnings": [],
+        "export_rows": [],
         "summary": None,
         "is_useful": True,
-        "relevance_score": 1.0
+        "relevance_score": 1.0,
+        "status": "started",
+        "error": None,
+        "started_at": time.time(),
+        "processing_time_ms": 0
     }

@@ -26,18 +26,22 @@ async def test_generate_node_multilabel_support(base_state, capsys):
             text="The user shall log in within 0.1 seconds with secure authentication.",
             actor="User",
             goal="fast secure login",
-            source_hint="performance security",
+            candidate_labels=["FR", "NFR"],
             labels=["FR", "NFR"],
-            confidence=0.95
+            confidence=0.95,
+            classification_confidence=0.95,
+            evidence=[]
         ),
         ClassifiedRequirement(
             id=2,
             text="Only admins can delete user accounts.",
             actor="Admin",
             goal="user management",
-            source_hint="authorization policy",
+            candidate_labels=["BR"],
             labels=["BR"],
-            confidence=1.0
+            confidence=1.0,
+            classification_confidence=1.0,
+            evidence=[]
         )
     ]
 

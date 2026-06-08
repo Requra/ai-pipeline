@@ -1,33 +1,64 @@
 from app.schemas.pipeline_state import PipelineState
+from app.schemas.items import StructuredSummary
 from app.llm import get_llm
 from langchain_core.prompts import ChatPromptTemplate
-import os
+
 
 async def summarize_node(state: PipelineState) -> dict:
     """
-    Generate an executive summary highlighting key decisions, open questions, and pain points.
+    Generate structured summary matching `StructuredSummary` contract.
     """
     print("--- SUMMARIZE NODE ---")
     raw_text = state.get("raw_text", "")
-    
-    if not raw_text:
-        return {"summary": "No text provided for summary."}
 
-    # Use Gemini if available, otherwise mock
+    if not raw_text:
+        return {"summary": StructuredSummary(
+            executive_summary="",
+            key_decisions=[],
+            open_questions=[],
+            risks=[],
+            assumptions=[],
+            action_items=[],
+            stakeholders=[],
+            scope=[],
+            out_of_scope=[]
+        )}
+
+    # Attempt LLM summarization, but fall back to deterministic structured mock
     try:
-        # Get Gemini LLM
         llm = get_llm()
-        
         prompt = ChatPromptTemplate.from_messages([
-            ("system", "You are an expert business analyst. Provide a concise executive summary of the following document text. Focus on key decisions, open questions, and stakeholder pain points."),
+            ("system", "You are an expert business analyst. Provide a concise executive summary of the following document text and return structured fields."),
             ("user", "{text}")
         ])
-        
+
         chain = prompt | llm
         response = await chain.ainvoke({"text": raw_text})
-        
-        return {"summary": response.content}
-        
+
+        # If LLM returns free text, place into executive_summary and leave others empty
+        content = getattr(response, "content", None) or str(response)
+        return {"summary": StructuredSummary(
+            executive_summary=content,
+            key_decisions=[],
+            open_questions=[],
+            risks=[],
+            assumptions=[],
+            action_items=[],
+            stakeholders=[],
+            scope=[],
+            out_of_scope=[]
+        )}
+
     except Exception as e:
         print(f"Summarize node LLM failure: {e}")
-        return {"summary": f"## Executive Summary (Mocked)\n{raw_text[:200]}..."}
+        return {"summary": StructuredSummary(
+            executive_summary=(raw_text[:300] + "...") if raw_text else "",
+            key_decisions=[],
+            open_questions=[],
+            risks=[],
+            assumptions=[],
+            action_items=[],
+            stakeholders=[],
+            scope=[],
+            out_of_scope=[]
+        )}

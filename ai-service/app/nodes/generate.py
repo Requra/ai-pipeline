@@ -1,5 +1,5 @@
 from app.schemas.pipeline_state import PipelineState
-from app.schemas.items import UserStory, AcceptanceCriterion
+from app.schemas.items import UserStory, AcceptanceCriterion, RequirementCoverage
 from app.llm import get_llm
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
@@ -48,6 +48,7 @@ class GenerationResponse(BaseModel):
 
 def _format_requirement(req) -> str:
     labels = getattr(req, "labels", None) or [getattr(req, "label", "FR")]
+    evidence = getattr(req, "evidence", [])
 
     return (
         f"id: {req.id}\n"
@@ -55,7 +56,8 @@ def _format_requirement(req) -> str:
         f"actor: {req.actor}\n"
         f"goal: {req.goal}\n"
         f"labels: {labels}\n"
-        f"source_hint: {req.source_hint}"
+        f"candidate_labels: {getattr(req, 'candidate_labels', [])}\n"
+        f"evidence: {evidence}"
     )
 
 
@@ -103,25 +105,42 @@ async def generate_node(state: PipelineState) -> dict:
         final_stories = []
 
         for s in stories:
-            final_stories.append(
-                UserStory(
-                    title=s.title,
-                    description=s.description,
-                    acceptance_criteria=[
-                        AcceptanceCriterion(
-                            text=c,
-                            criterion_type="Given-When-Then" if "Given" in c else "plain"
-                        )
-                        for c in s.acceptance_criteria
-                    ],
-                    source_fr_id=s.id,
-
-                    # fix 
-                    labels=_normalize_labels(getattr(s, "labels", ["FR"]))
-                )
+            story_id = f"{state.get('job_id')}_story_{s.id}"
+            user_story = UserStory(
+                id=story_id,
+                title=s.title,
+                description=s.description,
+                acceptance_criteria=[
+                    AcceptanceCriterion(
+                        id="",
+                        text=c,
+                        criterion_type="Given-When-Then" if "Given" in c else "plain"
+                    )
+                    for c in s.acceptance_criteria
+                ],
+                source_requirement_ids=[s.id],
+                labels=_normalize_labels(getattr(s, "labels", ["FR"])),
+                evidence_reference=[]
             )
 
-        return {"user_stories": final_stories}
+            # create coverage record for this requirement
+            coverage = RequirementCoverage(
+                requirement_id=s.id,
+                coverage_type="covered_by_story",
+                story_ids=[story_id],
+                acceptance_criteria_ids=[c.id for c in user_story.acceptance_criteria],
+                reason=None
+            )
+
+            final_stories.append(user_story)
+            # accumulate coverage per story in return dict
+            if "requirement_coverages" not in locals():
+                requirement_coverages = []
+            requirement_coverages.append(coverage)
+        result = {"user_stories": final_stories}
+        if "requirement_coverages" in locals():
+            result["requirement_coverages"] = requirement_coverages
+        return result
 
     except Exception as e:
         print(f"Generate node LLM failure: {e}")
@@ -131,26 +150,42 @@ async def generate_node(state: PipelineState) -> dict:
 
         for req in classified:
             labels = _normalize_labels(getattr(req, "labels", None))
-
-            fallback.append(
-                UserStory(
-                    title=f"Story for requirement {req.id}",
-                    description=f"As a {req.actor}, I want {req.goal}, so that: {req.text}",
-                    acceptance_criteria=[
-                        AcceptanceCriterion(
-                            text="Requirement is implemented as specified",
-                            criterion_type="plain"
-                        )
-                    ],
-                    source_fr_id=req.id,
-
-                    # FIX 
-                    labels=labels
-                )
+            story_id = f"{state.get('job_id')}_story_{req.id}"
+            fallback_story = UserStory(
+                id=story_id,
+                title=f"Story for requirement {req.id}",
+                description=f"As a {req.actor}, I want {req.goal}, so that: {req.text}",
+                acceptance_criteria=[
+                    AcceptanceCriterion(
+                        id="",
+                        text="Requirement is implemented as specified",
+                        criterion_type="plain"
+                    )
+                ],
+                source_requirement_ids=[req.id],
+                labels=labels,
+                evidence_reference=getattr(req, "evidence", [])
             )
 
+            fallback.append(fallback_story)
+
+            coverage = RequirementCoverage(
+                requirement_id=req.id,
+                coverage_type="covered_by_story",
+                story_ids=[story_id],
+                acceptance_criteria_ids=[c.id for c in fallback_story.acceptance_criteria],
+                reason=None
+            )
+
+            if "requirement_coverages" not in locals():
+                requirement_coverages = []
+            requirement_coverages.append(coverage)
+
+        result = {"user_stories": fallback}
+        if "requirement_coverages" in locals():
+            result["requirement_coverages"] = requirement_coverages
         return {
-            "user_stories": fallback,
+            **result,
             "error_message": str(e),
             "status": "partial"
         }
