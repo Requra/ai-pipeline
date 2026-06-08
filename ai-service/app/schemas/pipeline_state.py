@@ -1,5 +1,4 @@
-from typing import TypedDict, List, Optional, Dict, Any, Annotated
-import operator
+from typing import TypedDict, List, Optional, Dict, Any
 from app.schemas.items import (
     DocumentSource,
     SourceChunk,
@@ -26,15 +25,21 @@ class PipelineState(TypedDict):
     raw_text: Optional[str]
     source_metadata: Optional[DocumentSource]
     
-    # Reducers are mandatory to accumulate lists across parallel chunks/nodes
-    chunks: Annotated[List[SourceChunk], operator.add]
-    extracted_requirements: Annotated[List[ExtractedRequirement], operator.add]
-    classified_requirements: Annotated[List[ClassifiedRequirement], operator.add]
-    requirement_coverages: Annotated[List[RequirementCoverage], operator.add]
-    user_stories: Annotated[List[UserStory], operator.add]
-    quality_issues: Annotated[List[QualityIssue], operator.add]
-    warnings: Annotated[List[PipelineWarning], operator.add]
-    export_rows: Annotated[List[ExportRow], operator.add]
+    # NOTE: For MVP we use simple replacement semantics for list fields.
+    # Previously these fields used Annotated([...], operator.add) reducers to
+    # support append-style accumulation in true parallel LangGraph fan-out
+    # scenarios. That behavior can cause duplication in sequential pipelines
+    # when nodes return full updated lists. When/if the graph is converted to
+    # use real parallel send/fan-out edges, reintroduce reducer annotations
+    # (e.g., Annotated[List[T], operator.add]) as appropriate.
+    chunks: List[SourceChunk]
+    extracted_requirements: List[ExtractedRequirement]
+    classified_requirements: List[ClassifiedRequirement]
+    requirement_coverages: List[RequirementCoverage]
+    user_stories: List[UserStory]
+    quality_issues: List[QualityIssue]
+    warnings: List[PipelineWarning]
+    export_rows: List[ExportRow]
     
     summary: Optional[StructuredSummary]
     # Final serialized job result produced by `format` node
@@ -49,4 +54,5 @@ class PipelineState(TypedDict):
     processing_time_ms: int
 
     # --- Legacy Fields (Backwards Compatibility) ---
-    functional_requirements: Annotated[List[FunctionalRequirement], operator.add]
+    # Use replacement semantics for legacy lists as well.
+    functional_requirements: List[FunctionalRequirement]
