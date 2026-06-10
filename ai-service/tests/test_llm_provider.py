@@ -1,48 +1,66 @@
 import sys
 import types
+import pytest
 from app.config import settings
 
 
 def _inject_fake_langchain_openai():
     """Insert a fake `langchain_openai` module exposing `ChatOpenAI`.
-
-    This avoids importing the real package (and its tiktoken native deps)
-    during tests while allowing us to validate `get_llm()` behavior.
     """
     class FakeChatOpenAI:
-        def __init__(self, model=None, temperature=0, openai_api_key=None, **kwargs):
+        def __init__(self, model=None, temperature=0, api_key=None, base_url=None, default_headers=None, **kwargs):
+            # Real ChatOpenAI uses model_name internally often, but we can just use self.model
             self.model = model
             self.temperature = temperature
-            self.openai_api_key = openai_api_key
+            self.api_key = api_key
+            self.base_url = base_url
+            self.default_headers = default_headers
 
     fake_mod = types.ModuleType("langchain_openai")
     setattr(fake_mod, "ChatOpenAI", FakeChatOpenAI)
     sys.modules["langchain_openai"] = fake_mod
+    
+    # Also need to clear app.llm from sys.modules to force re-import with fake
+    if "app.llm" in sys.modules:
+        del sys.modules["app.llm"]
 
 
-def test_get_llm_default_model(monkeypatch):
+
+def test_get_llm_openrouter(monkeypatch):
     _inject_fake_langchain_openai()
-    # Ensure defaults don't call external APIs; just construct the client
-    monkeypatch.setattr(settings, "OPENAI_MODEL", None)
-    monkeypatch.setattr(settings, "OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "openrouter")
+    monkeypatch.setattr(settings, "OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setattr(settings, "OPENROUTER_MODEL", "test-model")
+    monkeypatch.setattr(settings, "OPENROUTER_BASE_URL", "https://openrouter.test/api/v1")
+    monkeypatch.setattr(settings, "OPENROUTER_APP_NAME", "Test App")
 
     from app.llm import get_llm
 
     llm = get_llm()
-    # FakeChatOpenAI was injected; ensure an instance was returned
-    assert hasattr(llm, "model")
-    model_attr = getattr(llm, "model", None)
-    assert model_attr == "gpt-4o-mini"
+    assert llm.model == "test-model"
+    assert llm.api_key == "test-openrouter-key"
+    assert llm.base_url == "https://openrouter.test/api/v1"
+    assert llm.default_headers["X-OpenRouter-Title"] == "Test App"
 
 
-def test_get_llm_custom_model(monkeypatch):
+def test_get_llm_openai(monkeypatch):
     _inject_fake_langchain_openai()
-    monkeypatch.setattr(settings, "OPENAI_MODEL", "gpt-test-model")
-    monkeypatch.setattr(settings, "OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "openai")
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "test-openai-key")
+    monkeypatch.setattr(settings, "OPENAI_MODEL", "gpt-4o-mini")
 
     from app.llm import get_llm
 
     llm = get_llm()
-    assert hasattr(llm, "model")
-    model_attr = getattr(llm, "model", None)
-    assert model_attr == "gpt-test-model"
+    assert llm.model == "gpt-4o-mini"
+    assert llm.api_key == "test-openai-key"
+
+
+def test_get_llm_unsupported(monkeypatch):
+    _inject_fake_langchain_openai()
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "groq")
+
+    from app.llm import get_llm
+
+    with pytest.raises(RuntimeError, match="Unsupported LLM_PROVIDER: groq"):
+        get_llm()

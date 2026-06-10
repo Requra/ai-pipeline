@@ -6,6 +6,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 from typing import List, Literal, Dict
 from collections import defaultdict
+import json
 
 
 # ---------------- PROMPT ----------------
@@ -131,9 +132,38 @@ def _clamp_confidence(value: float) -> float:
     return max(0.0, min(1.0, value))
 
 
-async def _classify_batch(chain, batch):
+async def _classify_batch(llm, batch):
     items = "\n\n".join(_format_requirement(fr) for fr in batch)
-    return await chain.ainvoke({"items": items})
+    
+    try:
+        raw = await llm.ainvoke([
+            ("system", System_Prompt),
+            ("user", User_Prompt.format(items=items))
+        ])
+        content = getattr(raw, "content", None) or str(raw)
+        
+        # Strip common code fences
+        content = content.strip()
+        if content.startswith("```"):
+            lines = content.splitlines()
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].startswith("```"):
+                lines = lines[:-1]
+            content = "\n".join(lines).strip()
+
+        try:
+            parsed = json.loads(content)
+            # Support both direct list or wrapped in "classifications"
+            if isinstance(parsed, list):
+                parsed = {"classifications": parsed}
+            return ClassificationResponse.model_validate(parsed)
+        except Exception as e:
+            print(f"Classification parse/validation error: {e}")
+            return None
+    except Exception as e:
+        print(f"Classification LLM error: {e}")
+        return None
 
 
 # ---------------- MAIN NODE ----------------
@@ -151,26 +181,15 @@ async def classify_node(state: PipelineState) -> dict:
         if llm is None:
             raise RuntimeError("LLM not initialized")
 
-        structured_llm = llm.with_structured_output(
-            ClassificationResponse,
-            method="function_calling"
-        )
-
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", System_Prompt),
-            ("user", User_Prompt)
-        ])
-
-        chain = prompt | structured_llm
-
         # ---------------- RAW COLLECTION ----------------
         all_classifications = []
 
         for batch in _chunk_requirements(frs, 5):
-            response = await _classify_batch(chain, batch)
+            response = await _classify_batch(llm, batch)
 
             if response and hasattr(response, "classifications"):
                 all_classifications.extend(response.classifications)
+
 
         # ---------------- SAFE MERGE ----------------
         grouped: Dict[int, dict] = defaultdict(lambda: {

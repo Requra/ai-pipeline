@@ -1,4 +1,5 @@
 import pytest
+import json
 from unittest.mock import MagicMock, patch, AsyncMock
 from app.nodes.extract import extract_node, ExtractionResponse, preprocess_text, align_quote_to_source
 from app.schemas.items import SourceChunk, ExtractedRequirement, EvidenceSpan
@@ -41,27 +42,29 @@ def test_align_quote_to_source():
     assert len(fallback) > 0
 
 @pytest.fixture
-def mock_extraction_response():
-    return ExtractionResponse(requirements=[
-        ExtractedRequirement(
-            id=1,
-            text="The system shall process payments.",
-            actor="System",
-            goal="process payments",
-            candidate_labels=["FR"],
-            confidence=0.9,
-            evidence=[EvidenceSpan(chunk_id="c1", quote="process payments")]
-        ),
-        ExtractedRequirement(
-            id=2,
-            text="Performance must be under 2s.",
-            actor="System",
-            goal="performance",
-            candidate_labels=["NFR"],
-            confidence=0.85,
-            evidence=[EvidenceSpan(chunk_id="c1", quote="under 2s")]
-        )
-    ])
+def mock_extraction_json():
+    return json.dumps({
+        "requirements": [
+            {
+                "id": 1,
+                "text": "The system shall process payments.",
+                "actor": "System",
+                "goal": "process payments",
+                "candidate_labels": ["FR"],
+                "confidence": 0.9,
+                "evidence": [{"chunk_id": "c1", "quote": "process payments"}]
+            },
+            {
+                "id": 2,
+                "text": "Performance must be under 2s.",
+                "actor": "System",
+                "goal": "performance",
+                "candidate_labels": ["NFR"],
+                "confidence": 0.85,
+                "evidence": [{"chunk_id": "c1", "quote": "under 2s"}]
+            }
+        ]
+    })
 
 @pytest.mark.asyncio
 async def test_extract_node_evidence_alignment(base_state):
@@ -75,26 +78,22 @@ async def test_extract_node_evidence_alignment(base_state):
     ]
     
     # Mock LLM returning a quote that is slightly different from source (e.g. from cleaned text)
-    mock_resp = ExtractionResponse(requirements=[
-        ExtractedRequirement(
-            id=1,
-            text="Requirement 1",
-            candidate_labels=["FR"],
-            confidence=1.0,
-            evidence=[EvidenceSpan(chunk_id="chunk_1", quote="process PAYMENTS")] # Case mismatch
-        )
-    ])
+    mock_resp_content = json.dumps({
+        "requirements": [
+            {
+                "id": 1,
+                "text": "Requirement 1",
+                "candidate_labels": ["FR"],
+                "confidence": 1.0,
+                "evidence": [{"chunk_id": "chunk_1", "quote": "process PAYMENTS"}]
+            }
+        ]
+    })
     
     mock_llm = MagicMock()
-    mock_chain = MagicMock()
-    mock_chain.ainvoke = AsyncMock(return_value=mock_resp)
-    mock_llm.with_structured_output.return_value = MagicMock()
+    mock_llm.ainvoke = AsyncMock(return_value=MagicMock(content=mock_resp_content))
     
-    mock_prompt = MagicMock()
-    mock_prompt.__or__.return_value = mock_chain
-    
-    with patch("app.nodes.extract.get_llm", return_value=mock_llm), \
-         patch("app.nodes.extract.ChatPromptTemplate.from_messages", return_value=mock_prompt):
+    with patch("app.nodes.extract.get_llm", return_value=mock_llm):
         result = await extract_node(state)
 
     assert result["status"] == "success"
@@ -108,21 +107,14 @@ async def test_extract_node_evidence_alignment(base_state):
     assert "AUTO_FIX" in req.review_reason
 
 @pytest.mark.asyncio
-async def test_extract_node_with_raw_text(base_state, mock_extraction_response):
+async def test_extract_node_with_raw_text(base_state, mock_extraction_json):
     state = base_state.copy()
     state["raw_text"] = "The system shall process payments. Performance must be under 2s."
     
-    # Mock LLM and structured output
     mock_llm = MagicMock()
-    mock_chain = MagicMock()
-    mock_chain.ainvoke = AsyncMock(return_value=mock_extraction_response)
-    mock_llm.with_structured_output.return_value = MagicMock() # Will be or-ed
+    mock_llm.ainvoke = AsyncMock(return_value=MagicMock(content=mock_extraction_json))
     
-    mock_prompt = MagicMock()
-    mock_prompt.__or__.return_value = mock_chain
-    
-    with patch("app.nodes.extract.get_llm", return_value=mock_llm), \
-         patch("app.nodes.extract.ChatPromptTemplate.from_messages", return_value=mock_prompt):
+    with patch("app.nodes.extract.get_llm", return_value=mock_llm):
         result = await extract_node(state)
 
     assert result["status"] == "success"
@@ -136,30 +128,41 @@ async def test_extract_node_with_raw_text(base_state, mock_extraction_response):
     assert result["extracted_requirements"][0].evidence[0].chunk_id == "raw_fallback"
 
 @pytest.mark.asyncio
-async def test_extract_node_with_chunks(base_state, mock_extraction_response):
+async def test_extract_node_with_chunks(base_state):
     state = base_state.copy()
     state["chunks"] = [
         SourceChunk(chunk_id="chunk_1", text="The system shall process payments.", start_char=0, end_char=30),
         SourceChunk(chunk_id="chunk_2", text="Performance must be under 2s.", start_char=31, end_char=60)
     ]
     
-    # Mock LLM
+    mock_resp_1 = json.dumps({
+        "requirements": [{
+            "id": 1,
+            "text": "The system shall process payments.",
+            "candidate_labels": ["FR"],
+            "confidence": 1.0,
+            "evidence": [{"quote": "process payments", "chunk_id": "chunk_1"}]
+        }]
+    })
+    mock_resp_2 = json.dumps({
+        "requirements": [{
+            "id": 1,
+            "text": "Performance must be under 2s.",
+            "candidate_labels": ["NFR"],
+            "confidence": 1.0,
+            "evidence": [{"quote": "under 2s", "chunk_id": "chunk_2"}]
+        }]
+    })
+
+
     mock_llm = MagicMock()
-    mock_chain = MagicMock()
-    
-    # ainvoke will be called once per chunk.
-    mock_chain.ainvoke = AsyncMock()
-    mock_chain.ainvoke.side_effect = [
-        ExtractionResponse(requirements=[mock_extraction_response.requirements[0]]),
-        ExtractionResponse(requirements=[mock_extraction_response.requirements[1]])
+    mock_llm.ainvoke = AsyncMock()
+    mock_llm.ainvoke.side_effect = [
+        MagicMock(content=mock_resp_1),
+        MagicMock(content=mock_resp_2)
     ]
-    mock_llm.with_structured_output.return_value = MagicMock()
     
-    mock_prompt = MagicMock()
-    mock_prompt.__or__.return_value = mock_chain
-    
-    with patch("app.nodes.extract.get_llm", return_value=mock_llm), \
-         patch("app.nodes.extract.ChatPromptTemplate.from_messages", return_value=mock_prompt):
+    with patch("app.nodes.extract.get_llm", return_value=mock_llm):
         result = await extract_node(state)
 
     assert result["status"] == "success"
@@ -174,15 +177,9 @@ async def test_extract_node_empty_failure(base_state):
     state["raw_text"] = "Some random text with no requirements."
     
     mock_llm = MagicMock()
-    mock_chain = MagicMock()
-    mock_chain.ainvoke = AsyncMock(return_value=ExtractionResponse(requirements=[]))
-    mock_llm.with_structured_output.return_value = MagicMock()
+    mock_llm.ainvoke = AsyncMock(return_value=MagicMock(content="{\"requirements\": []}"))
     
-    mock_prompt = MagicMock()
-    mock_prompt.__or__.return_value = mock_chain
-    
-    with patch("app.nodes.extract.get_llm", return_value=mock_llm), \
-         patch("app.nodes.extract.ChatPromptTemplate.from_messages", return_value=mock_prompt):
+    with patch("app.nodes.extract.get_llm", return_value=mock_llm):
         result = await extract_node(state)
 
     assert result["status"] == "partial"
@@ -195,20 +192,11 @@ async def test_extract_node_llm_failure(base_state):
     state["raw_text"] = "Error inducing text."
     
     mock_llm = MagicMock()
-    mock_chain = MagicMock()
-    # If process_chunk catches the exception, extract_node will return partial because of empty list
-    mock_chain.ainvoke = AsyncMock(side_effect=Exception("API Error"))
-    mock_llm.with_structured_output.return_value = MagicMock()
+    mock_llm.ainvoke = AsyncMock(side_effect=Exception("API Error"))
     
-    mock_prompt = MagicMock()
-    mock_prompt.__or__.return_value = mock_chain
-    
-    with patch("app.nodes.extract.get_llm", return_value=mock_llm), \
-         patch("app.nodes.extract.ChatPromptTemplate.from_messages", return_value=mock_prompt):
+    with patch("app.nodes.extract.get_llm", return_value=mock_llm):
         result = await extract_node(state)
 
-    # In our current implementation, process_chunk catches exception and returns [], 
-    # so extract_node returns status="partial" because requirements are empty.
     assert result["status"] == "partial"
     assert result["extracted_requirements"] == []
     assert result["functional_requirements"] == []

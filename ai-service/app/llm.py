@@ -1,38 +1,46 @@
-from typing import Optional
+from langchain_openai import ChatOpenAI
 from app.config import settings
 
+def get_openrouter_llm():
+    if not settings.OPENROUTER_API_KEY:
+        raise RuntimeError("OPENROUTER_API_KEY is missing")
 
-def get_llm(model_name: Optional[str] = None):
-    """Return a chat LLM client for reasoning nodes.
+    default_headers = {}
 
-    Behavior:
-    - If `settings.LLM_PROVIDER` == 'groq', try to return a Groq-backed Chat model
-      (requires `langchain_groq` to be installed and `GROQ_API_KEY` set).
-    - Otherwise return the OpenAI-backed Chat client.
-    """
-    # Select model based on provider
-    if settings.LLM_PROVIDER == "groq":
-        model = model_name or settings.GROQ_MODEL
-    else:
-        model = model_name or settings.OPENAI_MODEL or "gpt-4o-mini"
+    if settings.OPENROUTER_APP_URL:
+        default_headers["HTTP-Referer"] = settings.OPENROUTER_APP_URL
 
-    # Groq provider
-    if settings.LLM_PROVIDER == "groq":
-        # Use the local Groq adapter which talks to the Groq REST API via httpx.
-        try:
-            from app.llm_adapters.groq_adapter import GroqChat
-
-            return GroqChat(model=model, temperature=0, api_key=settings.GROQ_API_KEY)
-        except Exception as e:
-            raise RuntimeError(
-                "LLM_PROVIDER is set to 'groq' but the local Groq adapter failed to initialize."
-            ) from e
-
-    # Default: OpenAI via langchain-openai
-    from langchain_openai import ChatOpenAI
+    if settings.OPENROUTER_APP_NAME:
+        default_headers["X-OpenRouter-Title"] = settings.OPENROUTER_APP_NAME
 
     return ChatOpenAI(
-        model=model,
+        model=settings.OPENROUTER_MODEL,
         temperature=0,
-        openai_api_key=settings.OPENAI_API_KEY,
+        api_key=settings.OPENROUTER_API_KEY,
+        base_url=settings.OPENROUTER_BASE_URL,
+        default_headers=default_headers or None,
+    )
+
+def get_openai_llm():
+    if not settings.OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY is missing")
+
+    return ChatOpenAI(
+        model=settings.OPENAI_MODEL,
+        temperature=0,
+        api_key=settings.OPENAI_API_KEY,
+    )
+
+def get_llm():
+    provider = (settings.LLM_PROVIDER or "openrouter").lower()
+
+    if provider == "openrouter":
+        return get_openrouter_llm()
+
+    if provider == "openai":
+        return get_openai_llm()
+
+    raise RuntimeError(
+        f"Unsupported LLM_PROVIDER: {settings.LLM_PROVIDER}. "
+        "Supported providers: openrouter, openai"
     )

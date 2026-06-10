@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import logging
 import re
 from typing import Any, Optional, TypedDict
@@ -192,36 +193,46 @@ async def _run_relevance_check(masked_text: str) -> RelevanceCheck:
     # Remove markers before checking relevance to avoid biasing the LLM
     clean_snippet = masked_text.replace('\f', ' ')[:RELEVANCE_SNIPPET_CHARS]
 
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            (
-                "system",
-                (
-                    "You are a strict software-document gatekeeper. Accept only content "
-                    "related to software requirements, engineering specs, architecture "
-                    "notes, planning notes, backlog items, or sprint/meeting notes for "
-                    "software products. Reject spam, personal notes, random lists, "
-                    "marketing content, and unrelated domains."
-                ),
-            ),
-            (
-                "user",
-                "Classify this snippet and return structured output.\nSnippet:\n{snippet}",
-            ),
-        ]
+    system_prompt = (
+        "You are a strict software-document gatekeeper. Accept only content "
+        "related to software requirements, engineering specs, architecture "
+        "notes, planning notes, backlog items, or sprint/meeting notes for "
+        "software products. Reject spam, personal notes, random lists, "
+        "marketing content, and unrelated domains.\n\n"
+        "Return ONLY valid JSON. No markdown. No explanations.\n"
+        "Shape: {\"is_useful\": bool, \"relevance_score\": float, \"reason\": \"string\"}"
     )
+
+    user_prompt = f"Classify this snippet and return structured output.\nSnippet:\n{clean_snippet}"
 
     try:
         llm = get_llm()
-        structured_llm = llm.with_structured_output(RelevanceCheck)
-        chain = prompt | structured_llm
-        response = await chain.ainvoke({"snippet": clean_snippet})
+        raw = await llm.ainvoke([
+            ("system", system_prompt),
+            ("user", user_prompt)
+        ])
+        content = getattr(raw, "content", None) or str(raw)
+        
+        # Strip code fences
+        content = content.strip()
+        if content.startswith("```"):
+            lines = content.splitlines()
+            if lines[0].startswith("```"): lines = lines[1:]
+            if lines and lines[-1].startswith("```"): lines = lines[:-1]
+            content = "\n".join(lines).strip()
 
-        return RelevanceCheck(
-            is_useful=bool(response.is_useful),
-            relevance_score=max(0.0, min(1.0, float(response.relevance_score))),
-            reason=(response.reason or "No reason provided.").strip(),
-        )
+        try:
+            parsed = json.loads(content)
+            response = RelevanceCheck.model_validate(parsed)
+            return RelevanceCheck(
+                is_useful=bool(response.is_useful),
+                relevance_score=max(0.0, min(1.0, float(response.relevance_score))),
+                reason=(response.reason or "No reason provided.").strip(),
+            )
+        except Exception as pe:
+            print(f"Ingest relevance parse error: {pe}")
+            raise pe
+
     except Exception as exc:
         logger.warning("LLM relevance check failed, using heuristic fallback: %s", exc)
         fallback = _heuristic_relevance(clean_snippet)
@@ -234,7 +245,9 @@ async def _run_relevance_check(masked_text: str) -> RelevanceCheck:
 
 async def ingest_node(state: PipelineState) -> IngestOutput:
     """Ingest input, extract/clean text, mask PII, and classify relevance for routing."""
+    print("--- INGEST NODE ---")
     # Trust the file_type determined by detect_file_type
+
     file_type = str(state.get("file_type", "")).strip().lower()
 
     if file_type == "audio":

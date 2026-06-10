@@ -13,14 +13,25 @@ async def format_node(state: PipelineState) -> dict:
     stories = state.get("user_stories", [])
     reqs = state.get("classified_requirements", [])
 
+    # Default to partial; we'll compute precise status below
+    status = "partial"
+
+    # Fatal error without outputs => error
     if error and not stories and not reqs:
         status = "error"
+    # Explicit rejection
     elif state.get("is_useful") is False:
         status = "rejected"
-    elif error and (stories or reqs):
-        status = "partial"
     else:
-        status = "success"
+        # If useful but both requirements and stories empty => needs_review
+        # Instruction says: If is_useful=true and requirements is empty -> needs_review
+        # If is_useful=true and user_stories is empty -> needs_review
+        if state.get("is_useful") and (not reqs or not stories):
+            status = "needs_review"
+        else:
+            # No fatal error, useful, and both outputs present => success
+            status = "success"
+
 
     # Compute processing time if possible
     started_at = state.get("started_at")
@@ -31,7 +42,7 @@ async def format_node(state: PipelineState) -> dict:
 
     # If any high severity quality issues exist, override status to needs_review
     q_issues = state.get("quality_issues", []) or []
-    has_high = any(getattr(q, "severity", None) == "high" for q in q_issues)
+    has_high = any(getattr(q, "severity", None) == "high" or (isinstance(q, dict) and q.get("severity") == "high") for q in q_issues)
     if has_high:
         status = "needs_review"
 

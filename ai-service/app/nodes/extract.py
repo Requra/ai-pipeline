@@ -1,9 +1,18 @@
 from app.schemas.pipeline_state import PipelineState
-from app.schemas.items import ExtractedRequirement, SourceChunk, EvidenceSpan, FunctionalRequirement, RequirementType
+from app.schemas.items import (
+    ExtractedRequirement,
+    SourceChunk,
+    EvidenceSpan,
+    FunctionalRequirement,
+    RequirementType,
+    QualityIssue,
+    PipelineWarning,
+)
 from app.llm import get_llm
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 from typing import List, Optional
+import inspect
 import re
 import asyncio
 import traceback
@@ -66,80 +75,125 @@ async def process_chunk(llm, prompt, chunk: SourceChunk) -> List[ExtractedRequir
         return []
 
     try:
-        # Build a simple prompt string (system + user) to avoid LangChain Runnable composition.
+        # Build a strict extraction prompt string (system + user)
         system_text = (
-            "You are a senior requirements engineer. Extract requirements from the provided text.\n\n"
-            "Identify and categorize the following:\n"
-            "- FR (Functional Requirement): What the system must do.\n"
-            "- NFR (Non-Functional Requirement): Performance, security, usability, etc.\n"
-            "- BR (Business Rule): Policy or logic that governs the business process.\n"
-            "- Constraint: Limitations (e.g., specific technology, deadline).\n"
-            "- Assumption: Things believed to be true but not confirmed.\n"
-            "- Open Question: Ambiguities needing clarification.\n"
-            "- Out-of-Scope: Explicitly mentioned items that are NOT being implemented.\n\n"
+            "You are a senior software requirements analyst.\n"
+            "Extract atomic software requirements from the source text.\n"
+            "Return valid JSON only. No markdown. No explanation.\n\n"
             "Rules:\n"
-            "1. Every requirement must be grounded in the text.\n"
-            "2. Provide at least one direct quote as 'evidence'.\n"
-            "3. Set 'confidence' (0.0 to 1.0).\n"
-            "4. If an item is vague, set 'needs_review' to true and provide a 'review_reason'.\n"
-            "5. Do NOT invent or hallucinate requirements.\n"
-            "6. Use atomic requirements (one action/fact per item).\n\n"
-            "Return structured JSON output with top-level key 'requirements'."
+            "- Extract functional requirements, non-functional requirements, business rules, constraints, assumptions, open questions, and out-of-scope items.\n"
+            "- Every item must include a direct quote copied from the source text.\n"
+            "- Every quote must exist exactly or nearly exactly in the source text.\n"
+            "- Use ONLY these labels exactly: FR, NFR, BR, Constraint, Assumption, Open Question, Out-of-Scope.\n"
+            "- If unsure, set needs_review=true.\n"
+            "- Do not invent requirements.\n"
+            "- Do not return empty requirements when the text clearly contains software requirements.\n\n"
+            "Return JSON exactly in this shape: {\"requirements\": [...]}"
         )
 
         user_text = f"Extract requirements from this text:\n\n{clean_text}"
-        prompt_str = system_text + "\n\n" + user_text
-
-        # First try structured output (adapter may provide validation)
-        # Try structured output via adapter; be compatibility-friendly with tests
-        response = None
+        
+        # Call LLM with strict instructions
         try:
-            structured_llm = llm.with_structured_output(ExtractionResponse)
-
-            # Preferred: structured_llm provides an async `ainvoke` method
-            if hasattr(structured_llm, "ainvoke") and callable(getattr(structured_llm, "ainvoke")):
-                try:
-                    response = await structured_llm.ainvoke(prompt_str)
-                except TypeError:
-                    response = None
-
-            # Fallback for test mocks that expect `prompt | structured_llm` composition
-            if response is None and prompt is not None and hasattr(prompt, "__or__"):
-                try:
-                    chain = prompt | structured_llm
-                    response = await chain.ainvoke(prompt_str)
-                except Exception:
-                    response = None
-
-        except Exception as structured_err:
-            print(f"Structured extraction failed for chunk {chunk.chunk_id}: {type(structured_err).__name__}: {repr(structured_err)}")
-            traceback.print_exc()
-
-        # If structured response not available, use raw LLM with json_mode and parse
-        if response is None:
+            # We use ainvoke directly for better control over raw output
+            raw = await llm.ainvoke([
+                ("system", system_text),
+                ("user", user_text)
+            ])
+            content = getattr(raw, "content", None) or str(raw)
+            
+            # Debug preview: log first 500 chars
             try:
-                raw = await llm.ainvoke(prompt_str, json_mode=True)
-                content = getattr(raw, "content", None) or str(raw)
-                # Strip common code fences
-                content = content.strip()
-                if content.startswith("```"):
-                    # remove fence
-                    first_nl = content.find("\n")
-                    if first_nl != -1:
-                        content = content[first_nl+1:]
-                    if content.endswith("```"):
-                        content = content[:-3]
+                preview = content[:500]
+                print(f"[extract][chunk={chunk.chunk_id}] raw model output preview: {preview}")
+            except Exception:
+                pass
+
+            # Strip common code fences if LLM ignored instructions
+            content = content.strip()
+            if content.startswith("```"):
+                # Handle cases like ```json or just ```
+                lines = content.splitlines()
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].startswith("```"):
+                    lines = lines[:-1]
+                content = "\n".join(lines).strip()
+
+            try:
                 parsed = json.loads(content)
-                response = ExtractionResponse.model_validate(parsed)
-            except Exception as parse_err:
-                print(f"JSON fallback parse failed for chunk {chunk.chunk_id}: {type(parse_err).__name__}: {repr(parse_err)}")
-                traceback.print_exc()
+            except Exception as je:
+                print(f"[extract][chunk={chunk.chunk_id}] JSON parse error: {type(je).__name__}: {repr(je)}")
+                print(f"[extract][chunk={chunk.chunk_id}] raw content: {content}")
                 return []
+
+            try:
+                response = ExtractionResponse.model_validate(parsed)
+            except Exception as ve:
+                print(f"[extract][chunk={chunk.chunk_id}] validation error: {type(ve).__name__}: {repr(ve)}")
+                return []
+        except Exception as llm_err:
+            print(f"LLM extraction failed for chunk {chunk.chunk_id}: {type(llm_err).__name__}: {repr(llm_err)}")
+            return []
 
         if not response or not getattr(response, "requirements", None):
             return []
 
         reqs = response.requirements
+
+        # Normalize labels to allowed set exactly as requested
+        LABEL_MAP = {
+            "Functional Requirement": "FR",
+            "Functional": "FR",
+            "Non-Functional Requirement": "NFR",
+            "Non Functional": "NFR",
+            "Non-Functional": "NFR",
+            "Business Rule": "BR",
+            "business_rule": "BR",
+            "Out of Scope": "Out-of-Scope",
+            "Out of scope": "Out-of-Scope",
+            "open_question": "Open Question",
+        }
+
+        def _normalize_label(l):
+            if not l:
+                return "FR"
+            allowed = {"FR", "NFR", "BR", "Constraint", "Assumption", "Open Question", "Out-of-Scope"}
+            if l in allowed:
+                return l
+            mapped = LABEL_MAP.get(l)
+            if mapped:
+                return mapped
+            # Heuristic fallback if not in map
+            up = str(l).strip()
+            if up.lower().startswith("func"):
+                return "FR"
+            if "non" in up.lower() or "nfr" in up.lower():
+                return "NFR"
+            if "business" in up.lower() or up.lower() == "br":
+                return "BR"
+            if "out" in up.lower() and "scope" in up.lower():
+                return "Out-of-Scope"
+            if "open" in up.lower() and "question" in up.lower():
+                return "Open Question"
+            if "constraint" in up.lower():
+                return "Constraint"
+            if "assumption" in up.lower():
+                return "Assumption"
+            return "FR"
+
+        for r in reqs:
+            try:
+                cl = getattr(r, "candidate_labels", []) or []
+                norm = []
+                for lab in cl:
+                    nl = _normalize_label(lab)
+                    if nl not in norm:
+                        norm.append(nl)
+                r.candidate_labels = norm
+            except Exception:
+                r.candidate_labels = ["FR"]
+
 
         # Enrich with chunk metadata and enforce evidence
         for r in reqs:
@@ -274,12 +328,27 @@ async def extract_node(state: PipelineState) -> dict:
         ]
 
         if not extracted_reqs:
+            warnings = [
+                {"node_name": "extract", "code": "EXTRACT_EMPTY", "message": "No requirements found in the provided content."}
+            ]
+
+            quality_issues = []
+            # If the document was accepted as useful, add a high-severity quality issue
+            if state.get("is_useful"):
+                qi = QualityIssue(
+                    item_id=0,
+                    item_type="requirement",
+                    severity="high",
+                    rule_violated="USEFUL_INPUT_WITH_EMPTY_EXTRACTION",
+                    details="Document was accepted as useful but no requirements were extracted."
+                )
+                quality_issues.append(qi)
+
             return {
                 "extracted_requirements": [],
                 "functional_requirements": [],
-                "warnings": [
-                    {"node_name": "extract", "code": "EXTRACT_EMPTY", "message": "No requirements found in the provided content."}
-                ],
+                "warnings": warnings,
+                "quality_issues": quality_issues,
                 "status": "partial"
             }
 
