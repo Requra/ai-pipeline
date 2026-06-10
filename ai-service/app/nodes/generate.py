@@ -3,7 +3,7 @@ from app.schemas.items import UserStory, AcceptanceCriterion, RequirementCoverag
 from app.llm import get_llm
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
-from typing import List
+from typing import List, Any
 import json
 
 
@@ -22,6 +22,23 @@ RULES:
 5. Write Agile format:
    As a <actor>, I want <goal>, so that <benefit>
 6. Generate clear acceptance criteria
+
+Return JSON exactly in this shape:
+{
+  "stories": [
+    {
+      "id": 1,
+      "title": "Register account",
+      "description": "As a user, I want to register using email and password, so that I can access the CRM.",
+      "acceptance_criteria": [
+        "Given a new user, when they submit valid email and password, then the account is created."
+      ],
+      "labels": ["FR"]
+    }
+  ]
+}
+
+Do NOT return `user_stories`, markdown, explanation, or plain text.
 """
 
 USER_PROMPT = """
@@ -46,6 +63,27 @@ class GenerationResponse(BaseModel):
 
 
 # ---------------- HELPERS ----------------
+
+def normalize_generation_payload(parsed: Any) -> dict:
+    if isinstance(parsed, list):
+        return {"stories": parsed}
+
+    if not isinstance(parsed, dict):
+        raise ValueError(f"Generation output must be dict or list, got {type(parsed).__name__}")
+
+    if "stories" in parsed:
+        return parsed
+
+    if "user_stories" in parsed:
+        return {"stories": parsed["user_stories"]}
+
+    if "items" in parsed:
+        return {"stories": parsed["items"]}
+
+    if "data" in parsed:
+        return {"stories": parsed["data"]}
+
+    return parsed
 
 def _format_requirement(req) -> str:
     labels = getattr(req, "labels", None) or [getattr(req, "label", "FR")]
@@ -83,6 +121,40 @@ async def generate_node(state: PipelineState) -> dict:
         existing_warnings = state.get("warnings", []) or []
         return {"user_stories": [], "warnings": existing_warnings + new_warnings}
 
+    to_generate = []
+    to_skip = []
+    non_story_types = {"Open Question", "Out-of-Scope", "Assumption"}
+
+    for req in classified:
+        labels = _normalize_labels(getattr(req, "labels", None))
+        # If labels are exclusively non-story types, skip generation
+        if set(labels).issubset(non_story_types):
+            to_skip.append(req)
+        else:
+            to_generate.append(req)
+
+    requirement_coverages = []
+    for req in to_skip:
+        coverage = RequirementCoverage(
+            requirement_id=req.id,
+            coverage_type="non_story_requirement",
+            story_ids=[],
+            acceptance_criteria_ids=[],
+            reason="Open questions/out-of-scope/assumptions are not converted into user stories."
+        )
+        requirement_coverages.append(coverage)
+
+    if not to_generate:
+        new_warnings = [
+            {"node_name": "generate", "code": "GENERATE_SKIPPED_NO_ACTIONABLE", "message": "No actionable requirements available for generation; skipped."}
+        ]
+        existing_warnings = state.get("warnings", []) or []
+        return {
+            "user_stories": [], 
+            "warnings": existing_warnings + new_warnings,
+            "requirement_coverages": requirement_coverages
+        }
+
 
     try:
         llm = get_llm()
@@ -90,10 +162,10 @@ async def generate_node(state: PipelineState) -> dict:
         if llm is None:
             raise RuntimeError("LLM not initialized")
 
-        items_text = "\n\n".join(_format_requirement(req) for req in classified)
+        items_text = "\n\n".join(_format_requirement(req) for req in to_generate)
 
         raw = await llm.ainvoke([
-            ("system", SYSTEM_PROMPT + "\n\nReturn ONLY valid JSON. No markdown. No explanations."),
+            ("system", SYSTEM_PROMPT),
             ("user", USER_PROMPT.format(items=items_text))
         ])
         content = getattr(raw, "content", None) or str(raw)
@@ -110,17 +182,14 @@ async def generate_node(state: PipelineState) -> dict:
 
         try:
             parsed = json.loads(content)
-            # Support both direct list or wrapped in "stories"
-            if isinstance(parsed, list):
-                parsed = {"stories": parsed}
-            response = GenerationResponse.model_validate(parsed)
+            normalized = normalize_generation_payload(parsed)
+            response = GenerationResponse.model_validate(normalized)
         except Exception as pe:
             print(f"Generation parse/validation error: {pe}")
             print(f"Raw content: {content}")
             raise pe
 
         stories = response.stories if response else []
-
 
         final_stories = []
 
@@ -153,13 +222,9 @@ async def generate_node(state: PipelineState) -> dict:
             )
 
             final_stories.append(user_story)
-            # accumulate coverage per story in return dict
-            if "requirement_coverages" not in locals():
-                requirement_coverages = []
             requirement_coverages.append(coverage)
-        result = {"user_stories": final_stories}
-        if "requirement_coverages" in locals():
-            result["requirement_coverages"] = requirement_coverages
+            
+        result = {"user_stories": final_stories, "requirement_coverages": requirement_coverages}
         return result
 
     except Exception as e:
@@ -168,13 +233,33 @@ async def generate_node(state: PipelineState) -> dict:
         # ---------------- SAFE FALLBACK ----------------
         fallback = []
 
-        for req in classified:
+        for req in to_generate:
             labels = _normalize_labels(getattr(req, "labels", None))
             story_id = f"{state.get('job_id')}_story_{req.id}"
+            
+            actor = getattr(req, "actor", None)
+            goal = getattr(req, "goal", None)
+            
+            if not actor:
+                req_text_lower = req.text.lower()
+                if "admin" in req_text_lower:
+                    actor = "admin"
+                elif "sales representative" in req_text_lower:
+                    actor = "sales representative"
+                elif "viewer" in req_text_lower:
+                    actor = "viewer"
+                elif set(labels).issubset({"NFR", "BR"}):
+                    actor = "system"
+                else:
+                    actor = "user"
+            
+            if not goal:
+                goal = "satisfy this requirement"
+
             fallback_story = UserStory(
                 id=story_id,
                 title=f"Story for requirement {req.id}",
-                description=f"As a {req.actor}, I want {req.goal}, so that: {req.text}",
+                description=f"As a {actor}, I want {goal}, so that: {req.text}",
                 acceptance_criteria=[
                     AcceptanceCriterion(
                         id="",
@@ -196,16 +281,21 @@ async def generate_node(state: PipelineState) -> dict:
                 acceptance_criteria_ids=[c.id for c in fallback_story.acceptance_criteria],
                 reason=None
             )
-
-            if "requirement_coverages" not in locals():
-                requirement_coverages = []
             requirement_coverages.append(coverage)
 
-        result = {"user_stories": fallback}
-        if "requirement_coverages" in locals():
-            result["requirement_coverages"] = requirement_coverages
+        result = {"user_stories": fallback, "requirement_coverages": requirement_coverages}
+
+        existing_warnings = state.get("warnings", []) or []
+        new_warnings = [
+            {
+                "node_name": "generate",
+                "code": "GENERATE_LLM_PARSE_FALLBACK",
+                "message": f"Generation LLM output could not be parsed; fallback stories were generated. Error: {type(e).__name__}: {str(e)}"
+            }
+        ]
+
         return {
             **result,
-            "error_message": str(e),
+            "warnings": existing_warnings + new_warnings,
             "status": "partial"
         }

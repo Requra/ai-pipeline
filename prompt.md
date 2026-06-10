@@ -1,199 +1,310 @@
+
+````md
 You are continuing Requra/ai-pipeline on branch review/full-pipeline-merge.
 
-Goal:
-Make LangSmith Studio / LangGraph Studio work correctly for local graph debugging.
+Current confirmed bug:
+LangGraph Studio fails with:
 
-Current issue:
-Studio shows:
+Invalid state update, expected dict with one or more of PipelineState keys...
+got {..., "error_message": "...", "status": "partial"}
 
-Failed to initialize Studio
-TypeError: Failed to fetch
-Please verify if the API server is running or accessible from the browser.
+Also generate_node logs:
 
-Important:
-The current FastAPI server runs with:
-uvicorn app.main:app --reload
+1 validation error for GenerationResponse
+stories
+  Field required
 
-But LangSmith Studio does NOT connect to the FastAPI `/process-json` server.
-Studio needs a LangGraph Agent Server started by:
-
-langgraph dev
-
-LangGraph docs show:
-- `langgraph dev` is the lightweight local development server.
-- Default API port is 2024.
-- Studio URL should point to baseUrl=http://127.0.0.1:2024 or http://localhost:2024.
+Root cause:
+1. `GenerationResponse` expects key `stories`.
+2. OpenRouter/model sometimes returns key `user_stories`.
+3. generate_node parser only supports:
+   - direct list
+   - {"stories": [...]}
+4. Then parsing fails.
+5. The fallback succeeds and creates user_stories + requirement_coverages.
+6. But fallback return includes `error_message`, which is NOT part of PipelineState.
+7. LangGraph Studio rejects the state update.
 
 Do NOT:
-- Change the production FastAPI endpoint.
-- Change pipeline graph order.
-- Add new pipeline nodes.
-- Break `/process-json`.
-- Add Docker-only setup for this task.
-- Require `langgraph up` for normal local debugging.
+- Add new graph nodes.
+- Change graph order.
+- Remove fallback story generation.
+- Fake requirements.
+- Remove Pydantic validation.
+- Break FastAPI `/process-json`.
 
-Tasks:
+Required fixes:
 
-1. Add/verify `ai-service/langgraph.json`
+1. Fix generate parser normalization
 
-Create or fix:
+In `app/nodes/generate.py`, update parsing logic.
 
+Current behavior supports:
+- list → {"stories": list}
+- {"stories": [...]}
+
+Add support for:
+- {"user_stories": [...]}
+- {"items": [...]}
+- {"data": [...]}
+
+Suggested helper:
+
+```python
+def normalize_generation_payload(parsed: Any) -> dict:
+    if isinstance(parsed, list):
+        return {"stories": parsed}
+
+    if not isinstance(parsed, dict):
+        raise ValueError(f"Generation output must be dict or list, got {type(parsed).__name__}")
+
+    if "stories" in parsed:
+        return parsed
+
+    if "user_stories" in parsed:
+        return {"stories": parsed["user_stories"]}
+
+    if "items" in parsed:
+        return {"stories": parsed["items"]}
+
+    if "data" in parsed:
+        return {"stories": parsed["data"]}
+
+    return parsed
+````
+
+Then:
+
+```python
+parsed = json.loads(content)
+normalized = normalize_generation_payload(parsed)
+response = GenerationResponse.model_validate(normalized)
+```
+
+2. Make generation prompt stricter
+
+Update prompt to clearly say:
+
+Return JSON exactly in this shape:
+
+```json
 {
-  "dependencies": ["."],
-  "graphs": {
-    "requra_pipeline": "./app/graph/pipeline.py:graph"
-  },
-  "env": "./.env"
+  "stories": [
+    {
+      "id": 1,
+      "title": "Register account",
+      "description": "As a user, I want to register using email and password, so that I can access the CRM.",
+      "acceptance_criteria": [
+        "Given a new user, when they submit valid email and password, then the account is created."
+      ],
+      "labels": ["FR"]
+    }
+  ]
 }
+```
 
-Make sure `app/graph/pipeline.py` exports a compiled graph variable named:
+Do NOT return:
 
-graph
+* `user_stories`
+* markdown
+* explanation
+* plain text
 
-Example:
+But keep parser normalization because LLMs may still return `user_stories`.
 
-graph = build_pipeline()
+3. Remove invalid `error_message` from generate_node return
 
-LangGraph docs show `langgraph.json` maps graph names to Python file paths and graph variables, and can load env from `.env`.
+In `generate_node` fallback return, replace:
 
-2. Install LangGraph CLI dev dependency
-
-Add if missing:
-
-poetry add --group dev "langgraph-cli[inmem]"
-
-or ensure it exists in pyproject dev dependencies.
-
-3. Add a local Studio startup command
-
-Add docs or script:
-
-cd ai-service
-poetry run langgraph dev
-
-Expected CLI output should include:
-- API: http://localhost:2024
-- Docs: http://localhost:2024/docs
-- Studio Web UI: https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
-
-4. Add a simple health check command
-
-After `langgraph dev` starts, verify from browser or terminal:
-
-curl http://127.0.0.1:2024/docs
-
-Also test:
-
-curl http://127.0.0.1:2024/ok
-
-If `/ok` is not available, at minimum `/docs` should load.
-
-5. Fix Studio connection instructions
-
-In LangSmith Studio:
-- Click Server connection settings.
-- Set API server/base URL to:
-
-http://127.0.0.1:2024
-
-If that fails, try:
-
-http://localhost:2024
-
-Do not set it to:
-http://127.0.0.1:8000
-
-because port 8000 is FastAPI, not LangGraph Agent Server.
-
-6. Add Studio-friendly test input documentation
-
-Because this graph expects PipelineState, not a normal chat message, add docs showing a valid input payload.
-
-Create docs/testing/LANGGRAPH_STUDIO.md with:
-
-- How to run `langgraph dev`
-- What URL to use in Studio
-- Difference between FastAPI testing and Studio testing
-- Example Studio input state
-
-Example Studio input:
-
-{
-  "job_id": "studio-test-001",
-  "raw_bytes": "",
-  "raw_text": "The system shall allow users to register using email and password. Admins shall export customer reports as CSV and PDF. The dashboard must load in less than 2 seconds.",
-  "file_type": "text",
-  "metadata": {
-    "source": "studio_manual_test"
-  },
-  "source_metadata": null,
-  "chunks": [],
-  "extracted_requirements": [],
-  "classified_requirements": [],
-  "requirement_coverages": [],
-  "user_stories": [],
-  "quality_issues": [],
-  "warnings": [],
-  "export_rows": [],
-  "summary": null,
-  "job_result": null,
-  "is_useful": false,
-  "relevance_score": 0,
-  "status": "started",
-  "error": null,
-  "started_at": 0,
-  "processing_time_ms": 0,
-  "functional_requirements": []
+```python
+return {
+    **result,
+    "error_message": str(e),
+    "status": "partial"
 }
+```
 
-7. Check raw_bytes issue
+with:
 
-If Studio fails because `raw_bytes` expects bytes and JSON provides string:
-- Do not break FastAPI.
-- Add a Studio/dev-only wrapper graph OR make detect/ingest tolerate `raw_bytes=""`.
-- Prefer minimal safe fix:
-  - If raw_bytes is a string, convert it to bytes internally only where needed.
-  - Or allow raw_text-only state for Studio testing.
+```python
+existing_warnings = state.get("warnings", []) or []
+new_warnings = [
+    {
+        "node_name": "generate",
+        "code": "GENERATE_LLM_PARSE_FALLBACK",
+        "message": f"Generation LLM output could not be parsed; fallback stories were generated. Error: {type(e).__name__}: {str(e)}"
+    }
+]
 
-8. Add docs note
+return {
+    **result,
+    "warnings": existing_warnings + new_warnings,
+    "status": "partial"
+}
+```
 
-Clarify:
+Important:
+Do not return `error_message` from any node except inside final `JobResult` construction in `format_node`.
 
-FastAPI testing:
-poetry run uvicorn app.main:app --reload
-POST http://127.0.0.1:8000/process-json
+PipelineState has `error`, not `error_message`.
 
-Studio testing:
-poetry run langgraph dev
-Open Studio URL with baseUrl=http://127.0.0.1:2024
+4. Search entire codebase for invalid state key
 
-They are different servers.
+Run search:
 
-9. Run validation
+```bash
+grep -R "error_message" -n app
+```
+
+Rules:
+
+* Node return dicts must not return `error_message`.
+* Internal final schema `JobResult.error_message` is allowed only inside format/result serialization.
+* Graph state should use `error`.
+
+If a node wants to report non-fatal issue:
+
+* use `warnings`
+
+If fatal:
+
+* use `error`
+
+5. Improve fallback story quality
+
+Current fallback produces bad text like:
+
+```txt
+As a None, I want None, so that...
+```
+
+Fix fallback:
+
+If `req.actor` is missing:
+
+* use `"system"` for NFR/BR
+* use `"user"` for generic FR
+* use `"admin"` if text contains admin/admins
+* use `"sales representative"` if text contains sales representative
+* use `"viewer"` if text contains viewer
+
+If `req.goal` is missing:
+
+* derive short goal from requirement text
+* or use `"satisfy this requirement"`
+
+Never produce:
+
+* `As a None`
+* `I want None`
+
+6. Do not generate user stories for Open Questions and Out-of-Scope
+
+If labels include only:
+
+* Open Question
+* Out-of-Scope
+* Assumption
+
+then do not create user stories.
+
+Instead create coverage:
+
+```python
+coverage_type = "non_story"
+reason = "Open questions/out-of-scope/assumptions are not converted into user stories."
+```
+
+For BR/NFR:
+
+* It is acceptable to generate a story if mapped to implementation behavior.
+* But pure business rules can also be `attached` or `non_story` later.
+* For MVP, generating stories for FR/NFR/BR is acceptable, but not for Open Question and Out-of-Scope.
+
+7. Add tests
+
+Add tests for generate normalization:
+
+Test 1:
+Input:
+
+```json
+{"user_stories": [{"id": 1, "title": "...", "description": "...", "acceptance_criteria": ["..."], "labels": ["FR"]}]}
+```
+
+Expected:
+
+* validates as GenerationResponse
+* output has user_stories
+
+Test 2:
+Input:
+
+```json
+{"stories": [...]}
+```
+
+Expected pass.
+
+Test 3:
+Direct list input passes.
+
+Test 4:
+Fallback return does not contain `error_message`.
+
+Test 5:
+Fallback does not produce `As a None`.
+
+Test 6:
+Open Question / Out-of-Scope requirements do not create user stories; they create non_story coverage.
+
+8. Validate
 
 Run:
 
+```bash
 cd ai-service
 poetry run pytest -q
+```
 
-Then run:
+Then restart API:
 
+```bash
+poetry run uvicorn app.main:app --reload --log-level debug
+```
+
+Postman test:
+
+```txt
+POST http://127.0.0.1:8000/process-json
+```
+
+Expected:
+
+* requirements not empty
+* user_stories not empty
+* requirement_coverages not empty
+* no Invalid state update
+* no `error_message` key returned from intermediate node
+* final response may include `error_message` only as part of JobResult, and should be null if no fatal error
+
+Then LangGraph Studio:
+
+```bash
 poetry run langgraph dev
+```
 
-Verify:
-- terminal shows API URL on port 2024
-- http://127.0.0.1:2024/docs opens
-- Studio opens without Failed to fetch
-- requra_pipeline appears as an assistant/graph
-- one Studio run can execute with sample state
-- LangSmith traces appear under project requra-ai-pipeline-mvp
+Expected:
 
-10. Final report
+* Studio run does not fail with Invalid state update
+* graph reaches format node
+* final state includes job_result
 
-Return:
-- Files changed
-- Exact command to start Studio
-- Correct Studio baseUrl
-- Whether graph loaded
-- Whether sample run worked
-- Any remaining Studio limitations
+```
+
+## Current status
+
+You are very close now.
+
+The pipeline already extracted enough to produce **29 fallback stories** and coverage records. The remaining blocker is mostly **state contract cleanup** and **generation output normalization**.
+```

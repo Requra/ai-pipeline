@@ -5,5 +5,6 @@
   "dependencies": ["."],
   "env": ".env",
   "python_version": "3.11",
-  "pip_config_file": "pyproject.toml"
+  "pip_config_file": "pyproject.toml",
+  "watch_ignore": ["**/.langgraph_api/**"]
 }
