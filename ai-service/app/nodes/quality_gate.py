@@ -143,5 +143,6 @@ async def quality_gate_node(state: PipelineState) -> dict:
     has_high = any(q.severity == "high" for q in (existing_q + new_issues))
     status = "needs_review" if has_high else state.get("status", "partial")
 
-    # Return only new issues to avoid duplicates; pipeline reducers will append
-    return {"quality_issues": new_issues, "status": status}
+    # Return all issues (existing + new)
+    return {"quality_issues": existing_q + new_issues, "status": status}
+

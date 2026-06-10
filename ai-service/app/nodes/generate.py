@@ -77,10 +77,12 @@ async def generate_node(state: PipelineState) -> dict:
 
     classified = state.get("classified_requirements", [])
     if not classified:
-        warnings = [
+        new_warnings = [
             {"node_name": "generate", "code": "GENERATE_SKIPPED_NO_REQUIREMENTS", "message": "No classified requirements available; generation skipped."}
         ]
-        return {"user_stories": [], "warnings": warnings}
+        existing_warnings = state.get("warnings", []) or []
+        return {"user_stories": [], "warnings": existing_warnings + new_warnings}
+
 
     try:
         llm = get_llm()

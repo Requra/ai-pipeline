@@ -66,5 +66,6 @@ async def evidence_grounding_node(state: PipelineState) -> dict:
                         details=f"Evidence quote not found in any chunk: '{quote[:100]}'"
                     ))
 
-    # Return only the newly created quality issues to avoid reducer duplication
-    return {"quality_issues": new_issues}
+    # Return all issues (existing + new) to avoid losing previous ones
+    return {"quality_issues": existing_q + new_issues}
+

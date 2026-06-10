@@ -11,7 +11,7 @@ from app.schemas.items import (
 from app.llm import get_llm
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Optional, Any
 import inspect
 import re
 import asyncio
@@ -23,6 +23,125 @@ class ExtractionResponse(BaseModel):
     requirements: List[ExtractedRequirement] = Field(
         description="A list of extracted requirements including functional, non-functional, business rules, constraints, etc."
     )
+
+
+# Allowed labels exactly as requested
+ALLOWED_LABELS = {"FR", "NFR", "BR", "Constraint", "Assumption", "Open Question", "Out-of-Scope"}
+
+# Normalization map for common LLM variants
+LABEL_MAP = {
+    "Functional Requirement": "FR",
+    "Functional": "FR",
+    "Non-Functional Requirement": "NFR",
+    "Non Functional": "NFR",
+    "Non-Functional": "NFR",
+    "Business Rule": "BR",
+    "business_rule": "BR",
+    "OpenQuestion": "Open Question",
+    "open_question": "Open Question",
+    "Out of Scope": "Out-of-Scope",
+    "out_of_scope": "Out-of-Scope",
+    "Out-of-scope": "Out-of-Scope",
+}
+
+def normalize_label(l: str) -> str:
+    if not l:
+        return "FR"
+    if l in ALLOWED_LABELS:
+        return l
+    mapped = LABEL_MAP.get(l)
+    if mapped:
+        return mapped
+    # Heuristic fallback
+    up = str(l).strip()
+    if up.lower().startswith("func"): return "FR"
+    if "non" in up.lower() or "nfr" in up.lower(): return "NFR"
+    if "business" in up.lower() or up.lower() == "br": return "BR"
+    if "out" in up.lower() and "scope" in up.lower(): return "Out-of-Scope"
+    if "open" in up.lower() and "question" in up.lower(): return "Open Question"
+    if "constraint" in up.lower(): return "Constraint"
+    if "assumption" in up.lower(): return "Assumption"
+    return "FR"
+
+def normalize_extraction_payload(parsed: Any, chunk: SourceChunk) -> dict:
+    """
+    Standardize various LLM output shapes into valid ExtractionResponse dict.
+    Supports shorthand label-key format and missing evidence.
+    """
+    items = []
+    if isinstance(parsed, list):
+        items = parsed
+    elif isinstance(parsed, dict):
+        items = parsed.get("requirements") or parsed.get("items") or []
+        if not items and not any(k in ALLOWED_LABELS for k in parsed.keys()):
+            # Check if dict itself is a single requirement or shorthand
+            pass
+
+    normalized_reqs = []
+    for i, item in enumerate(items):
+        # 1. Handle shorthand { "FR": "text" }
+        if isinstance(item, dict) and len(item) == 1:
+            key = list(item.keys())[0]
+            val = item[key]
+            if key in ALLOWED_LABELS or key in LABEL_MAP or normalize_label(key) in ALLOWED_LABELS:
+                item = {
+                    "id": i + 1,
+                    "text": val,
+                    "candidate_labels": [normalize_label(key)],
+                    "confidence": 0.85,
+                    "evidence": []
+                }
+
+        if not isinstance(item, dict):
+            continue
+
+        # 2. Extract basic fields with fallbacks
+        req_id = item.get("id") or (i + 1)
+        text = item.get("text") or ""
+        
+        # 3. Normalize labels
+        raw_labels = item.get("candidate_labels") or []
+        if not raw_labels and "label" in item:
+            raw_labels = [item["label"]]
+        
+        norm_labels = []
+        for rl in raw_labels:
+            nl = normalize_label(rl)
+            if nl not in norm_labels:
+                norm_labels.append(nl)
+        if not norm_labels:
+            norm_labels = ["FR"]
+
+        # 4. Handle evidence
+        evidence = item.get("evidence") or []
+        if not evidence:
+            evidence = [{
+                "chunk_id": chunk.chunk_id,
+                "quote": text[:500], # use text as quote if missing
+                "page_number": chunk.page_number,
+                "speaker": chunk.speaker,
+                "timestamp": str(chunk.start_time_sec) if chunk.start_time_sec is not None else None
+            }]
+        else:
+            # Ensure every evidence has chunk_id
+            for ev in evidence:
+                if not ev.get("chunk_id"):
+                    ev["chunk_id"] = chunk.chunk_id
+
+        # 5. Build full object
+        normalized_reqs.append({
+            "id": req_id,
+            "text": text,
+            "actor": item.get("actor"),
+            "goal": item.get("goal"),
+            "candidate_labels": norm_labels,
+            "confidence": item.get("confidence") or 0.85,
+            "evidence": evidence,
+            "needs_review": item.get("needs_review") or False,
+            "review_reason": item.get("review_reason")
+        })
+
+    return {"requirements": normalized_reqs}
 
 
 def preprocess_text(text: str) -> str:
@@ -80,6 +199,28 @@ async def process_chunk(llm, prompt, chunk: SourceChunk) -> List[ExtractedRequir
             "You are a senior software requirements analyst.\n"
             "Extract atomic software requirements from the source text.\n"
             "Return valid JSON only. No markdown. No explanation.\n\n"
+            "Do not return shorthand like: { \"FR\": \"...\" }\n\n"
+            "Return only this exact shape:\n"
+            "{\n"
+            "  \"requirements\": [\n"
+            "    {\n"
+            "      \"id\": 1,\n"
+            "      \"text\": \"...\",\n"
+            "      \"actor\": null,\n"
+            "      \"goal\": null,\n"
+            "      \"candidate_labels\": [\"FR\"],\n"
+            "      \"confidence\": 0.95,\n"
+            "      \"evidence\": [\n"
+            "        {\n"
+            "          \"chunk_id\": \"source\",\n"
+            "          \"quote\": \"exact quote from source\"\n"
+            "        }\n"
+            "      ],\n"
+            "      \"needs_review\": false,\n"
+            "      \"review_reason\": null\n"
+            "    }\n"
+            "  ]\n"
+            "}\n\n"
             "Rules:\n"
             "- Extract functional requirements, non-functional requirements, business rules, constraints, assumptions, open questions, and out-of-scope items.\n"
             "- Every item must include a direct quote copied from the source text.\n"
@@ -87,8 +228,7 @@ async def process_chunk(llm, prompt, chunk: SourceChunk) -> List[ExtractedRequir
             "- Use ONLY these labels exactly: FR, NFR, BR, Constraint, Assumption, Open Question, Out-of-Scope.\n"
             "- If unsure, set needs_review=true.\n"
             "- Do not invent requirements.\n"
-            "- Do not return empty requirements when the text clearly contains software requirements.\n\n"
-            "Return JSON exactly in this shape: {\"requirements\": [...]}"
+            "- Do not return empty requirements when the text clearly contains software requirements."
         )
 
         user_text = f"Extract requirements from this text:\n\n{clean_text}"
@@ -109,15 +249,12 @@ async def process_chunk(llm, prompt, chunk: SourceChunk) -> List[ExtractedRequir
             except Exception:
                 pass
 
-            # Strip common code fences if LLM ignored instructions
+            # Strip common code fences
             content = content.strip()
             if content.startswith("```"):
-                # Handle cases like ```json or just ```
                 lines = content.splitlines()
-                if lines[0].startswith("```"):
-                    lines = lines[1:]
-                if lines and lines[-1].startswith("```"):
-                    lines = lines[:-1]
+                if lines[0].startswith("```"): lines = lines[1:]
+                if lines and lines[-1].startswith("```"): lines = lines[:-1]
                 content = "\n".join(lines).strip()
 
             try:
@@ -127,10 +264,14 @@ async def process_chunk(llm, prompt, chunk: SourceChunk) -> List[ExtractedRequir
                 print(f"[extract][chunk={chunk.chunk_id}] raw content: {content}")
                 return []
 
+            # NORMALIZE shorthand before validation
+            normalized = normalize_extraction_payload(parsed, chunk)
+
             try:
-                response = ExtractionResponse.model_validate(parsed)
+                response = ExtractionResponse.model_validate(normalized)
             except Exception as ve:
                 print(f"[extract][chunk={chunk.chunk_id}] validation error: {type(ve).__name__}: {repr(ve)}")
+                print(f"[extract][chunk={chunk.chunk_id}] normalized payload: {json.dumps(normalized, indent=2)}")
                 return []
         except Exception as llm_err:
             print(f"LLM extraction failed for chunk {chunk.chunk_id}: {type(llm_err).__name__}: {repr(llm_err)}")
@@ -140,60 +281,6 @@ async def process_chunk(llm, prompt, chunk: SourceChunk) -> List[ExtractedRequir
             return []
 
         reqs = response.requirements
-
-        # Normalize labels to allowed set exactly as requested
-        LABEL_MAP = {
-            "Functional Requirement": "FR",
-            "Functional": "FR",
-            "Non-Functional Requirement": "NFR",
-            "Non Functional": "NFR",
-            "Non-Functional": "NFR",
-            "Business Rule": "BR",
-            "business_rule": "BR",
-            "Out of Scope": "Out-of-Scope",
-            "Out of scope": "Out-of-Scope",
-            "open_question": "Open Question",
-        }
-
-        def _normalize_label(l):
-            if not l:
-                return "FR"
-            allowed = {"FR", "NFR", "BR", "Constraint", "Assumption", "Open Question", "Out-of-Scope"}
-            if l in allowed:
-                return l
-            mapped = LABEL_MAP.get(l)
-            if mapped:
-                return mapped
-            # Heuristic fallback if not in map
-            up = str(l).strip()
-            if up.lower().startswith("func"):
-                return "FR"
-            if "non" in up.lower() or "nfr" in up.lower():
-                return "NFR"
-            if "business" in up.lower() or up.lower() == "br":
-                return "BR"
-            if "out" in up.lower() and "scope" in up.lower():
-                return "Out-of-Scope"
-            if "open" in up.lower() and "question" in up.lower():
-                return "Open Question"
-            if "constraint" in up.lower():
-                return "Constraint"
-            if "assumption" in up.lower():
-                return "Assumption"
-            return "FR"
-
-        for r in reqs:
-            try:
-                cl = getattr(r, "candidate_labels", []) or []
-                norm = []
-                for lab in cl:
-                    nl = _normalize_label(lab)
-                    if nl not in norm:
-                        norm.append(nl)
-                r.candidate_labels = norm
-            except Exception:
-                r.candidate_labels = ["FR"]
-
 
         # Enrich with chunk metadata and enforce evidence
         for r in reqs:
@@ -238,6 +325,7 @@ async def process_chunk(llm, prompt, chunk: SourceChunk) -> List[ExtractedRequir
         print(f"Error processing chunk {chunk.chunk_id}: {type(e).__name__}: {repr(e)}")
         traceback.print_exc()
         return []
+
 
 def project_legacy_requirements(reqs: List[ExtractedRequirement]) -> List[FunctionalRequirement]:
     """
@@ -328,11 +416,12 @@ async def extract_node(state: PipelineState) -> dict:
         ]
 
         if not extracted_reqs:
-            warnings = [
+            new_warnings = [
                 {"node_name": "extract", "code": "EXTRACT_EMPTY", "message": "No requirements found in the provided content."}
             ]
+            existing_warnings = state.get("warnings", []) or []
 
-            quality_issues = []
+            new_quality_issues = []
             # If the document was accepted as useful, add a high-severity quality issue
             if state.get("is_useful"):
                 qi = QualityIssue(
@@ -342,17 +431,20 @@ async def extract_node(state: PipelineState) -> dict:
                     rule_violated="USEFUL_INPUT_WITH_EMPTY_EXTRACTION",
                     details="Document was accepted as useful but no requirements were extracted."
                 )
-                quality_issues.append(qi)
+                new_quality_issues.append(qi)
+            
+            existing_quality_issues = state.get("quality_issues", []) or []
 
             return {
                 "extracted_requirements": [],
                 "functional_requirements": [],
-                "warnings": warnings,
-                "quality_issues": quality_issues,
+                "warnings": existing_warnings + new_warnings,
+                "quality_issues": existing_quality_issues + new_quality_issues,
                 "status": "partial"
             }
 
         # 5. Normalize IDs (1, 2, 3...)
+
         for i, r in enumerate(extracted_reqs, start=1):
             r.id = i
 

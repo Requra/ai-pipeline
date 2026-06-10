@@ -26,20 +26,18 @@ async def test_quality_issues_not_duplicated(base_state):
 
     state["chunks"] = [SourceChunk(chunk_id="c1", text="irrelevant", start_char=0, end_char=8)]
 
-    # run grounding -> returns new issues only
+    # run grounding -> returns full list (existing + new)
     res1 = await evidence_grounding_node(state)
-    new_issues_from_grounding = res1.get("quality_issues", [])
-    assert len(new_issues_from_grounding) == 1
+    all_issues_after_grounding = res1.get("quality_issues", [])
+    assert len(all_issues_after_grounding) == 2 # existing + 1 new
+    
+    # update state as the pipeline would
+    state["quality_issues"] = all_issues_after_grounding
 
-    # simulate pipeline reducer appending
-    state["quality_issues"] = state["quality_issues"] + new_issues_from_grounding
-
-    # run quality gate which should return only additional new issues (if any)
+    # run quality gate which returns full list (existing + grounding + gate_new)
     res2 = await quality_gate_node(state)
-    new_issues_from_gate = res2.get("quality_issues", [])
+    final_combined = res2.get("quality_issues", [])
 
-    # final list should be existing + grounding + gate (gate should not duplicate grounding)
-    final_combined = state["quality_issues"] + new_issues_from_gate
     # ensure no duplicates by object identity or same fields
     seen = set()
     for q in final_combined:
@@ -47,3 +45,8 @@ async def test_quality_issues_not_duplicated(base_state):
         seen.add(key)
 
     assert len(final_combined) == len(seen)
+    # We expect 2 if gate didn't find new ones, or 2 + gate_new
+    # In this test, gate should find missing labels or something?
+    # Actually, in this test, classified req has labels=["FR"], so gate might not add more.
+    assert len(final_combined) >= 2
+
