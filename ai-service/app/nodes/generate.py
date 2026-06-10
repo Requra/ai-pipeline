@@ -4,6 +4,7 @@ from app.llm import get_llm
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 from typing import List
+import json
 
 
 # ---------------- PROMPT ----------------
@@ -76,7 +77,10 @@ async def generate_node(state: PipelineState) -> dict:
 
     classified = state.get("classified_requirements", [])
     if not classified:
-        return {"user_stories": []}
+        warnings = [
+            {"node_name": "generate", "code": "GENERATE_SKIPPED_NO_REQUIREMENTS", "message": "No classified requirements available; generation skipped."}
+        ]
+        return {"user_stories": [], "warnings": warnings}
 
     try:
         llm = get_llm()
@@ -84,23 +88,37 @@ async def generate_node(state: PipelineState) -> dict:
         if llm is None:
             raise RuntimeError("LLM not initialized")
 
-        structured_llm = llm.with_structured_output(
-            GenerationResponse,
-            method="function_calling"
-        )
-
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", SYSTEM_PROMPT),
-            ("user", USER_PROMPT)
-        ])
-
-        chain = prompt | structured_llm
-
         items_text = "\n\n".join(_format_requirement(req) for req in classified)
 
-        response = await chain.ainvoke({"items": items_text})
+        raw = await llm.ainvoke([
+            ("system", SYSTEM_PROMPT + "\n\nReturn ONLY valid JSON. No markdown. No explanations."),
+            ("user", USER_PROMPT.format(items=items_text))
+        ])
+        content = getattr(raw, "content", None) or str(raw)
+
+        # Strip common code fences
+        content = content.strip()
+        if content.startswith("```"):
+            lines = content.splitlines()
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].startswith("```"):
+                lines = lines[:-1]
+            content = "\n".join(lines).strip()
+
+        try:
+            parsed = json.loads(content)
+            # Support both direct list or wrapped in "stories"
+            if isinstance(parsed, list):
+                parsed = {"stories": parsed}
+            response = GenerationResponse.model_validate(parsed)
+        except Exception as pe:
+            print(f"Generation parse/validation error: {pe}")
+            print(f"Raw content: {content}")
+            raise pe
 
         stories = response.stories if response else []
+
 
         final_stories = []
 

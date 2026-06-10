@@ -50,10 +50,26 @@ def validate_environment():
     Verify that required environment variables are set based on active providers.
     """
     # 1. Validate LLM keys
-    # For the MVP we standardize on OpenAI for all reasoning nodes. Do not
-    # require other provider keys in production.
-    if not settings.OPENAI_API_KEY:
-        error_msg = "OPENAI_API_KEY is missing. OPENAI_API_KEY is required for LLM reasoning nodes."
+    provider = settings.LLM_PROVIDER
+    
+    if provider == "openrouter":
+        if not settings.OPENROUTER_API_KEY:
+            error_msg = "LLM_PROVIDER is set to 'openrouter', but OPENROUTER_API_KEY is missing."
+            if settings.ENV == "production":
+                logger.error(f"CRITICAL: {error_msg}")
+                sys.exit(1)
+            else:
+                logger.warning(f"WARN: {error_msg}")
+    elif provider == "openai":
+        if not settings.OPENAI_API_KEY:
+            error_msg = "LLM_PROVIDER is set to 'openai', but OPENAI_API_KEY is missing."
+            if settings.ENV == "production":
+                logger.error(f"CRITICAL: {error_msg}")
+                sys.exit(1)
+            else:
+                logger.warning(f"WARN: {error_msg}")
+    else:
+        error_msg = f"Unsupported LLM_PROVIDER: {provider}. Supported providers: openrouter, openai"
         if settings.ENV == "production":
             logger.error(f"CRITICAL: {error_msg}")
             sys.exit(1)

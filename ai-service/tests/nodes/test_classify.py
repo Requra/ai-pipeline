@@ -1,4 +1,6 @@
 import pytest
+import json
+from unittest.mock import MagicMock, patch, AsyncMock
 from app.nodes.classify import classify_node
 from app.schemas.items import FunctionalRequirement
 
@@ -52,12 +54,30 @@ async def test_classify_node_real(base_state):
         FunctionalRequirement(id=20, text="The dashboard should load in under 1 second.", actor="User", goal="dashboard usage", source_hint="performance"),
     ]
 
-    result = await classify_node(state)
-    classified = _safe_result(result)
+    mock_llm = MagicMock()
+    # Mock return value for a batch of 5 items
+    async def mock_classify_ainvoke(messages, **kwargs):
+        # We need to extract IDs from the user prompt to return correct IDs in mock
+        user_msg = messages[1][1]
+        ids = []
+        for line in user_msg.splitlines():
+            if line.startswith("id: "):
+                ids.append(int(line.split(":")[1].strip()))
+        
+        content = json.dumps({"classifications": [
+            {"id": i, "labels": ["FR"], "confidence": 1.0} for i in ids
+        ]})
+        return MagicMock(content=content)
+    
+    mock_llm.ainvoke = AsyncMock(side_effect=mock_classify_ainvoke)
+
+    with patch("app.nodes.classify.get_llm", return_value=mock_llm):
+        result = await classify_node(state)
+        classified = _safe_result(result)
 
     _print_results("REAL CLASSIFICATION RESULTS", classified)
 
-    assert len(classified) >= 15
+    assert len(classified) == 20
 
     for item in classified:
         assert item.labels
@@ -94,12 +114,28 @@ async def test_classify_node_ambiguous_cases(base_state):
         FunctionalRequirement(id=20, text="hdsajdbwydjhasbdajhsaj", actor="User", goal="invoice submission", source_hint="finance validation"),
     ]
 
-    result = await classify_node(state)
-    classified = _safe_result(result)
+    mock_llm = MagicMock()
+    async def mock_classify_ainvoke(messages, **kwargs):
+        user_msg = messages[1][1]
+        ids = []
+        for line in user_msg.splitlines():
+            if line.startswith("id: "):
+                ids.append(int(line.split(":")[1].strip()))
+        
+        content = json.dumps({"classifications": [
+            {"id": i, "labels": ["FR"], "confidence": 0.5} for i in ids
+        ]})
+        return MagicMock(content=content)
+    
+    mock_llm.ainvoke = AsyncMock(side_effect=mock_classify_ainvoke)
+
+    with patch("app.nodes.classify.get_llm", return_value=mock_llm):
+        result = await classify_node(state)
+        classified = _safe_result(result)
 
     _print_results("AMBIGUOUS CLASSIFICATION RESULTS", classified)
 
-    assert len(classified) >= 12
+    assert len(classified) == 20
 
     for item in classified:
         assert item.labels

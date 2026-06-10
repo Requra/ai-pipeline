@@ -1,11 +1,13 @@
 import pytest
+import json
+from unittest.mock import MagicMock, patch, AsyncMock
 from app.nodes.generate import generate_node
 from app.schemas.items import ClassifiedRequirement
 
 
 def _format_story(s):
     return (
-        f"\n================ STORY {s.source_fr_id} ================\n"
+        f"\n================ STORY {s.source_requirement_ids} ================\n"
         f"TITLE: {s.title}\n"
         f"DESCRIPTION: {s.description}\n"
         f"LABELS: {s.labels}\n"
@@ -19,6 +21,7 @@ def _format_story(s):
 async def test_generate_node_multilabel_support(base_state, capsys):
 
     state = base_state.copy()
+    state["job_id"] = "test-job"
 
     state["classified_requirements"] = [
         ClassifiedRequirement(
@@ -45,7 +48,30 @@ async def test_generate_node_multilabel_support(base_state, capsys):
         )
     ]
 
-    result = await generate_node(state)
+    mock_resp = json.dumps({
+        "stories": [
+            {
+                "id": 1,
+                "title": "Fast secure login",
+                "description": "As a User, I want to log in within 0.1s so that it's fast.",
+                "acceptance_criteria": ["Log in < 0.1s"],
+                "labels": ["FR", "NFR"]
+            },
+            {
+                "id": 2,
+                "title": "Admin account deletion",
+                "description": "As an Admin, I want to delete accounts.",
+                "acceptance_criteria": ["Only admins delete"],
+                "labels": ["BR"]
+            }
+        ]
+    })
+    
+    mock_llm = MagicMock()
+    mock_llm.ainvoke = AsyncMock(return_value=MagicMock(content=mock_resp))
+
+    with patch("app.nodes.generate.get_llm", return_value=mock_llm):
+        result = await generate_node(state)
 
     assert "user_stories" in result
     stories = result["user_stories"]

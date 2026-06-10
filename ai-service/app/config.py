@@ -15,22 +15,25 @@ class Settings:
     OPENAI_API_KEY: Optional[str] = os.getenv("OPENAI_API_KEY")
     # Default OpenAI model for LLM reasoning nodes
     OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+    # OpenRouter Settings
+    OPENROUTER_API_KEY: Optional[str] = os.getenv("OPENROUTER_API_KEY")
+    OPENROUTER_BASE_URL: str = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+    OPENROUTER_MODEL: str = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")
+    OPENROUTER_APP_URL: Optional[str] = os.getenv("OPENROUTER_APP_URL")
+    OPENROUTER_APP_NAME: str = os.getenv("OPENROUTER_APP_NAME", "Requra AI Pipeline")
     
     # Testing / OSS Keys
     GPT_OSS_API_KEY: Optional[str] = os.getenv("GPT_OSS_API_KEY")
     BASE_URL_KEY: Optional[str] = os.getenv("BASE_URL_KEY")
     
     # LLM Settings
-    # Default reasoning provider. Can be 'openai' or 'groq'.
-    LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "openai").lower().strip()
+    # Default reasoning provider. Can be 'openrouter' or 'openai'.
+    LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "openrouter").lower().strip()
     
     # Transcribe Settings
     TRANSCRIBE_PROVIDER: str = os.getenv("TRANSCRIBE_PROVIDER", "groq").lower().strip()
     GROQ_WHISPER_MODEL: str = os.getenv("GROQ_WHISPER_MODEL", "whisper-large-v3")
     GROQ_LANGUAGE: Optional[str] = os.getenv("GROQ_LANGUAGE")
-    # Groq LLM model name (when using Groq as LLM_PROVIDER)
-    GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-    # Groq base URL for OpenAI-compatible chat completions
-    GROQ_BASE_URL: str = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
 
 settings = Settings()

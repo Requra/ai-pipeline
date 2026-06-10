@@ -27,16 +27,14 @@ async def summarize_node(state: PipelineState) -> dict:
     # Attempt LLM summarization, but fall back to deterministic structured mock
     try:
         llm = get_llm()
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", "You are an expert business analyst. Provide a concise executive summary of the following document text and return structured fields."),
-            ("user", "{text}")
+        
+        raw = await llm.ainvoke([
+            ("system", "You are an expert business analyst. Provide a concise executive summary of the following document text."),
+            ("user", f"Summarize this text:\n\n{raw_text}")
         ])
 
-        chain = prompt | llm
-        response = await chain.ainvoke({"text": raw_text})
-
         # If LLM returns free text, place into executive_summary and leave others empty
-        content = getattr(response, "content", None) or str(response)
+        content = getattr(raw, "content", None) or str(raw)
         return {"summary": StructuredSummary(
             executive_summary=content,
             key_decisions=[],
@@ -48,6 +46,7 @@ async def summarize_node(state: PipelineState) -> dict:
             scope=[],
             out_of_scope=[]
         )}
+
 
     except Exception as e:
         print(f"Summarize node LLM failure: {e}")
