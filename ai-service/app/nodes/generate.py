@@ -3,8 +3,10 @@ from app.schemas.items import UserStory, AcceptanceCriterion, RequirementCoverag
 from app.llm import get_llm
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
-from typing import List, Any
+from typing import List, Any, Optional
 import json
+import re
+import traceback
 
 
 # ---------------- PROMPT ----------------
@@ -16,18 +18,19 @@ Convert requirements into USER STORIES.
 
 RULES:
 1. Each requirement → exactly ONE user story (1:1 mapping)
-2. A requirement may have MULTIPLE labels (FR, NFR, BR)
-3. Include ALL concerns in ONE story (do NOT split)
-4. Keep requirement id mapping
-5. Write Agile format:
+2. Return ONLY user stories for the input requirements.
+3. Every story MUST have a `source_requirement_id` matching the input requirement's `id`.
+4. A requirement may have MULTIPLE labels (FR, NFR, BR)
+5. Include ALL concerns in ONE story (do NOT split)
+6. Write Agile format:
    As a <actor>, I want <goal>, so that <benefit>
-6. Generate clear acceptance criteria
+7. Generate clear acceptance criteria
 
 Return JSON exactly in this shape:
 {
   "stories": [
     {
-      "id": 1,
+      "source_requirement_id": 1,
       "title": "Register account",
       "description": "As a user, I want to register using email and password, so that I can access the CRM.",
       "acceptance_criteria": [
@@ -38,7 +41,7 @@ Return JSON exactly in this shape:
   ]
 }
 
-Do NOT return `user_stories`, markdown, explanation, or plain text.
+Do NOT return markdown, explanation, or plain text.
 """
 
 USER_PROMPT = """
@@ -51,11 +54,11 @@ Convert these classified requirements into user stories:
 # ---------------- STRUCTURED OUTPUT ----------------
 
 class StoryResponse(BaseModel):
-    id: int
+    source_requirement_id: int
     title: str
     description: str
     acceptance_criteria: List[str]
-    labels: List[str]   #  IMPORTANT FOR MULTI-LABEL SUPPORT
+    labels: List[str]
 
 
 class GenerationResponse(BaseModel):
@@ -63,6 +66,43 @@ class GenerationResponse(BaseModel):
 
 
 # ---------------- HELPERS ----------------
+
+def normalize_actor_to_agile_role(actor: Optional[str]) -> str:
+    if not actor or str(actor).lower() == "none":
+        return "a user"
+    
+    actor_lower = str(actor).lower().strip()
+    
+    # 1. Handle common group/plural patterns
+    mapping = {
+        "warehouse staff": "a warehouse staff member",
+        "staff": "a staff member",
+        "employees": "an employee",
+        "managers": "a manager",
+        "admins": "an admin",
+        "sales representatives": "a sales representative",
+        "sales reps": "a sales representative",
+        "users": "a user",
+        "user": "a user",
+        "customers": "a customer",
+        "guests": "a guest",
+        "stakeholders": "a stakeholder",
+    }
+    
+    if actor_lower in mapping:
+        return mapping[actor_lower]
+    
+    # 2. Heuristic for "an" vs "a"
+    # Note: "user" starts with a vowel but sounds like 'y' (consonant)
+    vowels = ("a", "e", "i", "o", "u")
+    if actor_lower.startswith(vowels) and not actor_lower.startswith("user"):
+        if not actor_lower.startswith(("a ", "an ", "the ")):
+            return f"an {actor_lower}"
+    else:
+        if not actor_lower.startswith(("a ", "an ", "the ")):
+            return f"a {actor_lower}"
+            
+    return actor_lower
 
 def normalize_generation_payload(parsed: Any) -> dict:
     if isinstance(parsed, list):
@@ -105,7 +145,7 @@ def _normalize_labels(labels):
         return labels
     if isinstance(labels, str):
         return [labels]
-    return ["FR"]
+    return labels or []
 
 
 # ---------------- NODE ----------------
@@ -123,12 +163,14 @@ async def generate_node(state: PipelineState) -> dict:
 
     to_generate = []
     to_skip = []
-    non_story_types = {"Open Question", "Out-of-Scope", "Assumption"}
+    special_non_story_labels = {"Open Question", "Out-of-Scope", "Assumption"}
 
     for req in classified:
-        labels = _normalize_labels(getattr(req, "labels", None))
-        # If labels are exclusively non-story types, skip generation
-        if set(labels).issubset(non_story_types):
+        labels = set(_normalize_labels(getattr(req, "labels", None)))
+        candidate_labels = set(getattr(req, "candidate_labels", []) or [])
+        
+        # If any label (final or candidate) is in the special set, skip generation
+        if (labels | candidate_labels) & special_non_story_labels:
             to_skip.append(req)
         else:
             to_generate.append(req)
@@ -137,10 +179,10 @@ async def generate_node(state: PipelineState) -> dict:
     for req in to_skip:
         coverage = RequirementCoverage(
             requirement_id=req.id,
-            coverage_type="non_story_requirement",
+            coverage_type="non_story",
             story_ids=[],
             acceptance_criteria_ids=[],
-            reason="Open questions/out-of-scope/assumptions are not converted into user stories."
+            reason="Open questions, assumptions, and out-of-scope items are not converted into user stories."
         )
         requirement_coverages.append(coverage)
 
@@ -189,113 +231,162 @@ async def generate_node(state: PipelineState) -> dict:
             print(f"Raw content: {content}")
             raise pe
 
-        stories = response.stories if response else []
+        llm_stories = response.stories if response else []
+
+        # Create lookup map for LLM output, handling duplicates by keeping first
+        llm_story_map = {}
+        for s in llm_stories:
+            if s.source_requirement_id not in llm_story_map:
+                llm_story_map[s.source_requirement_id] = s
 
         final_stories = []
+        job_id = state.get("job_id") or "job"
 
-        for s in stories:
-            story_id = f"{state.get('job_id')}_story_{s.id}"
-            user_story = UserStory(
-                id=story_id,
-                title=s.title,
-                description=s.description,
-                acceptance_criteria=[
-                    AcceptanceCriterion(
-                        id="",
-                        text=c,
-                        criterion_type="Given-When-Then" if "Given" in c else "plain"
+        for req in to_generate:
+            story_id = f"{job_id}_story_{req.id}"
+            
+            # Match LLM output or use fallback
+            llm_s = llm_story_map.get(req.id)
+            
+            if llm_s:
+                # 1. Normal Path (Matched LLM Output)
+                # Normalize role in description if needed
+                desc = llm_s.description
+                if desc.startswith("As "):
+                    match = re.match(r"^As\s+(.+?),\s+I\s+(want|must)", desc, re.IGNORECASE)
+                    if match:
+                        original_role = match.group(1)
+                        stripped_role = re.sub(r"^(a|an|the)\s+", "", original_role, flags=re.IGNORECASE)
+                        normalized_role = normalize_actor_to_agile_role(stripped_role)
+                        desc = desc.replace(original_role, normalized_role, 1)
+
+                ac_list = []
+                for i, c in enumerate(llm_s.acceptance_criteria):
+                    ac_list.append(
+                        AcceptanceCriterion(
+                            id=f"{story_id}_ac_{i+1}",
+                            text=c,
+                            criterion_type="Given-When-Then" if "Given" in c else "plain"
+                        )
                     )
-                    for c in s.acceptance_criteria
-                ],
-                source_requirement_ids=[s.id],
-                labels=_normalize_labels(getattr(s, "labels", ["FR"])),
-                evidence_reference=[]
-            )
 
+                user_story = UserStory(
+                    id=story_id,
+                    title=llm_s.title,
+                    description=desc,
+                    acceptance_criteria=ac_list,
+                    source_requirement_ids=[req.id],
+                    labels=_normalize_labels(getattr(llm_s, "labels", ["FR"])),
+                    evidence_reference=getattr(req, "evidence", [])
+                )
+            else:
+                # 2. Fallback Path (LLM skipped this requirement)
+                actor = getattr(req, "actor", None)
+                goal = getattr(req, "goal", None)
+                
+                if not actor:
+                    req_text_lower = req.text.lower()
+                    if "admin" in req_text_lower: actor = "admin"
+                    elif "sales representative" in req_text_lower: actor = "sales representative"
+                    elif "viewer" in req_text_lower: actor = "viewer"
+                    elif set(_normalize_labels(getattr(req, "labels", None))).issubset({"NFR", "BR"}): actor = "system"
+                    else: actor = "user"
+                
+                if not goal: goal = "satisfy this requirement"
+
+                agile_actor = normalize_actor_to_agile_role(actor)
+                
+                user_story = UserStory(
+                    id=story_id,
+                    title=f"Story for requirement {req.id}",
+                    description=f"As {agile_actor}, I want {goal}, so that: {req.text}",
+                    acceptance_criteria=[
+                        AcceptanceCriterion(
+                            id=f"{story_id}_ac_1",
+                            text="Requirement is implemented as specified",
+                            criterion_type="plain"
+                        )
+                    ],
+                    source_requirement_ids=[req.id],
+                    labels=_normalize_labels(getattr(req, "labels", None)),
+                    evidence_reference=getattr(req, "evidence", [])
+                )
+
+            final_stories.append(user_story)
+            
             # create coverage record for this requirement
             coverage = RequirementCoverage(
-                requirement_id=s.id,
+                requirement_id=req.id,
                 coverage_type="covered_by_story",
                 story_ids=[story_id],
                 acceptance_criteria_ids=[c.id for c in user_story.acceptance_criteria],
                 reason=None
             )
-
-            final_stories.append(user_story)
             requirement_coverages.append(coverage)
             
-        result = {"user_stories": final_stories, "requirement_coverages": requirement_coverages}
-        return result
+        return {"user_stories": final_stories, "requirement_coverages": requirement_coverages}
 
     except Exception as e:
-        print(f"Generate node LLM failure: {e}")
+        print(f"Generate node LLM failure or parse error: {e}")
+        traceback.print_exc()
 
-        # ---------------- SAFE FALLBACK ----------------
-        fallback = []
+        # ---------------- TOTAL FALLBACK ----------------
+        fallback_stories = []
+        job_id = state.get("job_id") or "job"
 
         for req in to_generate:
-            labels = _normalize_labels(getattr(req, "labels", None))
-            story_id = f"{state.get('job_id')}_story_{req.id}"
-            
+            story_id = f"{job_id}_story_{req.id}"
             actor = getattr(req, "actor", None)
             goal = getattr(req, "goal", None)
             
             if not actor:
                 req_text_lower = req.text.lower()
-                if "admin" in req_text_lower:
-                    actor = "admin"
-                elif "sales representative" in req_text_lower:
-                    actor = "sales representative"
-                elif "viewer" in req_text_lower:
-                    actor = "viewer"
-                elif set(labels).issubset({"NFR", "BR"}):
-                    actor = "system"
-                else:
-                    actor = "user"
+                if "admin" in req_text_lower: actor = "admin"
+                elif "sales representative" in req_text_lower: actor = "sales representative"
+                elif "viewer" in req_text_lower: actor = "viewer"
+                elif set(_normalize_labels(getattr(req, "labels", None))).issubset({"NFR", "BR"}): actor = "system"
+                else: actor = "user"
             
-            if not goal:
-                goal = "satisfy this requirement"
+            if not goal: goal = "satisfy this requirement"
 
-            fallback_story = UserStory(
+            agile_actor = normalize_actor_to_agile_role(actor)
+
+            user_story = UserStory(
                 id=story_id,
                 title=f"Story for requirement {req.id}",
-                description=f"As a {actor}, I want {goal}, so that: {req.text}",
+                description=f"As {agile_actor}, I want {goal}, so that: {req.text}",
                 acceptance_criteria=[
                     AcceptanceCriterion(
-                        id="",
+                        id=f"{story_id}_ac_1",
                         text="Requirement is implemented as specified",
                         criterion_type="plain"
                     )
                 ],
                 source_requirement_ids=[req.id],
-                labels=labels,
+                labels=_normalize_labels(getattr(req, "labels", None)),
                 evidence_reference=getattr(req, "evidence", [])
             )
-
-            fallback.append(fallback_story)
+            fallback_stories.append(user_story)
 
             coverage = RequirementCoverage(
                 requirement_id=req.id,
                 coverage_type="covered_by_story",
                 story_ids=[story_id],
-                acceptance_criteria_ids=[c.id for c in fallback_story.acceptance_criteria],
+                acceptance_criteria_ids=[c.id for c in user_story.acceptance_criteria],
                 reason=None
             )
             requirement_coverages.append(coverage)
 
-        result = {"user_stories": fallback, "requirement_coverages": requirement_coverages}
-
         existing_warnings = state.get("warnings", []) or []
-        new_warnings = [
-            {
-                "node_name": "generate",
-                "code": "GENERATE_LLM_PARSE_FALLBACK",
-                "message": f"Generation LLM output could not be parsed; fallback stories were generated. Error: {type(e).__name__}: {str(e)}"
-            }
-        ]
+        new_warnings = [{
+            "node_name": "generate",
+            "code": "GENERATE_LLM_FAILURE_FALLBACK",
+            "message": f"Generation LLM failed or output could not be parsed; fallback stories generated. Error: {type(e).__name__}: {str(e)}"
+        }]
 
         return {
-            **result,
+            "user_stories": fallback_stories,
+            "requirement_coverages": requirement_coverages,
             "warnings": existing_warnings + new_warnings,
             "status": "partial"
         }

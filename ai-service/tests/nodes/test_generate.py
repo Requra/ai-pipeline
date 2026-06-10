@@ -51,14 +51,14 @@ async def test_generate_node_multilabel_support(base_state, capsys):
     mock_resp = json.dumps({
         "stories": [
             {
-                "id": 1,
+                "source_requirement_id": 1,
                 "title": "Fast secure login",
                 "description": "As a User, I want to log in within 0.1s so that it's fast.",
                 "acceptance_criteria": ["Log in < 0.1s"],
                 "labels": ["FR", "NFR"]
             },
             {
-                "id": 2,
+                "source_requirement_id": 2,
                 "title": "Admin account deletion",
                 "description": "As an Admin, I want to delete accounts.",
                 "acceptance_criteria": ["Only admins delete"],

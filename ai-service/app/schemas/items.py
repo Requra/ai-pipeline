@@ -56,9 +56,10 @@ class RequirementCoverage(BaseModel):
         "split_into_stories",
         "merged_into_story",
         "attached_as_acceptance_criteria",
-        "non_story_requirement",
+        "non_story",
         "needs_review"
     ]
+
     story_ids: List[str] = []
     acceptance_criteria_ids: List[str] = []
     reason: Optional[str] = None
@@ -113,7 +114,7 @@ class ExportRow(BaseModel):
     confidence: float
     user_story_ids: str              # Comma-separated list of Story IDs
     user_story_titles: str           # Semicolon-separated titles
-    coverage_type: str               # covered_by_story, non_story_requirement, etc.
+    coverage_type: str               # covered_by_story, non_story, etc.
     acceptance_criteria: str         # Newline separated criteria
     source_quote: str                # Backing quote
     needs_review: bool

@@ -1,46 +1,85 @@
-from langchain_openai import ChatOpenAI
+from typing import Optional
+import importlib
 from app.config import settings
 
-def get_openrouter_llm():
-    if not settings.OPENROUTER_API_KEY:
-        raise RuntimeError("OPENROUTER_API_KEY is missing")
 
-    default_headers = {}
+def get_llm(model_name: Optional[str] = None):
+    """Return a chat LLM client for reasoning nodes.
 
-    if settings.OPENROUTER_APP_URL:
-        default_headers["HTTP-Referer"] = settings.OPENROUTER_APP_URL
+    Behavior:
+    - If `settings.LLM_PROVIDER` == 'groq', try to return a Groq-backed Chat model
+      (requires `langchain_groq` to be installed and `GROQ_API_KEY` set).
+    - Otherwise return the OpenAI-backed Chat client.
+    """
+    # Select model based on provider
+    if settings.LLM_PROVIDER == "groq":
+        model = model_name or settings.GROQ_MODEL
+    elif settings.LLM_PROVIDER == "gemini":
+        model = model_name or settings.GEMINI_MODEL
+    else:
+        model = model_name or settings.OPENAI_MODEL or "gpt-4o-mini"
 
-    if settings.OPENROUTER_APP_NAME:
-        default_headers["X-OpenRouter-Title"] = settings.OPENROUTER_APP_NAME
+    # Groq provider
+    if settings.LLM_PROVIDER == "groq":
+        # Use the local Groq adapter which talks to the Groq REST API via httpx.
+        try:
+            from app.llm_adapters.groq_adapter import GroqChat
+
+            return GroqChat(model=model, temperature=0, api_key=settings.GROQ_API_KEY)
+        except Exception as e:
+            raise RuntimeError(
+                "LLM_PROVIDER is set to 'groq' but the local Groq adapter failed to initialize."
+            ) from e
+
+    # Gemini provider (LangGraph integration)
+    if settings.LLM_PROVIDER == "gemini":
+        try:
+            # Try common LangGraph Gemini package names
+            candidates = [
+                "langgraph_gemini",
+                "langgraph.gemini",
+                "langgraph.adapters.gemini",
+                "langgraph.clients.gemini",
+            ]
+            mod = None
+            for name in candidates:
+                try:
+                    mod = importlib.import_module(name)
+                    break
+                except Exception:
+                    mod = None
+            if mod is None:
+                raise RuntimeError(
+                    "LangGraph Gemini package not found. Install the LangGraph Gemini integration (e.g. 'langgraph-gemini') and ensure it's on PYTHONPATH."
+                )
+
+            # Look for a reasonable client/class factory
+            client_cls = None
+            for attr in ("GeminiClient", "Gemini", "GeminiLLM", "LangGraphGeminiClient", "Client"):
+                if hasattr(mod, attr):
+                    client_cls = getattr(mod, attr)
+                    break
+
+            if client_cls is not None:
+                # Instantiate the client with api key and model when possible
+                try:
+                    return client_cls(api_key=settings.GEMINI_API_KEY, model=model, temperature=0)
+                except TypeError:
+                    return client_cls(settings.GEMINI_API_KEY, model)
+            # Try a common factory function
+            if hasattr(mod, "create_client"):
+                return mod.create_client(api_key=settings.GEMINI_API_KEY, model=model)
+
+            raise RuntimeError("Could not initialize LangGraph Gemini client from the installed package.")
+        except Exception as e:
+            raise RuntimeError(
+                "LLM_PROVIDER is set to 'gemini' but the LangGraph Gemini client failed to initialize."
+            ) from e
+
+    # Default: OpenAI via langchain-openai
+    from langchain_openai import ChatOpenAI
 
     return ChatOpenAI(
-        model=settings.OPENROUTER_MODEL,
+        model=model,
         temperature=0,
-        api_key=settings.OPENROUTER_API_KEY,
-        base_url=settings.OPENROUTER_BASE_URL,
-        default_headers=default_headers or None,
-    )
-
-def get_openai_llm():
-    if not settings.OPENAI_API_KEY:
-        raise RuntimeError("OPENAI_API_KEY is missing")
-
-    return ChatOpenAI(
-        model=settings.OPENAI_MODEL,
-        temperature=0,
-        api_key=settings.OPENAI_API_KEY,
-    )
-
-def get_llm():
-    provider = (settings.LLM_PROVIDER or "openrouter").lower()
-
-    if provider == "openrouter":
-        return get_openrouter_llm()
-
-    if provider == "openai":
-        return get_openai_llm()
-
-    raise RuntimeError(
-        f"Unsupported LLM_PROVIDER: {settings.LLM_PROVIDER}. "
-        "Supported providers: openrouter, openai"
     )

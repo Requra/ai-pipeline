@@ -8,7 +8,7 @@ def test_normalize_generation_user_stories_key():
     payload = {
         "user_stories": [
             {
-                "id": 1,
+                "source_requirement_id": 1,
                 "title": "T1",
                 "description": "D1",
                 "acceptance_criteria": ["C1"],
@@ -24,7 +24,7 @@ def test_normalize_generation_user_stories_key():
 def test_normalize_generation_direct_list():
     payload = [
         {
-            "id": 2,
+            "source_requirement_id": 2,
             "title": "T2",
             "description": "D2",
             "acceptance_criteria": ["C2"],
@@ -40,7 +40,7 @@ def test_normalize_generation_stories_key():
     payload = {
         "stories": [
             {
-                "id": 3,
+                "source_requirement_id": 3,
                 "title": "T3",
                 "description": "D3",
                 "acceptance_criteria": ["C3"],
@@ -56,7 +56,7 @@ def test_normalize_generation_items_key():
     payload = {
         "items": [
             {
-                "id": 4,
+                "source_requirement_id": 4,
                 "title": "T4",
                 "description": "D4",
                 "acceptance_criteria": ["C4"],
@@ -96,7 +96,8 @@ async def test_fallback_does_not_contain_error_message(base_state):
     assert "error_message" not in result
     assert result["status"] == "partial"
     assert "warnings" in result
-    assert any("GENERATE_LLM_PARSE_FALLBACK" in w["code"] for w in result["warnings"])
+    # Matches the new code GENERATE_LLM_FAILURE_FALLBACK
+    assert any("GENERATE_LLM_FAILURE_FALLBACK" in w["code"] for w in result["warnings"])
     assert len(result["user_stories"]) == 1
 
 @pytest.mark.asyncio
@@ -141,7 +142,7 @@ async def test_fallback_does_not_produce_as_a_none(base_state):
     desc1 = stories[0].description.lower()
     assert "as a none" not in desc1
     assert "i want none" not in desc1
-    assert "as a admin" in desc1
+    assert "as an admin" in desc1
     assert "satisfy this requirement" in desc1
     
     # Check second story - should infer system for NFR
@@ -193,7 +194,7 @@ async def test_generate_skips_non_actionable(base_state):
     mock_resp = json.dumps({
         "stories": [
             {
-                "id": 3,
+                "source_requirement_id": 3,
                 "title": "Do Z",
                 "description": "As a User, I want to Do Z.",
                 "acceptance_criteria": ["C1"],
@@ -213,6 +214,6 @@ async def test_generate_skips_non_actionable(base_state):
     assert stories[0].source_requirement_ids == [3]
     
     assert len(coverages) == 3
-    non_story_covs = [c for c in coverages if c.coverage_type == "non_story_requirement"]
+    non_story_covs = [c for c in coverages if c.coverage_type == "non_story"]
     assert len(non_story_covs) == 2
     assert set(c.requirement_id for c in non_story_covs) == {1, 2}

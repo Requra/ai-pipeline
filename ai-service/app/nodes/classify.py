@@ -206,6 +206,7 @@ async def classify_node(state: PipelineState) -> dict:
 
         # ---------------- FINAL OUTPUT ----------------
         classified = []
+        special_non_story_labels = {"Open Question", "Out-of-Scope", "Assumption"}
 
         for fr in frs:
             data = grouped.get(fr.id)
@@ -223,6 +224,21 @@ async def classify_node(state: PipelineState) -> dict:
                 "review_reason": getattr(fr, "review_reason", None),
             }
 
+            candidate_labels = set(base_kwargs["candidate_labels"] or [])
+            special_intersection = candidate_labels.intersection(special_non_story_labels)
+
+            if special_intersection:
+                # Always preserve special labels
+                special_label = list(special_intersection)[0]
+                classified.append(
+                    ClassifiedRequirement(
+                        **base_kwargs,
+                        labels=[special_label],
+                        classification_confidence=0.9,
+                    )
+                )
+                continue
+
             if not data:
                 # fallback per item: mark as FR with medium confidence
                 classified.append(
@@ -237,7 +253,7 @@ async def classify_node(state: PipelineState) -> dict:
             classified.append(
                 ClassifiedRequirement(
                     **base_kwargs,
-                    labels=list(data["labels"]),
+                    labels=list(data["labels"]) or ["FR"],
                     classification_confidence=_clamp_confidence(data["confidence"]),
                 )
             )
@@ -248,7 +264,15 @@ async def classify_node(state: PipelineState) -> dict:
         print(f"Classify node LLM failure: {e}")
         # HARD SAFE FALLBACK (never fails tests)
         fallback = []
+        special_non_story_labels = {"Open Question", "Out-of-Scope", "Assumption"}
+        
         for fr in frs:
+            candidate_labels = set(getattr(fr, "candidate_labels", []) or [])
+            special_intersection = candidate_labels.intersection(special_non_story_labels)
+            
+            labels = [list(special_intersection)[0]] if special_intersection else ["FR"]
+            confidence = 0.9 if special_intersection else 0.5
+            
             fallback.append(
                 ClassifiedRequirement(
                     id=getattr(fr, "id", None),
@@ -260,8 +284,8 @@ async def classify_node(state: PipelineState) -> dict:
                     evidence=getattr(fr, "evidence", []),
                     needs_review=getattr(fr, "needs_review", True),
                     review_reason=(getattr(fr, "review_reason", "") or "LLM failure fallback"),
-                    labels=["FR"],
-                    classification_confidence=0.5
+                    labels=labels,
+                    classification_confidence=confidence
                 )
             )
 
