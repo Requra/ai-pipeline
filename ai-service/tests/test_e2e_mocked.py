@@ -57,8 +57,8 @@ async def mocked_ainvoke(messages, **kwargs):
     if "Convert requirements into USER STORIES" in system:
         return MagicMock(content=json.dumps({
             "stories": [
-                {"id": 1, "title": "Process payments", "description": "As a System, ...", "acceptance_criteria": ["Given X"], "labels": ["FR"]},
-                {"id": 2, "title": "Improve perf", "description": "As a System, ...", "acceptance_criteria": ["Given Y"], "labels": ["NFR"]}
+                {"source_requirement_id": 1, "title": "Process payments", "description": "As a System, ...", "acceptance_criteria": ["Given X"], "labels": ["FR"]},
+                {"source_requirement_id": 2, "title": "Improve perf", "description": "As a System, ...", "acceptance_criteria": ["Given Y"], "labels": ["NFR"]}
             ]
         }))
         
@@ -112,7 +112,7 @@ async def test_process_json_end_to_end_mocked():
         assert "job_result" in result
         jr = result["job_result"]
         assert isinstance(jr, JobResult)
-        assert jr.status == "success"
+        assert jr.status == "completed"
         assert len(jr.requirements) == 2
         assert len(jr.user_stories) == 2
 
@@ -161,7 +161,7 @@ async def test_pdf_end_to_end_mocked():
         jr = result["job_result"]
         if jr.status == "error":
             print(f"PIPELINE ERROR: {jr.error_message}")
-        assert jr.status == "success"
+        assert jr.status == "completed"
         assert len(jr.user_stories) == 2
 
 
@@ -188,4 +188,4 @@ def test_api_process_json_returns_job_result(monkeypatch):
     assert resp.status_code == 200
     body = resp.json()
     assert body.get("job_id") == "api-json-1"
-    assert body.get("status") == "success"
+    assert body.get("status") == "completed"

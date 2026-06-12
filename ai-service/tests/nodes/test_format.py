@@ -11,7 +11,7 @@ async def test_format_node_success(base_state):
     
     result = await format_node(state)
     
-    assert result["status"] == "success"
+    assert result["status"] == "completed"
     assert result["is_useful"] is True
     assert "error" in result
 
@@ -23,4 +23,4 @@ async def test_format_node_error(base_state):
     
     result = await format_node(state)
     
-    assert result["status"] == "error"
+    assert result["status"] == "failed"
