@@ -2,12 +2,14 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-ENV PYTHONPATH=/app/ai-service
+ENV PYTHONPATH=/app
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1
 ENV PIP_NO_CACHE_DIR=1
+ENV PYTHONUNBUFFERED=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install poetry

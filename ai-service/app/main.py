@@ -21,6 +21,13 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+@app.get("/health")
+async def health_check():
+    """
+    Health check endpoint for Docker and monitoring.
+    """
+    return {"status": "healthy", "service": "ai-pipeline"}
+
 pipeline = build_pipeline()
 
 class ProcessRequest(BaseModel):
