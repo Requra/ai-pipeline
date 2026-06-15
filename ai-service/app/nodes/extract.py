@@ -10,6 +10,8 @@ from app.schemas.items import (
 )
 from app.llm import get_llm
 from langchain_core.prompts import ChatPromptTemplate
+from app.prompts.loader import load_prompt
+from app.prompts.registry import PromptId
 from pydantic import BaseModel, Field
 from typing import List, Optional, Any
 import inspect
@@ -183,7 +185,7 @@ def align_quote_to_source(quote: str, original_text: str) -> str:
     # 3. Fallback: Return a valid substring from original text
     return original_text[:min(200, len(original_text))]
 
-async def process_chunk(llm, prompt, chunk: SourceChunk) -> List[ExtractedRequirement]:
+async def process_chunk(llm, chunk: SourceChunk) -> List[ExtractedRequirement]:
     """
     Process one SourceChunk using LLM.
     """
@@ -194,42 +196,8 @@ async def process_chunk(llm, prompt, chunk: SourceChunk) -> List[ExtractedRequir
         return []
 
     try:
-        # Build a strict extraction prompt string (system + user)
-        system_text = (
-            "You are a senior software requirements analyst.\n"
-            "Extract atomic software requirements from the source text.\n"
-            "Return valid JSON only. No markdown. No explanation.\n\n"
-            "Do not return shorthand like: { \"FR\": \"...\" }\n\n"
-            "Return only this exact shape:\n"
-            "{\n"
-            "  \"requirements\": [\n"
-            "    {\n"
-            "      \"id\": 1,\n"
-            "      \"text\": \"...\",\n"
-            "      \"actor\": null,\n"
-            "      \"goal\": null,\n"
-            "      \"candidate_labels\": [\"FR\"],\n"
-            "      \"confidence\": 0.95,\n"
-            "      \"evidence\": [\n"
-            "        {\n"
-            "          \"chunk_id\": \"source\",\n"
-            "          \"quote\": \"exact quote from source\"\n"
-            "        }\n"
-            "      ],\n"
-            "      \"needs_review\": false,\n"
-            "      \"review_reason\": null\n"
-            "    }\n"
-            "  ]\n"
-            "}\n\n"
-            "Rules:\n"
-            "- Extract functional requirements, non-functional requirements, business rules, constraints, assumptions, open questions, and out-of-scope items.\n"
-            "- Every item must include a direct quote copied from the source text.\n"
-            "- Every quote must exist exactly or nearly exactly in the source text.\n"
-            "- Use ONLY these labels exactly: FR, NFR, BR, Constraint, Assumption, Open Question, Out-of-Scope.\n"
-            "- If unsure, set needs_review=true.\n"
-            "- Do not invent requirements.\n"
-            "- Do not return empty requirements when the text clearly contains software requirements."
-        )
+        # Load the strict extraction prompt from centralized registry
+        system_text = load_prompt(PromptId.EXTRACT_REQUIREMENTS_V1)
 
         user_text = f"Extract requirements from this text:\n\n{clean_text}"
         
@@ -375,37 +343,8 @@ async def extract_node(state: PipelineState) -> dict:
         # 2. Initialize LLM
         llm = get_llm()
 
-        prompt = ChatPromptTemplate.from_messages([
-            (
-                "system",
-                """
-                You are a senior requirements engineer. Extract requirements from the provided text.
-                
-                Identify and categorize the following:
-                - FR (Functional Requirement): What the system must do.
-                - NFR (Non-Functional Requirement): Performance, security, usability, etc.
-                - BR (Business Rule): Policy or logic that governs the business process.
-                - Constraint: Limitations (e.g., specific technology, deadline).
-                - Assumption: Things believed to be true but not confirmed.
-                - Open Question: Ambiguities needing clarification.
-                - Out-of-Scope: Explicitly mentioned items that are NOT being implemented.
-
-                Rules:
-                1. Every requirement must be grounded in the text.
-                2. Provide at least one direct quote as 'evidence'.
-                3. Set 'confidence' (0.0 to 1.0).
-                4. If an item is vague, set 'needs_review' to true and provide a 'review_reason'.
-                5. Do NOT invent or hallucinate requirements.
-                6. Use atomic requirements (one action/fact per item).
-
-                Return structured output only.
-                """
-            ),
-            ("user", "Extract requirements from this text: {text}")
-        ])
-        
         # 3. Process Chunks in Parallel using robust per-chunk invocation
-        tasks = [process_chunk(llm, prompt, chunk) for chunk in chunks]
+        tasks = [process_chunk(llm, chunk) for chunk in chunks]
         results = await asyncio.gather(*tasks)
 
         # 4. Merge Results

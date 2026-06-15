@@ -2,6 +2,8 @@ from app.schemas.pipeline_state import PipelineState
 from app.schemas.items import StructuredSummary
 from app.llm import get_llm
 from langchain_core.prompts import ChatPromptTemplate
+from app.prompts.loader import load_prompt
+from app.prompts.registry import PromptId
 
 
 async def summarize_node(state: PipelineState) -> dict:
@@ -28,8 +30,9 @@ async def summarize_node(state: PipelineState) -> dict:
     try:
         llm = get_llm()
         
+        system_prompt = load_prompt(PromptId.SUMMARIZE_STRUCTURED_V1)
         raw = await llm.ainvoke([
-            ("system", "You are an expert business analyst. Provide a concise executive summary of the following document text."),
+            ("system", system_prompt),
             ("user", f"Summarize this text:\n\n{raw_text}")
         ])
 

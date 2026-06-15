@@ -13,6 +13,8 @@ from pydantic import BaseModel, Field
 
 from app.llm import get_llm
 from app.schemas.pipeline_state import PipelineState
+from app.prompts.loader import load_prompt
+from app.prompts.registry import PromptId
 
 logger = logging.getLogger(__name__)
 
@@ -193,15 +195,7 @@ async def _run_relevance_check(masked_text: str) -> RelevanceCheck:
     # Remove markers before checking relevance to avoid biasing the LLM
     clean_snippet = masked_text.replace('\f', ' ')[:RELEVANCE_SNIPPET_CHARS]
 
-    system_prompt = (
-        "You are a strict software-document gatekeeper. Accept only content "
-        "related to software requirements, engineering specs, architecture "
-        "notes, planning notes, backlog items, or sprint/meeting notes for "
-        "software products. Reject spam, personal notes, random lists, "
-        "marketing content, and unrelated domains.\n\n"
-        "Return ONLY valid JSON. No markdown. No explanations.\n"
-        "Shape: {\"is_useful\": bool, \"relevance_score\": float, \"reason\": \"string\"}"
-    )
+    system_prompt = load_prompt(PromptId.INGEST_RELEVANCE_V1)
 
     user_prompt = f"Classify this snippet and return structured output.\nSnippet:\n{clean_snippet}"
 
