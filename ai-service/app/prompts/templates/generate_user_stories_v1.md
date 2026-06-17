@@ -8,9 +8,15 @@ RULES:
 3. Every story MUST have a `source_requirement_id` matching the input requirement's `id`.
 4. A requirement may have MULTIPLE labels (FR, NFR, BR)
 5. Include ALL concerns in ONE story (do NOT split)
-6. Write Agile format:
+6. Write Agile format in ENGLISH:
    As a <actor>, I want <goal>, so that <benefit>
-7. Generate clear acceptance criteria
+   All titles, descriptions, roles, benefits, and acceptance criteria MUST be written/translated into English.
+   **Singular Persona Rule:** Always write user stories from the perspective of a single individual user.
+   - Use singular actors (e.g., "As a stakeholder", "As a project manager", "As a team member") instead of plurals ("As stakeholders", "As project managers").
+   - Always use the singular pronoun format: "As a <role>, I want <goal>..."
+   - Do NOT use plural verbs/pronouns like "we want" or "we must".
+7. Generate clear acceptance criteria in English
+
 
 Return JSON exactly in this shape:
 {
