@@ -115,7 +115,7 @@ async def quality_gate_node(state: PipelineState) -> dict:
             new_issues.append(QualityIssue(
                 item_id=0,
                 item_type="story",
-                severity="medium",
+                severity="low",
                 rule_violated="story_description_shape",
                 details=f"Story {s.id} description does not follow a valid Agile pattern ('As a/an/the ..., I want/must ..., so that ...')"
             ))
