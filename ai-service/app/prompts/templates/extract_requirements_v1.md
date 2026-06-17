@@ -28,9 +28,11 @@ Return only this exact shape:
 
 Rules:
 - Extract functional requirements, non-functional requirements, business rules, constraints, assumptions, open questions, and out-of-scope items.
-- Every item must include a direct quote copied from the source text.
+- Every item must include a direct quote copied from the source text. Keep the quote exactly as it appears in the source text (e.g. in Arabic if the source text is in Arabic) to preserve traceability.
 - Every quote must exist exactly or nearly exactly in the source text.
+- All extracted requirement text (including the text field, actor, and goal) MUST be written/translated into English, regardless of the source language.
 - Use ONLY these labels exactly: FR, NFR, BR, Constraint, Assumption, Open Question, Out-of-Scope.
 - If unsure, set needs_review=true.
 - Do not invent requirements.
 - Do not return empty requirements when the text clearly contains software requirements.
+
