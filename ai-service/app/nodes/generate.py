@@ -221,6 +221,7 @@ async def generate_node(state: PipelineState) -> dict:
 
         final_stories = []
         job_id = state.get("job_id") or "job"
+        req_map = {r.id: r for r in to_generate}
         
         # Track created UserStory instances by their corresponding LLM StoryResponse object ID
         created_stories = {} # id(StoryResponse) -> UserStory
@@ -240,6 +241,21 @@ async def generate_node(state: PipelineState) -> dict:
                     for label in _normalize_labels(getattr(llm_s, "labels", ["FR"])):
                         if label not in user_story.labels:
                             user_story.labels.append(label)
+                    
+                    # Recompute priority with the new requirement included
+                    req_priorities = [
+                        getattr(req_map[r_id], "priority", "Medium")
+                        for r_id in user_story.source_requirement_ids
+                        if r_id in req_map
+                    ]
+                    if "Critical" in req_priorities:
+                        user_story.priority = "Critical"
+                    elif "High" in req_priorities:
+                        user_story.priority = "High"
+                    elif "Medium" in req_priorities:
+                        user_story.priority = "Medium"
+                    elif "Low" in req_priorities and all(p == "Low" for p in req_priorities):
+                        user_story.priority = "Low"
                     
                     # Update coverage record
                     coverage = RequirementCoverage(
@@ -286,6 +302,22 @@ async def generate_node(state: PipelineState) -> dict:
                 if req.id not in story_req_ids:
                     story_req_ids.append(req.id)
 
+                # Determine story priority based on highest priority of source requirements
+                story_priority = "Medium"
+                req_priorities = [
+                    getattr(req_map[r_id], "priority", "Medium")
+                    for r_id in story_req_ids
+                    if r_id in req_map
+                ]
+                if "Critical" in req_priorities:
+                    story_priority = "Critical"
+                elif "High" in req_priorities:
+                    story_priority = "High"
+                elif "Medium" in req_priorities:
+                    story_priority = "Medium"
+                elif "Low" in req_priorities and all(p == "Low" for p in req_priorities):
+                    story_priority = "Low"
+
                 user_story = UserStory(
                     id=story_id,
                     title=llm_s.title,
@@ -293,6 +325,7 @@ async def generate_node(state: PipelineState) -> dict:
                     acceptance_criteria=ac_list,
                     source_requirement_ids=story_req_ids,
                     labels=_normalize_labels(getattr(llm_s, "labels", ["FR"])),
+                    priority=story_priority,
                     evidence_reference=getattr(req, "evidence", [])
                 )
                 created_stories[llm_s_id] = user_story
@@ -340,6 +373,7 @@ async def generate_node(state: PipelineState) -> dict:
                     ],
                     source_requirement_ids=[req.id],
                     labels=_normalize_labels(getattr(req, "labels", None)),
+                    priority=getattr(req, "priority", "Medium"),
                     evidence_reference=getattr(req, "evidence", [])
                 )
                 final_stories.append(user_story)
@@ -393,6 +427,7 @@ async def generate_node(state: PipelineState) -> dict:
                 ],
                 source_requirement_ids=[req.id],
                 labels=_normalize_labels(getattr(req, "labels", None)),
+                priority=getattr(req, "priority", "Medium"),
                 evidence_reference=getattr(req, "evidence", [])
             )
             fallback_stories.append(user_story)

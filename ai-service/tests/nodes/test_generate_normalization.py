@@ -217,3 +217,59 @@ async def test_generate_skips_non_actionable(base_state):
     non_story_covs = [c for c in coverages if c.coverage_type == "non_story"]
     assert len(non_story_covs) == 2
     assert set(c.requirement_id for c in non_story_covs) == {1, 2}
+
+
+@pytest.mark.asyncio
+async def test_generate_story_priority_mapping(base_state):
+    state = base_state.copy()
+    state["job_id"] = "job_priority_test"
+    state["classified_requirements"] = [
+        ClassifiedRequirement(
+            id=1,
+            text="Critical performance rule.",
+            actor="System",
+            goal="Fast load time",
+            candidate_labels=["NFR"],
+            labels=["NFR"],
+            confidence=1.0,
+            classification_confidence=1.0,
+            priority="Critical",
+            evidence=[]
+        ),
+        ClassifiedRequirement(
+            id=2,
+            text="Optional color change.",
+            actor="User",
+            goal="Cool interface",
+            candidate_labels=["FR"],
+            labels=["FR"],
+            confidence=1.0,
+            classification_confidence=1.0,
+            priority="Low",
+            evidence=[]
+        )
+    ]
+
+    mock_llm = MagicMock()
+    # Mock LLM grouping both requirements into one story
+    mock_resp = json.dumps({
+        "stories": [
+            {
+                "source_requirement_ids": [1, 2],
+                "title": "Performance and Theme UI",
+                "description": "As a User, I want to experience fast loads and UI colors.",
+                "acceptance_criteria": ["Given UI, when loaded, then load speed < 1s.", "Given UI, when rendered, then it uses configured theme colors."],
+                "labels": ["FR"]
+            }
+        ]
+    })
+    mock_llm.ainvoke = AsyncMock(return_value=MagicMock(content=mock_resp))
+
+    with patch("app.nodes.generate.get_llm", return_value=mock_llm):
+        result = await generate_node(state)
+
+    stories = result["user_stories"]
+    assert len(stories) == 1
+    # Priority should resolve to "Critical" (highest of "Critical" and "Low")
+    assert stories[0].priority == "Critical"
+

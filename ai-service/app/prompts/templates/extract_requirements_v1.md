@@ -14,6 +14,7 @@ Return only this exact shape:
       "goal": null,
       "candidate_labels": ["FR"],
       "confidence": 0.95,
+      "priority": "Medium",
       "evidence": [
         {
           "chunk_id": "source",
@@ -32,6 +33,11 @@ Rules:
 - Every quote must exist exactly or nearly exactly in the source text.
 - All extracted requirement text (including the text field, actor, and goal) MUST be written/translated into English, regardless of the source language.
 - Use ONLY these labels exactly: FR, NFR, BR, Constraint, Assumption, Open Question, Out-of-Scope.
+- **Priority Inference Rule**: Infer the priority value (`"Low"`, `"Medium"`, `"High"`, or `"Critical"`) based on language cues in the text/quote:
+  - `"Critical"` / `"High"`: Explicit statements of absolute necessity or urgency, containing words like "must", "critical", "shall", "immediately", "mandatory", "essential", "has to".
+  - `"Medium"`: Intent or standard preference, containing words like "should", "need", "prefer", "ought to", "important".
+  - `"Low"`: Desirable but optional additions, containing words like "nice to have", "could", "optionally", "if possible", "maybe".
+  - If there are no clear cues, default to `"Medium"`.
 - If unsure, set needs_review=true.
 - Do not invent requirements.
 - Do not return empty requirements when the text clearly contains software requirements.
@@ -53,6 +59,7 @@ JSON Output:
       "goal": "Sign up using Google account",
       "candidate_labels": ["FR"],
       "confidence": 1.0,
+      "priority": "Medium",
       "evidence": [
         {
           "chunk_id": "source",
@@ -69,6 +76,7 @@ JSON Output:
       "goal": "Support mobile web browsers",
       "candidate_labels": ["NFR", "Constraint"],
       "confidence": 0.95,
+      "priority": "High",
       "evidence": [
         {
           "chunk_id": "source",
@@ -96,6 +104,7 @@ JSON Output:
       "goal": "Persist data in PostgreSQL",
       "candidate_labels": ["Constraint"],
       "confidence": 1.0,
+      "priority": "High",
       "evidence": [
         {
           "chunk_id": "source",
@@ -112,6 +121,7 @@ JSON Output:
       "goal": "Soft-delete contact records",
       "candidate_labels": ["BR"],
       "confidence": 1.0,
+      "priority": "High",
       "evidence": [
         {
           "chunk_id": "source",
@@ -138,6 +148,7 @@ JSON Output:
       "goal": "Search contacts with fast response time and good UI",
       "candidate_labels": ["NFR"],
       "confidence": 0.7,
+      "priority": "Medium",
       "evidence": [
         {
           "chunk_id": "source",

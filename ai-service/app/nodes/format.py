@@ -230,7 +230,9 @@ async def format_node(state: PipelineState) -> dict:
             req_type = "Business"
             
         # Determine priority
-        priority = "Medium"
+        priority = getattr(r, "priority", "Medium") or "Medium"
+        if priority not in ("Low", "Medium", "High", "Critical", "Unknown"):
+            priority = "Medium"
         
         # Source refs mapping
         source_refs = []
@@ -322,12 +324,16 @@ async def format_node(state: PipelineState) -> dict:
                 criterion_type=ac.criterion_type
             ))
             
+        priority = getattr(s, "priority", "Medium") or "Medium"
+        if priority not in ("Low", "Medium", "High", "Critical", "Unknown"):
+            priority = "Medium"
+            
         jira_fields = JiraFieldsV1(
             issue_type="Story",
             summary=s.title,
             description=s.description,
             acceptance_criteria=[ac.text for ac in ac_v1_list],
-            priority="Medium",
+            priority=priority,
             labels=s.labels,
             components=[],
             epic_name="",
@@ -340,7 +346,7 @@ async def format_node(state: PipelineState) -> dict:
             title=s.title,
             user_story=s.description,
             acceptance_criteria=ac_v1_list,
-            priority="Medium",
+            priority=priority,
             type="Functional",
             deduplication_key=generate_dedup_key(s.title),
             source_refs=source_refs,

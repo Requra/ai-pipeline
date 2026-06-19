@@ -42,6 +42,7 @@ class ExtractedRequirement(BaseModel):
         default_factory=list,
         description="Non-empty list of raw text quotes backing this requirement for grounding."
     )
+    priority: str = "Medium"
     needs_review: bool = False
     review_reason: Optional[str] = None
 
@@ -79,6 +80,7 @@ class UserStory(BaseModel):
         description="IDs of source requirements mapping to this story. Supports many-to-one, one-to-many, etc."
     )
     labels: List[RequirementType]
+    priority: str = "Medium"
     evidence_reference: List[EvidenceSpan] = Field(default_factory=list)
 
     # Legacy Fields (Backwards Compatibility)

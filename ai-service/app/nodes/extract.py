@@ -91,6 +91,7 @@ def normalize_extraction_payload(parsed: Any, chunk: SourceChunk) -> dict:
                     "text": val,
                     "candidate_labels": [normalize_label(key)],
                     "confidence": 0.85,
+                    "priority": "Medium",
                     "evidence": []
                 }
 
@@ -139,6 +140,7 @@ def normalize_extraction_payload(parsed: Any, chunk: SourceChunk) -> dict:
             "candidate_labels": norm_labels,
             "confidence": item.get("confidence") or 0.85,
             "evidence": evidence,
+            "priority": item.get("priority") or "Medium",
             "needs_review": item.get("needs_review") or False,
             "review_reason": item.get("review_reason")
         })
