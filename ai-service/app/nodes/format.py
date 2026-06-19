@@ -90,11 +90,14 @@ def parse_pipeline_error(err_str: str, status: str) -> Optional[PipelineError]:
     )
 
 
+from app.progress import update_progress
+
 async def format_node(state: PipelineState) -> dict:
     """
     Assemble all outputs into final JobResult contract and attach to state.
     """
     print("--- FORMAT NODE ---")
+    update_progress(state.get("job_id"), "format", 100, "PROCESSING")
 
     error = state.get("error")
     stories = state.get("user_stories", []) or []

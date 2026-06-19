@@ -179,13 +179,20 @@ def test_api_process_json_returns_job_result(monkeypatch):
     client = TestClient(fastapi_app)
     payload = {
         "job_id": "api-json-1",
-        "text": "The system shall process payments and ensure that all transactions are secure and encrypted. Performance must be under 2 seconds.",
-        "file_type": "text",
+        "content": "The system shall process payments and ensure that all transactions are secure and encrypted. Performance must be under 2 seconds.",
+        "source_type": "text",
         "metadata": {}
     }
 
     resp = client.post("/process-json", json=payload)
-    assert resp.status_code == 200
+    assert resp.status_code == 202
     body = resp.json()
     assert body.get("job_id") == "api-json-1"
-    assert body.get("status") == "completed"
+    assert body.get("status") == "QUEUED"
+
+    # Verify background task execution via the polling status endpoint
+    status_resp = client.get("/status/api-json-1")
+    assert status_resp.status_code == 200
+    status_body = status_resp.json()
+    assert status_body.get("status") == "COMPLETED"
+    assert "result" in status_body

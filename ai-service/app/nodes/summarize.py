@@ -80,12 +80,15 @@ def _truncate_for_context(text: str, max_chars: int = MAX_INPUT_CHARS) -> str:
     )
 
 
+from app.progress import update_progress
+
 async def summarize_node(state: PipelineState) -> dict:
     """
     Generate structured summary matching `StructuredSummary` contract.
     Parses LLM JSON output to fill all 9 fields.
     """
     print("--- SUMMARIZE NODE ---")
+    update_progress(state.get("job_id"), "summarize", 95, "PROCESSING")
     raw_text = state.get("raw_text", "")
 
     if not raw_text:

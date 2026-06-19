@@ -312,12 +312,15 @@ def project_legacy_requirements(reqs: List[ExtractedRequirement]) -> List[Functi
             ))
     return legacy_reqs
 
+from app.progress import update_progress
+
 async def extract_node(state: PipelineState) -> dict:
     """
     Extract requirements from chunks (or raw_text fallback) using LLM.
     Supports FR, NFR, BR, Constraint, Assumption, Open Question, and Out-of-Scope.
     """
     print("--- EXTRACT NODE ---")
+    update_progress(state.get("job_id"), "extract", 45, "PROCESSING")
     
     # 1. Get input chunks
     chunks = state.get("chunks", [])

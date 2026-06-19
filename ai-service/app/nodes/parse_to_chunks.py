@@ -75,11 +75,14 @@ def _chunk_text_sliding_window(job_id: str, raw_text: str) -> List[SourceChunk]:
             
     return chunks
 
+from app.progress import update_progress
+
 async def parse_to_chunks_node(state: PipelineState) -> dict:
     """
     Standardize document parsing into coordinate-aware chunks.
     """
     print("--- PARSE TO CHUNKS NODE ---")
+    update_progress(state.get("job_id"), "parse_to_chunks", 25, "PROCESSING")
     
     job_id = state.get("job_id", "unknown")
     file_type = state.get("file_type")

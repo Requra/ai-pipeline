@@ -383,8 +383,11 @@ async def _transcribe_deepgram(
 
 # ── Public Node ───────────────────────────────────────────────────────────────
 
+from app.progress import update_progress
+
 async def transcribe_node(state: PipelineState) -> dict:
     logger.info("--- TRANSCRIBE NODE ---")
+    update_progress(state.get("job_id"), "transcribe", 25, "PROCESSING")
     
     if state.get("file_type") != "audio":
         return {"raw_text": None, "status": "skipped_non_audio"}

@@ -237,9 +237,12 @@ async def _run_relevance_check(masked_text: str) -> RelevanceCheck:
         )
 
 
+from app.progress import update_progress
+
 async def ingest_node(state: PipelineState) -> IngestOutput:
     """Ingest input, extract/clean text, mask PII, and classify relevance for routing."""
     print("--- INGEST NODE ---")
+    update_progress(state.get("job_id"), "ingest", 10, "PROCESSING")
     # Trust the file_type determined by detect_file_type
 
     file_type = str(state.get("file_type", "")).strip().lower()

@@ -118,10 +118,13 @@ def _normalize_labels(labels):
     return labels or []
 
 
+from app.progress import update_progress
+
 # ---------------- NODE ----------------
 
 async def generate_node(state: PipelineState) -> dict:
     print("--- GENERATE NODE (MULTI-LABEL) ---")
+    update_progress(state.get("job_id"), "generate", 85, "PROCESSING")
 
     classified = state.get("classified_requirements", [])
     if not classified:
@@ -217,7 +220,6 @@ async def generate_node(state: PipelineState) -> dict:
                     llm_story_map[r_id] = s
 
         final_stories = []
-        requirement_coverages = []
         job_id = state.get("job_id") or "job"
         
         # Track created UserStory instances by their corresponding LLM StoryResponse object ID
