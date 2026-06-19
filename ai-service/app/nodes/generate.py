@@ -23,7 +23,8 @@ Convert these classified requirements into user stories:
 # ---------------- STRUCTURED OUTPUT ----------------
 
 class StoryResponse(BaseModel):
-    source_requirement_id: int
+    source_requirement_ids: Optional[List[int]] = Field(default=None, description="IDs of source requirements mapping to this story. Can list multiple IDs to merge related requirements.")
+    source_requirement_id: Optional[int] = Field(default=None, description="Legacy single ID field.")
     title: str
     description: str
     acceptance_criteria: List[str]
@@ -203,23 +204,55 @@ async def generate_node(state: PipelineState) -> dict:
 
         llm_stories = response.stories if response else []
 
-        # Create lookup map for LLM output, handling duplicates by keeping first
+        # Create lookup map for LLM output, mapping requirement ID -> StoryResponse
         llm_story_map = {}
         for s in llm_stories:
-            if s.source_requirement_id not in llm_story_map:
-                llm_story_map[s.source_requirement_id] = s
+            req_ids = []
+            if s.source_requirement_ids:
+                req_ids.extend(s.source_requirement_ids)
+            if s.source_requirement_id is not None:
+                req_ids.append(s.source_requirement_id)
+            for r_id in set(req_ids):
+                if r_id not in llm_story_map:
+                    llm_story_map[r_id] = s
 
         final_stories = []
+        requirement_coverages = []
         job_id = state.get("job_id") or "job"
+        
+        # Track created UserStory instances by their corresponding LLM StoryResponse object ID
+        created_stories = {} # id(StoryResponse) -> UserStory
 
         for req in to_generate:
-            story_id = f"{job_id}_story_{req.id}"
-            
-            # Match LLM output or use fallback
             llm_s = llm_story_map.get(req.id)
             
             if llm_s:
-                # 1. Normal Path (Matched LLM Output)
+                # If we've already created a story for this exact LLM StoryResponse (due to N:1 mapping),
+                # append this requirement's ID and labels to it, and map coverage.
+                llm_s_id = id(llm_s)
+                if llm_s_id in created_stories:
+                    user_story = created_stories[llm_s_id]
+                    if req.id not in user_story.source_requirement_ids:
+                        user_story.source_requirement_ids.append(req.id)
+                    # Accumulate labels
+                    for label in _normalize_labels(getattr(llm_s, "labels", ["FR"])):
+                        if label not in user_story.labels:
+                            user_story.labels.append(label)
+                    
+                    # Update coverage record
+                    coverage = RequirementCoverage(
+                        requirement_id=req.id,
+                        coverage_type="merged_into_story",
+                        story_ids=[user_story.id],
+                        acceptance_criteria_ids=[c.id for c in user_story.acceptance_criteria],
+                        reason=None
+                    )
+                    requirement_coverages.append(coverage)
+                    continue
+
+                # 1. Normal Path (First time seeing this StoryResponse)
+                story_id = f"{job_id}_story_{req.id}"
+                
                 # Normalize role in description if needed
                 desc = llm_s.description
                 if desc.startswith("As "):
@@ -240,17 +273,43 @@ async def generate_node(state: PipelineState) -> dict:
                         )
                     )
 
+                # Initialize list of source requirements for this story
+                story_req_ids = []
+                if llm_s.source_requirement_ids:
+                    story_req_ids.extend(llm_s.source_requirement_ids)
+                if llm_s.source_requirement_id is not None:
+                    story_req_ids.append(llm_s.source_requirement_id)
+                # Keep it unique and ensure the current requirement's ID is in the list
+                story_req_ids = list(dict.fromkeys(story_req_ids))
+                if req.id not in story_req_ids:
+                    story_req_ids.append(req.id)
+
                 user_story = UserStory(
                     id=story_id,
                     title=llm_s.title,
                     description=desc,
                     acceptance_criteria=ac_list,
-                    source_requirement_ids=[req.id],
+                    source_requirement_ids=story_req_ids,
                     labels=_normalize_labels(getattr(llm_s, "labels", ["FR"])),
                     evidence_reference=getattr(req, "evidence", [])
                 )
+                created_stories[llm_s_id] = user_story
+                final_stories.append(user_story)
+                
+                # Determine coverage type based on number of mapped requirement IDs
+                coverage_type = "merged_into_story" if len(story_req_ids) > 1 else "covered_by_story"
+                
+                coverage = RequirementCoverage(
+                    requirement_id=req.id,
+                    coverage_type=coverage_type,
+                    story_ids=[story_id],
+                    acceptance_criteria_ids=[c.id for c in user_story.acceptance_criteria],
+                    reason=None
+                )
+                requirement_coverages.append(coverage)
             else:
                 # 2. Fallback Path (LLM skipped this requirement)
+                story_id = f"{job_id}_story_{req.id}"
                 actor = getattr(req, "actor", None)
                 goal = getattr(req, "goal", None)
                 
@@ -281,18 +340,16 @@ async def generate_node(state: PipelineState) -> dict:
                     labels=_normalize_labels(getattr(req, "labels", None)),
                     evidence_reference=getattr(req, "evidence", [])
                 )
-
-            final_stories.append(user_story)
-            
-            # create coverage record for this requirement
-            coverage = RequirementCoverage(
-                requirement_id=req.id,
-                coverage_type="covered_by_story",
-                story_ids=[story_id],
-                acceptance_criteria_ids=[c.id for c in user_story.acceptance_criteria],
-                reason=None
-            )
-            requirement_coverages.append(coverage)
+                final_stories.append(user_story)
+                
+                coverage = RequirementCoverage(
+                    requirement_id=req.id,
+                    coverage_type="covered_by_story",
+                    story_ids=[story_id],
+                    acceptance_criteria_ids=[c.id for c in user_story.acceptance_criteria],
+                    reason=None
+                )
+                requirement_coverages.append(coverage)
             
         return {"user_stories": final_stories, "requirement_coverages": requirement_coverages}
 

@@ -36,3 +36,116 @@ Rules:
 - Do not invent requirements.
 - Do not return empty requirements when the text clearly contains software requirements.
 
+Few-Shot Examples:
+
+### Example 1: Meeting Transcript Snippet
+Source Text:
+"Sarah (Product Owner): We need users to sign up using their Google accounts.
+Ahmed (Tech Lead): Okay, OAuth is much safer than building it ourselves. We should also make sure it works on mobile browsers, as that's a huge traffic source."
+
+JSON Output:
+{
+  "requirements": [
+    {
+      "id": 1,
+      "text": "The system shall support Google OAuth sign up for users.",
+      "actor": "User",
+      "goal": "Sign up using Google account",
+      "candidate_labels": ["FR"],
+      "confidence": 1.0,
+      "evidence": [
+        {
+          "chunk_id": "source",
+          "quote": "users to sign up using their Google accounts."
+        }
+      ],
+      "needs_review": false,
+      "review_reason": null
+    },
+    {
+      "id": 2,
+      "text": "The system must be responsive and functional on mobile web browsers.",
+      "actor": "System",
+      "goal": "Support mobile web browsers",
+      "candidate_labels": ["NFR", "Constraint"],
+      "confidence": 0.95,
+      "evidence": [
+        {
+          "chunk_id": "source",
+          "quote": "make sure it works on mobile browsers"
+        }
+      ],
+      "needs_review": false,
+      "review_reason": null
+    }
+  ]
+}
+
+### Example 2: SRS Section
+Source Text:
+"Section 4.2 Data Storage:
+All user profiles and contacts must be persisted in PostgreSQL. Deleted contacts must not be fully removed but rather soft-deleted by setting deleted_at timestamp."
+
+JSON Output:
+{
+  "requirements": [
+    {
+      "id": 1,
+      "text": "All user profiles and contacts must be stored in a PostgreSQL database.",
+      "actor": "System",
+      "goal": "Persist data in PostgreSQL",
+      "candidate_labels": ["Constraint"],
+      "confidence": 1.0,
+      "evidence": [
+        {
+          "chunk_id": "source",
+          "quote": "All user profiles and contacts must be persisted in PostgreSQL."
+        }
+      ],
+      "needs_review": false,
+      "review_reason": null
+    },
+    {
+      "id": 2,
+      "text": "Deleted contacts must be soft-deleted by setting the deleted_at timestamp instead of physical deletion.",
+      "actor": "System",
+      "goal": "Soft-delete contact records",
+      "candidate_labels": ["BR"],
+      "confidence": 1.0,
+      "evidence": [
+        {
+          "chunk_id": "source",
+          "quote": "Deleted contacts must not be fully removed but rather soft-deleted by setting deleted_at timestamp."
+        }
+      ],
+      "needs_review": false,
+      "review_reason": null
+    }
+  ]
+}
+
+### Example 3: Edge Case (Vague Text)
+Source Text:
+"The contact search should be fast and look cool."
+
+JSON Output:
+{
+  "requirements": [
+    {
+      "id": 1,
+      "text": "The contact search interface should load results quickly and have a modern design.",
+      "actor": "User",
+      "goal": "Search contacts with fast response time and good UI",
+      "candidate_labels": ["NFR"],
+      "confidence": 0.7,
+      "evidence": [
+        {
+          "chunk_id": "source",
+          "quote": "The contact search should be fast and look cool."
+        }
+      ],
+      "needs_review": true,
+      "review_reason": "Vague performance and design terms ('fast' and 'look cool') need quantifiable performance targets (e.g., search speed < 500ms) and design mockups."
+    }
+  ]
+}
