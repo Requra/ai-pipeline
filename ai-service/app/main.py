@@ -36,14 +36,41 @@ class ProcessRequest(BaseModel):
     file_type: str = "pdf"
     metadata: dict = {}
 
+ALLOWED_CONTENT_TYPES = {
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "text/plain",
+    "audio/mpeg",
+    "audio/wav",
+    "audio/x-wav",
+    "audio/ogg",
+    "audio/x-m4a",
+    "audio/m4a",
+    "audio/webm",
+    "audio/mp3",
+    "audio/x-mp3"
+}
+
 @app.post("/process")
 async def process_document(
     file: UploadFile = File(...),
     metadata: str = Form("{}"),
     file_type: str = Form("document")
 ):
+    if file.size and file.size > 50 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="File too large (max 50MB)")
+
+    content_type = file.content_type.split(";")[0].strip() if file.content_type else ""
+    if content_type not in ALLOWED_CONTENT_TYPES:
+        raise HTTPException(
+            status_code=415,
+            detail=f"Unsupported media type: '{file.content_type}'. Allowed types: PDF, DOCX, TXT, MP3, WAV, OGG, M4A, WEBM."
+        )
+
     try:
         file_bytes = await file.read()
+        if len(file_bytes) > 50 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="File too large (max 50MB)")
         parsed_metadata = json.loads(metadata)
         if "filename" not in parsed_metadata:
             parsed_metadata["filename"] = file.filename
