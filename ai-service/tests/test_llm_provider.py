@@ -56,11 +56,26 @@ def test_get_llm_openai(monkeypatch):
     assert llm.api_key == "test-openai-key"
 
 
-def test_get_llm_unsupported(monkeypatch):
+def test_get_llm_groq(monkeypatch):
     _inject_fake_langchain_openai()
     monkeypatch.setattr(settings, "LLM_PROVIDER", "groq")
+    monkeypatch.setattr(settings, "GROQ_API_KEY", "test-groq-key")
+    monkeypatch.setattr(settings, "GROQ_MODEL", "llama-3.3-70b-versatile")
 
     from app.llm import get_llm
 
-    with pytest.raises(RuntimeError, match="Unsupported LLM_PROVIDER: groq"):
+    llm = get_llm()
+    assert llm.model == "llama-3.3-70b-versatile"
+    assert llm.api_key == "test-groq-key"
+    assert llm.base_url == "https://api.groq.com/openai/v1"
+
+
+def test_get_llm_unsupported(monkeypatch):
+    _inject_fake_langchain_openai()
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "invalid_provider")
+
+    from app.llm import get_llm
+
+    with pytest.raises(RuntimeError, match="Unsupported LLM_PROVIDER: invalid_provider"):
         get_llm()
+

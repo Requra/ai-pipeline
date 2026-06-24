@@ -6,6 +6,7 @@ from app.schemas.items import (
     RequirementCoverage,
     QualityIssue,
 )
+from app.progress import update_progress
 
 
 async def quality_gate_node(state: PipelineState) -> dict:
@@ -15,6 +16,7 @@ async def quality_gate_node(state: PipelineState) -> dict:
     - Sets status to 'needs_review' if any high severity issues exist.
     """
     print("--- QUALITY GATE NODE ---")
+    update_progress(state.get("job_id"), "quality_gate", 90, "PROCESSING")
 
     reqs: List[ClassifiedRequirement] = state.get("classified_requirements", [])
     stories: List[UserStory] = state.get("user_stories", [])
@@ -115,7 +117,7 @@ async def quality_gate_node(state: PipelineState) -> dict:
             new_issues.append(QualityIssue(
                 item_id=0,
                 item_type="story",
-                severity="medium",
+                severity="low",
                 rule_violated="story_description_shape",
                 details=f"Story {s.id} description does not follow a valid Agile pattern ('As a/an/the ..., I want/must ..., so that ...')"
             ))

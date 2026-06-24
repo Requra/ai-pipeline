@@ -28,8 +28,9 @@ class Settings:
     BASE_URL_KEY: Optional[str] = os.getenv("BASE_URL_KEY")
     
     # LLM Settings
-    # Default reasoning provider. Can be 'openrouter' or 'openai'.
+    # Default reasoning provider. Can be 'openrouter', 'openai', or 'groq'.
     LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "openrouter").lower().strip()
+    GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
     
     # Transcribe Settings
     TRANSCRIBE_PROVIDER: str = os.getenv("TRANSCRIBE_PROVIDER", "groq").lower().strip()

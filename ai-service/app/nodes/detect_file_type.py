@@ -53,12 +53,15 @@ def _detect_mime_and_type(raw_bytes: bytes, metadata: Dict[str, Any]) -> tuple[s
 
     return "unknown", "application/octet-stream"
 
+from app.progress import update_progress
+
 async def detect_file_type_node(state: PipelineState) -> dict:
     """
     Inspect raw bytes to determine file type and metadata.
     Does not trust state['file_type'] from frontend.
     """
     print("--- DETECT FILE TYPE NODE ---")
+    update_progress(state.get("job_id"), "detect_file_type", 5, "PROCESSING")
     
     raw_bytes = state.get("raw_bytes")
     metadata = state.get("metadata", {})

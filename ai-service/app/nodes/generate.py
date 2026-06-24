@@ -2,6 +2,8 @@ from app.schemas.pipeline_state import PipelineState
 from app.schemas.items import UserStory, AcceptanceCriterion, RequirementCoverage
 from app.llm import get_llm
 from langchain_core.prompts import ChatPromptTemplate
+from app.prompts.loader import load_prompt
+from app.prompts.registry import PromptId
 from pydantic import BaseModel, Field
 from typing import List, Any, Optional
 import json
@@ -10,39 +12,6 @@ import traceback
 
 
 # ---------------- PROMPT ----------------
-
-SYSTEM_PROMPT = """
-You are a senior product manager and software analyst.
-
-Convert requirements into USER STORIES.
-
-RULES:
-1. Each requirement → exactly ONE user story (1:1 mapping)
-2. Return ONLY user stories for the input requirements.
-3. Every story MUST have a `source_requirement_id` matching the input requirement's `id`.
-4. A requirement may have MULTIPLE labels (FR, NFR, BR)
-5. Include ALL concerns in ONE story (do NOT split)
-6. Write Agile format:
-   As a <actor>, I want <goal>, so that <benefit>
-7. Generate clear acceptance criteria
-
-Return JSON exactly in this shape:
-{
-  "stories": [
-    {
-      "source_requirement_id": 1,
-      "title": "Register account",
-      "description": "As a user, I want to register using email and password, so that I can access the CRM.",
-      "acceptance_criteria": [
-        "Given a new user, when they submit valid email and password, then the account is created."
-      ],
-      "labels": ["FR"]
-    }
-  ]
-}
-
-Do NOT return markdown, explanation, or plain text.
-"""
 
 USER_PROMPT = """
 Convert these classified requirements into user stories:
@@ -54,7 +23,8 @@ Convert these classified requirements into user stories:
 # ---------------- STRUCTURED OUTPUT ----------------
 
 class StoryResponse(BaseModel):
-    source_requirement_id: int
+    source_requirement_ids: Optional[List[int]] = Field(default=None, description="IDs of source requirements mapping to this story. Can list multiple IDs to merge related requirements.")
+    source_requirement_id: Optional[int] = Field(default=None, description="Legacy single ID field.")
     title: str
     description: str
     acceptance_criteria: List[str]
@@ -148,10 +118,13 @@ def _normalize_labels(labels):
     return labels or []
 
 
+from app.progress import update_progress
+
 # ---------------- NODE ----------------
 
 async def generate_node(state: PipelineState) -> dict:
     print("--- GENERATE NODE (MULTI-LABEL) ---")
+    update_progress(state.get("job_id"), "generate", 85, "PROCESSING")
 
     classified = state.get("classified_requirements", [])
     if not classified:
@@ -204,10 +177,11 @@ async def generate_node(state: PipelineState) -> dict:
         if llm is None:
             raise RuntimeError("LLM not initialized")
 
+        system_prompt = load_prompt(PromptId.GENERATE_USER_STORIES_V1)
         items_text = "\n\n".join(_format_requirement(req) for req in to_generate)
 
         raw = await llm.ainvoke([
-            ("system", SYSTEM_PROMPT),
+            ("system", system_prompt),
             ("user", USER_PROMPT.format(items=items_text))
         ])
         content = getattr(raw, "content", None) or str(raw)
@@ -233,23 +207,70 @@ async def generate_node(state: PipelineState) -> dict:
 
         llm_stories = response.stories if response else []
 
-        # Create lookup map for LLM output, handling duplicates by keeping first
+        # Create lookup map for LLM output, mapping requirement ID -> StoryResponse
         llm_story_map = {}
         for s in llm_stories:
-            if s.source_requirement_id not in llm_story_map:
-                llm_story_map[s.source_requirement_id] = s
+            req_ids = []
+            if s.source_requirement_ids:
+                req_ids.extend(s.source_requirement_ids)
+            if s.source_requirement_id is not None:
+                req_ids.append(s.source_requirement_id)
+            for r_id in set(req_ids):
+                if r_id not in llm_story_map:
+                    llm_story_map[r_id] = s
 
         final_stories = []
         job_id = state.get("job_id") or "job"
+        req_map = {r.id: r for r in to_generate}
+        
+        # Track created UserStory instances by their corresponding LLM StoryResponse object ID
+        created_stories = {} # id(StoryResponse) -> UserStory
 
         for req in to_generate:
-            story_id = f"{job_id}_story_{req.id}"
-            
-            # Match LLM output or use fallback
             llm_s = llm_story_map.get(req.id)
             
             if llm_s:
-                # 1. Normal Path (Matched LLM Output)
+                # If we've already created a story for this exact LLM StoryResponse (due to N:1 mapping),
+                # append this requirement's ID and labels to it, and map coverage.
+                llm_s_id = id(llm_s)
+                if llm_s_id in created_stories:
+                    user_story = created_stories[llm_s_id]
+                    if req.id not in user_story.source_requirement_ids:
+                        user_story.source_requirement_ids.append(req.id)
+                    # Accumulate labels
+                    for label in _normalize_labels(getattr(llm_s, "labels", ["FR"])):
+                        if label not in user_story.labels:
+                            user_story.labels.append(label)
+                    
+                    # Recompute priority with the new requirement included
+                    req_priorities = [
+                        getattr(req_map[r_id], "priority", "Medium")
+                        for r_id in user_story.source_requirement_ids
+                        if r_id in req_map
+                    ]
+                    if "Critical" in req_priorities:
+                        user_story.priority = "Critical"
+                    elif "High" in req_priorities:
+                        user_story.priority = "High"
+                    elif "Medium" in req_priorities:
+                        user_story.priority = "Medium"
+                    elif "Low" in req_priorities and all(p == "Low" for p in req_priorities):
+                        user_story.priority = "Low"
+                    
+                    # Update coverage record
+                    coverage = RequirementCoverage(
+                        requirement_id=req.id,
+                        coverage_type="merged_into_story",
+                        story_ids=[user_story.id],
+                        acceptance_criteria_ids=[c.id for c in user_story.acceptance_criteria],
+                        reason=None
+                    )
+                    requirement_coverages.append(coverage)
+                    continue
+
+                # 1. Normal Path (First time seeing this StoryResponse)
+                story_id = f"{job_id}_story_{req.id}"
+                
                 # Normalize role in description if needed
                 desc = llm_s.description
                 if desc.startswith("As "):
@@ -270,17 +291,60 @@ async def generate_node(state: PipelineState) -> dict:
                         )
                     )
 
+                # Initialize list of source requirements for this story
+                story_req_ids = []
+                if llm_s.source_requirement_ids:
+                    story_req_ids.extend(llm_s.source_requirement_ids)
+                if llm_s.source_requirement_id is not None:
+                    story_req_ids.append(llm_s.source_requirement_id)
+                # Keep it unique and ensure the current requirement's ID is in the list
+                story_req_ids = list(dict.fromkeys(story_req_ids))
+                if req.id not in story_req_ids:
+                    story_req_ids.append(req.id)
+
+                # Determine story priority based on highest priority of source requirements
+                story_priority = "Medium"
+                req_priorities = [
+                    getattr(req_map[r_id], "priority", "Medium")
+                    for r_id in story_req_ids
+                    if r_id in req_map
+                ]
+                if "Critical" in req_priorities:
+                    story_priority = "Critical"
+                elif "High" in req_priorities:
+                    story_priority = "High"
+                elif "Medium" in req_priorities:
+                    story_priority = "Medium"
+                elif "Low" in req_priorities and all(p == "Low" for p in req_priorities):
+                    story_priority = "Low"
+
                 user_story = UserStory(
                     id=story_id,
                     title=llm_s.title,
                     description=desc,
                     acceptance_criteria=ac_list,
-                    source_requirement_ids=[req.id],
+                    source_requirement_ids=story_req_ids,
                     labels=_normalize_labels(getattr(llm_s, "labels", ["FR"])),
+                    priority=story_priority,
                     evidence_reference=getattr(req, "evidence", [])
                 )
+                created_stories[llm_s_id] = user_story
+                final_stories.append(user_story)
+                
+                # Determine coverage type based on number of mapped requirement IDs
+                coverage_type = "merged_into_story" if len(story_req_ids) > 1 else "covered_by_story"
+                
+                coverage = RequirementCoverage(
+                    requirement_id=req.id,
+                    coverage_type=coverage_type,
+                    story_ids=[story_id],
+                    acceptance_criteria_ids=[c.id for c in user_story.acceptance_criteria],
+                    reason=None
+                )
+                requirement_coverages.append(coverage)
             else:
                 # 2. Fallback Path (LLM skipped this requirement)
+                story_id = f"{job_id}_story_{req.id}"
                 actor = getattr(req, "actor", None)
                 goal = getattr(req, "goal", None)
                 
@@ -309,20 +373,19 @@ async def generate_node(state: PipelineState) -> dict:
                     ],
                     source_requirement_ids=[req.id],
                     labels=_normalize_labels(getattr(req, "labels", None)),
+                    priority=getattr(req, "priority", "Medium"),
                     evidence_reference=getattr(req, "evidence", [])
                 )
-
-            final_stories.append(user_story)
-            
-            # create coverage record for this requirement
-            coverage = RequirementCoverage(
-                requirement_id=req.id,
-                coverage_type="covered_by_story",
-                story_ids=[story_id],
-                acceptance_criteria_ids=[c.id for c in user_story.acceptance_criteria],
-                reason=None
-            )
-            requirement_coverages.append(coverage)
+                final_stories.append(user_story)
+                
+                coverage = RequirementCoverage(
+                    requirement_id=req.id,
+                    coverage_type="covered_by_story",
+                    story_ids=[story_id],
+                    acceptance_criteria_ids=[c.id for c in user_story.acceptance_criteria],
+                    reason=None
+                )
+                requirement_coverages.append(coverage)
             
         return {"user_stories": final_stories, "requirement_coverages": requirement_coverages}
 
@@ -364,6 +427,7 @@ async def generate_node(state: PipelineState) -> dict:
                 ],
                 source_requirement_ids=[req.id],
                 labels=_normalize_labels(getattr(req, "labels", None)),
+                priority=getattr(req, "priority", "Medium"),
                 evidence_reference=getattr(req, "evidence", [])
             )
             fallback_stories.append(user_story)

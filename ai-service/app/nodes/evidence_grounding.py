@@ -1,6 +1,7 @@
 from typing import List
 from app.schemas.pipeline_state import PipelineState
 from app.schemas.items import ClassifiedRequirement, SourceChunk, QualityIssue
+from app.progress import update_progress
 
 
 async def evidence_grounding_node(state: PipelineState) -> dict:
@@ -13,6 +14,7 @@ async def evidence_grounding_node(state: PipelineState) -> dict:
     - On failures, mark needs_review and add QualityIssue entries.
     """
     print("--- EVIDENCE GROUNDING NODE ---")
+    update_progress(state.get("job_id"), "evidence_grounding", 75, "PROCESSING")
 
     classified: List[ClassifiedRequirement] = state.get("classified_requirements", [])
     chunks: List[SourceChunk] = state.get("chunks", [])

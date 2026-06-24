@@ -13,6 +13,8 @@ from pydantic import BaseModel, Field
 
 from app.llm import get_llm
 from app.schemas.pipeline_state import PipelineState
+from app.prompts.loader import load_prompt
+from app.prompts.registry import PromptId
 
 logger = logging.getLogger(__name__)
 
@@ -193,15 +195,7 @@ async def _run_relevance_check(masked_text: str) -> RelevanceCheck:
     # Remove markers before checking relevance to avoid biasing the LLM
     clean_snippet = masked_text.replace('\f', ' ')[:RELEVANCE_SNIPPET_CHARS]
 
-    system_prompt = (
-        "You are a strict software-document gatekeeper. Accept only content "
-        "related to software requirements, engineering specs, architecture "
-        "notes, planning notes, backlog items, or sprint/meeting notes for "
-        "software products. Reject spam, personal notes, random lists, "
-        "marketing content, and unrelated domains.\n\n"
-        "Return ONLY valid JSON. No markdown. No explanations.\n"
-        "Shape: {\"is_useful\": bool, \"relevance_score\": float, \"reason\": \"string\"}"
-    )
+    system_prompt = load_prompt(PromptId.INGEST_RELEVANCE_V1)
 
     user_prompt = f"Classify this snippet and return structured output.\nSnippet:\n{clean_snippet}"
 
@@ -243,9 +237,12 @@ async def _run_relevance_check(masked_text: str) -> RelevanceCheck:
         )
 
 
+from app.progress import update_progress
+
 async def ingest_node(state: PipelineState) -> IngestOutput:
     """Ingest input, extract/clean text, mask PII, and classify relevance for routing."""
     print("--- INGEST NODE ---")
+    update_progress(state.get("job_id"), "ingest", 10, "PROCESSING")
     # Trust the file_type determined by detect_file_type
 
     file_type = str(state.get("file_type", "")).strip().lower()
