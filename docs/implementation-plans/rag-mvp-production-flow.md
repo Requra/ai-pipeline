@@ -142,7 +142,16 @@ classifier sees the strongest available evidence. This matches the spec's target
 - **Tests:** scoring determinism, retrieve relevant chunk, empty-chunks safety, graph compiles.
 - **Commit:** `feat(rag): add in-memory source index and lexical retrieval`
 - **Rollback:** `git revert <sha>`; node is additive (pass-through if disabled).
-- **Checkpoint status:** Not Started
+- **Checkpoint status:** Passed
+  - Changed: `app/rag/{__init__,scoring,lexical_retriever,source_index}.py` (new),
+    `app/nodes/build_source_index.py` (new), `app/schemas/items.py` (+`RetrievedChunk`),
+    `app/schemas/pipeline_state.py` (+`source_index_id`, `retrieval_stats`),
+    `app/graph/pipeline.py` (wire `parse_to_chunks → build_source_index → extract`),
+    `tests/rag/test_lexical_retriever.py` (new), `tests/nodes/test_build_source_index.py` (new).
+  - Tests: `pytest -q` → **137 passed, 1 pre-existing CRLF failure** (+14 new, 0 regressions).
+  - Notes: deterministic BM25 (positive idf on tiny corpora); non-serializable retriever
+    held in a bounded per-job registry (`app.rag.source_index`), state carries only the
+    handle + primitive stats. Empty chunks → empty index + `SOURCE_INDEX_EMPTY` warning.
 
 ### Phase 3 — Grounded extraction upgrade
 - **Goal:** stronger grounded extraction; JSON repair; stop raw logging.

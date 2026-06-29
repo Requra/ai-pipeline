@@ -33,6 +33,13 @@ class PipelineState(TypedDict):
     # use real parallel send/fan-out edges, reintroduce reducer annotations
     # (e.g., Annotated[List[T], operator.add]) as appropriate.
     chunks: List[SourceChunk]
+
+    # RAG source index (Phase 2). The retriever itself lives in a per-job
+    # registry (app.rag.source_index) to keep this state JSON-serializable;
+    # only the handle + lightweight stats are stored here.
+    source_index_id: Optional[str]
+    retrieval_stats: Optional[Dict[str, Any]]
+
     extracted_requirements: List[ExtractedRequirement]
     classified_requirements: List[ClassifiedRequirement]
     requirement_coverages: List[RequirementCoverage]

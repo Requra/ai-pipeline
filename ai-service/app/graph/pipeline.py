@@ -4,6 +4,7 @@ from app.nodes.detect_file_type import detect_file_type_node
 from app.nodes.ingest import ingest_node
 from app.nodes.parse_to_chunks import parse_to_chunks_node
 from app.nodes.transcribe import transcribe_node
+from app.nodes.build_source_index import build_source_index_node
 from app.nodes.extract import extract_node
 from app.nodes.classify import classify_node
 from app.nodes.generate import generate_node
@@ -21,6 +22,7 @@ def build_pipeline():
     workflow.add_node("ingest", ingest_node)
     workflow.add_node("parse_to_chunks", parse_to_chunks_node)
     workflow.add_node("transcribe", transcribe_node)
+    workflow.add_node("build_source_index", build_source_index_node)
     workflow.add_node("extract", extract_node)
     workflow.add_node("classify", classify_node)
     workflow.add_node("generate", generate_node)
@@ -48,8 +50,9 @@ def build_pipeline():
     # Transcription flows into parsing (sliding window for now)
     workflow.add_edge("transcribe", "parse_to_chunks")
     
-    # Chunks flow into extraction
-    workflow.add_edge("parse_to_chunks", "extract")
+    # Chunks flow into the source index, then into extraction
+    workflow.add_edge("parse_to_chunks", "build_source_index")
+    workflow.add_edge("build_source_index", "extract")
 
     # Standard sequential edges
     workflow.add_edge("extract", "classify")

@@ -24,6 +24,22 @@ class SourceChunk(BaseModel):
     start_time_sec: Optional[float] = None
     end_time_sec: Optional[float] = None
 
+class RetrievedChunk(BaseModel):
+    """A chunk returned by the lexical retriever, annotated with its score.
+
+    Used internally for evidence retrieval/grounding; never part of the public
+    JobResult contract.
+    """
+    chunk_id: str
+    text: str
+    score: float
+    page_number: Optional[int] = None
+    start_char: int = 0
+    end_char: int = 0
+    speaker: Optional[str] = None
+    timestamp: Optional[str] = None
+
+
 class EvidenceSpan(BaseModel):
     chunk_id: str
     quote: str
