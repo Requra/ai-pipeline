@@ -121,7 +121,15 @@ classifier sees the strongest available evidence. This matches the spec's target
   existing direct-contract + polling suites.
 - **Commit:** `fix(api): harden async job lifecycle and status contract`
 - **Rollback:** `git revert <sha>` (isolated to API layer).
-- **Checkpoint status:** Not Started
+- **Checkpoint status:** Passed
+  - Changed: `app/services/__init__.py` (new), `app/services/job_store.py` (new),
+    `app/startup.py` (+`build_readiness_report`), `app/main.py` (+`/ready`, job-id
+    sanitization on both endpoints, `/status` via store), `tests/test_ready.py` (new).
+  - Tests: `pytest -q` → **123 passed, 1 pre-existing CRLF snapshot failure**
+    (23 new tests, 0 regressions).
+  - Notes: `JobStore`/`MemoryJobStore` wrap the shared `progress_store` so legacy
+    `update_progress` callers and the store stay in sync. `/ready` returns booleans +
+    provider names only (no secrets); 503 when LLM provider unusable.
 
 ### Phase 2 — RAG source index foundation
 - **Goal:** turn chunks into a retrievable in-memory lexical index.

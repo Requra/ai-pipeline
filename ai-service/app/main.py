@@ -34,11 +34,13 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app.graph.pipeline import build_pipeline
-from app.progress import progress_store, update_progress
-from app.startup import run_startup_checks
+from app.progress import update_progress
+from app.services.job_store import default_job_store, sanitize_job_id
+from app.startup import build_readiness_report, run_startup_checks
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +132,19 @@ async def health_check():
     return {"status": "healthy", "service": "ai-pipeline"}
 
 
+@app.get("/ready")
+async def readiness_check():
+    """Readiness probe with safe diagnostics (no secrets ever leave this).
+
+    Returns 200 when the configured LLM provider is usable, otherwise 503 so an
+    orchestrator can gate traffic. The body reports provider names and boolean
+    key-presence flags only — never the key material itself.
+    """
+    report = build_readiness_report()
+    status_code = 200 if report.get("ready") else 503
+    return JSONResponse(status_code=status_code, content=report)
+
+
 # ---------------------------------------------------------------------------
 # Pipeline + request models
 # ---------------------------------------------------------------------------
@@ -219,7 +234,7 @@ async def run_pipeline_in_background(job_id: str, initial_state: dict):
 
 @app.get("/status/{job_id}")
 async def get_job_status(job_id: str):
-    entry = progress_store.get(job_id)
+    entry = default_job_store.get(job_id)
     if entry is None:
         raise HTTPException(status_code=404, detail="Job not found")
     # Always return the stable contract shape — never leak future internals.
@@ -321,7 +336,17 @@ async def process_document(
     parsed_metadata.setdefault("filename", file.filename)
 
     # ---- Stable job id: uuid4, not hash(filename) ----------------------
-    job_id = f"upload_{uuid.uuid4().hex}"
+    # Honour a backend-provided id (in metadata) only when it is safe; else uuid4.
+    provided_job_id = parsed_metadata.get("job_id")
+    if provided_job_id:
+        try:
+            job_id = sanitize_job_id(str(provided_job_id))
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400, detail=f"Invalid job_id in metadata: {exc}"
+            ) from None
+    else:
+        job_id = f"upload_{uuid.uuid4().hex}"
 
     initial_state = _build_initial_state(
         job_id,
@@ -368,8 +393,15 @@ async def process_json(
         )
 
     # Caller can supply a job_id (back-compat with the .NET integration); if
-    # absent we generate a stable uuid4 of our own.
-    job_id = request.job_id or f"text_{uuid.uuid4().hex}"
+    # absent we generate a stable uuid4 of our own. A supplied id is validated
+    # and rejected with 400 when unsafe (never trusted blindly into a store key).
+    if request.job_id:
+        try:
+            job_id = sanitize_job_id(request.job_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid job_id: {exc}") from None
+    else:
+        job_id = f"text_{uuid.uuid4().hex}"
 
     initial_state = _build_initial_state(
         job_id,

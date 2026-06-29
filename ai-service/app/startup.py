@@ -1,6 +1,8 @@
 import shutil
 import logging
 import sys
+from typing import Any, Dict, Optional
+
 from app.config import settings
 
 # Configure logging to ensure startup messages are visible
@@ -114,3 +116,67 @@ def run_startup_checks():
     validate_dependencies()
     validate_environment()
     logger.info("--- STARTUP VALIDATION COMPLETED ---")
+
+
+# ---------------------------------------------------------------------------
+# Readiness diagnostics (safe to expose via GET /ready)
+# ---------------------------------------------------------------------------
+
+_SUPPORTED_LLM_PROVIDERS = {"openrouter", "openai", "groq"}
+_SUPPORTED_TRANSCRIBE_PROVIDERS = {"groq", "deepgram"}
+
+
+def _llm_key_for(provider: str) -> Optional[str]:
+    return {
+        "openrouter": settings.OPENROUTER_API_KEY,
+        "openai": settings.OPENAI_API_KEY,
+        "groq": settings.GROQ_API_KEY,
+    }.get(provider)
+
+
+def _transcribe_key_for(provider: str) -> Optional[str]:
+    return {
+        "groq": settings.GROQ_API_KEY,
+        "deepgram": settings.DEEPGRAM_API_KEY,
+    }.get(provider)
+
+
+def build_readiness_report() -> Dict[str, Any]:
+    """Return safe readiness diagnostics — booleans and provider names only.
+
+    Never returns API keys or any secret material. The LLM check is the hard
+    gate for readiness; transcription is reported but treated as a soft/optional
+    capability (audio is opt-in), so a missing transcription key does not by
+    itself make the service "not ready".
+    """
+    llm_provider = settings.LLM_PROVIDER
+    llm_supported = llm_provider in _SUPPORTED_LLM_PROVIDERS
+    llm_key_present = bool(_llm_key_for(llm_provider))
+    llm_ok = llm_supported and llm_key_present
+
+    transcribe_provider = settings.TRANSCRIBE_PROVIDER
+    transcribe_supported = transcribe_provider in _SUPPORTED_TRANSCRIBE_PROVIDERS
+    transcribe_key_present = bool(_transcribe_key_for(transcribe_provider))
+
+    report: Dict[str, Any] = {
+        "ready": llm_ok,
+        "env": settings.ENV,
+        "checks": {
+            "llm": {
+                "ok": llm_ok,
+                "provider": llm_provider,
+                "provider_supported": llm_supported,
+                "api_key_present": llm_key_present,
+            },
+            "transcription": {
+                # Soft capability: valid config = ok; missing key is reported,
+                # not fatal, because audio input is optional.
+                "ok": transcribe_supported,
+                "provider": transcribe_provider,
+                "provider_supported": transcribe_supported,
+                "api_key_present": transcribe_key_present,
+                "optional": True,
+            },
+        },
+    }
+    return report
