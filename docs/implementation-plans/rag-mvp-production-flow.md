@@ -205,7 +205,16 @@ classifier sees the strongest available evidence. This matches the spec's target
   `tests/nodes/test_retrieve_evidence.py`.
 - **Commit:** `feat(rag): retrieve supporting evidence for requirements`
 - **Rollback:** `git revert <sha>`.
-- **Checkpoint status:** Not Started
+- **Checkpoint status:** Passed
+  - Changed: `app/nodes/retrieve_evidence.py` (new), `app/graph/pipeline.py`
+    (wire `dedupe_requirements → retrieve_evidence → classify`), `app/schemas/items.py`
+    (+`evidence_match_score`, `quote_support_score`), `tests/nodes/test_retrieve_evidence.py` (new).
+  - Tests: `pytest -q` → **171 passed, 0 failed** (+7 new).
+  - Notes: per requirement, query = text+actor+goal → top-k lexical retrieval; best
+    *sentence* snippet from NEW chunks attached (capped at 4 evidence/req, ≤240 chars —
+    no full-chunk bloat); originals preserved; scores recorded; weak support
+    (no grounded quote + no match) lowers confidence ×0.85 + flags review. Warnings:
+    `WEAK_EVIDENCE_SUPPORT`, `NO_RETRIEVED_EVIDENCE`, `EVIDENCE_LIMIT_APPLIED`.
 
 ### Phase 6 — Generation quality improvements
 - **Goal:** MVP-quality stories; validator; specific (non-generic) acceptance criteria.

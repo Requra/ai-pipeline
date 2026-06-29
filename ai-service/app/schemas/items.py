@@ -62,6 +62,11 @@ class ExtractedRequirement(BaseModel):
     # Whether the requirement is stated directly in the source ("explicit") or
     # inferred from context ("implied"). Optional; informational for grounding.
     extraction_type: Optional[Literal["explicit", "implied"]] = None
+    # Retrieval-grounding scores (Phase 5). Internal only; not in the V1 contract.
+    # evidence_match_score: best lexical retrieval score of a supporting chunk.
+    # quote_support_score: fraction of this requirement's quotes found in source.
+    evidence_match_score: Optional[float] = None
+    quote_support_score: Optional[float] = None
     needs_review: bool = False
     review_reason: Optional[str] = None
 

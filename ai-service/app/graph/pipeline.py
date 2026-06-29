@@ -7,6 +7,7 @@ from app.nodes.transcribe import transcribe_node
 from app.nodes.build_source_index import build_source_index_node
 from app.nodes.extract import extract_node
 from app.nodes.dedupe_requirements import dedupe_requirements_node
+from app.nodes.retrieve_evidence import retrieve_evidence_node
 from app.nodes.classify import classify_node
 from app.nodes.generate import generate_node
 from app.nodes.summarize import summarize_node
@@ -35,6 +36,7 @@ def build_pipeline():
     workflow.add_node("build_source_index", build_source_index_node)
     workflow.add_node("extract", extract_node)
     workflow.add_node("dedupe_requirements", dedupe_requirements_node)
+    workflow.add_node("retrieve_evidence", retrieve_evidence_node)
     workflow.add_node("classify", classify_node)
     workflow.add_node("generate", generate_node)
     workflow.add_node("evidence_grounding", evidence_grounding_node)
@@ -65,9 +67,10 @@ def build_pipeline():
     workflow.add_edge("parse_to_chunks", "build_source_index")
     workflow.add_edge("build_source_index", "extract")
 
-    # Dedupe extracted requirements before classification
+    # Dedupe, then retrieve supporting evidence, before classification
     workflow.add_edge("extract", "dedupe_requirements")
-    workflow.add_edge("dedupe_requirements", "classify")
+    workflow.add_edge("dedupe_requirements", "retrieve_evidence")
+    workflow.add_edge("retrieve_evidence", "classify")
     # After classification, ensure evidence grounding
     workflow.add_edge("classify", "evidence_grounding")
     workflow.add_edge("evidence_grounding", "generate")
