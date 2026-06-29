@@ -49,6 +49,8 @@ class PipelineState(TypedDict):
     export_rows: List[ExportRow]
     
     summary: Optional[StructuredSummary]
+    # Aggregate quality scores produced by `quality_gate` (Phase 7).
+    quality_report: Optional[Dict[str, Any]]
     # Final serialized job result produced by `format` node
     job_result: Optional[JobResult]
     

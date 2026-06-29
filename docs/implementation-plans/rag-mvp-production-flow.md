@@ -247,7 +247,19 @@ classifier sees the strongest available evidence. This matches the spec's target
   `tests/nodes/test_quality_gate*`.
 - **Commit:** `feat(quality): add groundedness and traceability scoring`
 - **Rollback:** `git revert <sha>`.
-- **Checkpoint status:** Not Started
+- **Checkpoint status:** Passed
+  - Changed: `app/services/quality_scoring.py` (new), `app/nodes/quality_gate.py`
+    (new issues + dedup + scoring), `app/schemas/items.py` (+`QualityReportV1`,
+    +optional `JobResult.quality_report`), `app/schemas/pipeline_state.py` (+`quality_report`),
+    `app/nodes/format.py` (map report), `tests/services/test_quality_scoring.py` (new),
+    `tests/nodes/test_quality_gate_scoring.py` (new).
+  - Tests: `pytest -q` → **197 passed, 0 failed** (+14 new).
+  - Notes: real derived scores (traceability, groundedness via quote_support_score,
+    story completeness, AC quality via `is_generic_ac`, duplicate risk, overall) — no
+    faked numbers. New issues: `low_confidence_classification`, `generic_acceptance_criteria`,
+    `duplicate_story`; issues deduped by full key. `quality_report` is an **additive,
+    optional** top-level contract field (backward-compatible). Status policy unchanged
+    (high severity / warnings ⇒ partial; not useful ⇒ rejected; error+no output ⇒ failed).
 
 ### Phase 8 — Summary and export polish
 - **Goal:** richer summary inputs; useful export rows; correct story-type mapping.

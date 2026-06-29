@@ -26,6 +26,7 @@ from app.schemas.items import (
     StructuredSummary,
     QualityIssue,
     PipelineWarning,
+    QualityReportV1,
     ExportRow
 )
 
@@ -446,6 +447,15 @@ async def format_node(state: PipelineState) -> dict:
         )
     )
 
+    # Quality report (Phase 7) — derived scores from quality_gate, if present.
+    quality_report_data = state.get("quality_report")
+    quality_report = None
+    if isinstance(quality_report_data, dict):
+        try:
+            quality_report = QualityReportV1(**quality_report_data)
+        except Exception:
+            quality_report = None
+
     # Structured error parsing
     structured_error = parse_pipeline_error(error, status)
 
@@ -467,6 +477,7 @@ async def format_node(state: PipelineState) -> dict:
         artifacts=artifacts,
         quality_issues=q_issues,
         warnings=warnings,
+        quality_report=quality_report,
         error=structured_error,
         processing_time_ms=processing_time_ms,
         

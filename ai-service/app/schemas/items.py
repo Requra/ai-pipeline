@@ -161,6 +161,7 @@ class JobResult(BaseModel):
     artifacts: "ArtifactsV1" = Field(default_factory=lambda: ArtifactsV1())
     quality_issues: List[QualityIssue] = Field(default_factory=list)
     warnings: List[PipelineWarning] = Field(default_factory=list)
+    quality_report: Optional["QualityReportV1"] = None
     error: Optional["PipelineError"] = None
     processing_time_ms: int
 
@@ -275,6 +276,23 @@ class ExcelFileArtifactV1(BaseModel):
 
 class ArtifactsV1(BaseModel):
     excel_file: ExcelFileArtifactV1 = Field(default_factory=ExcelFileArtifactV1)
+
+
+class QualityReportV1(BaseModel):
+    """Aggregate, derived quality scores for the run (additive contract field).
+
+    All values are computed from real signals; higher is better except
+    `duplicate_risk` (lower is better). Optional — older clients can ignore it.
+    """
+    overall_score: float = 1.0
+    traceability_coverage: float = 1.0
+    groundedness_score: float = 1.0
+    story_completeness: float = 1.0
+    acceptance_criteria_quality: float = 1.0
+    duplicate_risk: float = 0.0
+    requirement_count: int = 0
+    story_count: int = 0
+    high_severity_issue_count: int = 0
 
 
 class PipelineError(BaseModel):
