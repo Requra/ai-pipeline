@@ -162,7 +162,20 @@ classifier sees the strongest available evidence. This matches the spec's target
   crash the job, tests pass.
 - **Commit:** `feat(extract): strengthen grounded extraction and JSON repair`
 - **Rollback:** `git revert <sha>`; v1 prompt retained as fallback.
-- **Checkpoint status:** Not Started
+- **Checkpoint status:** Passed
+  - Changed: `app/prompts/templates/extract_requirements_v2.md` (new),
+    `app/prompts/registry.py` (+`EXTRACT_REQUIREMENTS_V2`), `app/utils/json_parsing.py` (new),
+    `app/nodes/extract.py` (v2 prompt, JSON repair, debug-gated logging, confidence
+    penalties, `extraction_type`, weak-evidence warning), `app/config.py` (+`DEBUG_LLM_IO`),
+    `app/schemas/items.py` (+`extraction_type`), `tests/prompts/test_prompt_snapshots.py`
+    (CRLF-robust + v2 hash + coverage test), `tests/utils/test_json_parsing.py` (new),
+    `tests/nodes/test_extract_grounding.py` (new), `tests/test_e2e_mocked.py` (verbatim mock quote).
+  - Tests: `pytest -q` → **154 passed, 0 failed** (+19 new). The pre-existing CRLF
+    snapshot failure is now **resolved** (line-ending-normalized hashing).
+  - Notes: malformed model JSON gets one LLM repair round before the chunk is dropped
+    (never crashes the job); raw model output only logs at DEBUG and never in production;
+    evidence confidence is graded exact(1.0)/fuzzy(x0.9)/fallback(x0.7); fallback evidence
+    raises `EXTRACT_WEAK_EVIDENCE`, which correctly downgrades a run to `partial`.
 
 ### Phase 4 — Requirement deduplication node
 - **Goal:** merge duplicate/near-duplicate requirements, preserve evidence, re-id.

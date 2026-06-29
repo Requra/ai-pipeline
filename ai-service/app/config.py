@@ -5,9 +5,18 @@ from dotenv import load_dotenv
 # Load environment variables from .env if present
 load_dotenv()
 
+def _env_flag(name: str, default: str = "false") -> bool:
+    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
 class Settings:
     ENV: str = os.getenv("ENV", "development")
-    
+
+    # When true (and ENV != production) nodes may log raw LLM input/output at
+    # DEBUG for local debugging. Forced off in production so raw document text,
+    # full prompts, and full model responses never reach production logs.
+    DEBUG_LLM_IO: bool = _env_flag("DEBUG_LLM_IO")
+
     # Provider Keys
     GOOGLE_API_KEY: Optional[str] = os.getenv("GOOGLE_API_KEY")
     GROQ_API_KEY: Optional[str] = os.getenv("GROQ_API_KEY")

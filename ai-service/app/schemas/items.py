@@ -59,6 +59,9 @@ class ExtractedRequirement(BaseModel):
         description="Non-empty list of raw text quotes backing this requirement for grounding."
     )
     priority: str = "Medium"
+    # Whether the requirement is stated directly in the source ("explicit") or
+    # inferred from context ("implied"). Optional; informational for grounding.
+    extraction_type: Optional[Literal["explicit", "implied"]] = None
     needs_review: bool = False
     review_reason: Optional[str] = None
 

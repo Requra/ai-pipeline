@@ -38,8 +38,10 @@ async def mocked_ainvoke(messages, **kwargs):
                     "actor": "System",
                     "goal": "performance",
                     "candidate_labels": ["NFR"],
-                    "confidence": 0.8,
-                    "evidence": [{"chunk_id": "c1", "quote": "under 2s"}]
+                    # Verbatim quote from the source (v2 grounding contract): the
+                    # source says "under 2 seconds", so the evidence must match it.
+                    "evidence": [{"chunk_id": "c1", "quote": "under 2 seconds"}],
+                    "confidence": 0.8
                 }
             ]
         }))
