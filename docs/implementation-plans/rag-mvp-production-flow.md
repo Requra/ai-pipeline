@@ -307,24 +307,35 @@ classifier sees the strongest available evidence. This matches the spec's target
   this plan's final status.
 - **Commit:** `docs(pipeline): document RAG-grounded MVP production flow`
 - **Rollback:** `git revert <sha>` (docs only).
-- **Checkpoint status:** Not Started
+- **Checkpoint status:** Passed
+  - Changed: `docs/rag-grounding-architecture.md` (new), `docs/node-reference.md` (new),
+    `docs/contracts/pipeline-response-v1.md` (quality_report + export notes),
+    `readme.md` (setup/env/endpoints/polling/tests/eval/docker/backend integration),
+    this plan (final status).
+  - Tests: `pytest -q` → **212 passed, 0 failed**. Eval → ALL THRESHOLDS MET.
+  - Docker: `docker compose build` could **not** run — Docker daemon not running
+    (CLI present). No new deps + unchanged Dockerfile; rerun when the daemon is up.
 
 ## 6. Global Acceptance Criteria
 
 The project is complete only when:
-- [ ] API endpoints remain backward-compatible (`/health`, `/process`, `/process-json`, `/status`).
-- [ ] Pipeline runs end to end (mocked LLM).
-- [ ] Status endpoint returns the stable shape.
-- [ ] Relevant input produces requirements and user stories.
-- [ ] Irrelevant input is rejected gracefully (`status="rejected"`).
-- [ ] Every requirement has evidence or an explicit warning.
-- [ ] Every story links to requirement/source refs.
-- [ ] Generated stories have non-generic acceptance criteria.
-- [ ] Export rows exist when stories exist.
-- [ ] Quality issues/warnings are meaningful and scores are derived (not faked).
-- [ ] Tests pass (baseline + new).
-- [ ] Docker build passes if Docker is available.
-- [ ] Docs updated.
+- [x] API endpoints remain backward-compatible (`/health`, `/process`, `/process-json`, `/status`).
+- [x] Pipeline runs end to end (mocked LLM) — e2e + MVP harness green.
+- [x] Status endpoint returns the stable shape.
+- [x] Relevant input produces requirements and user stories (4/4 fixtures).
+- [x] Irrelevant input is rejected gracefully (`status="rejected"`).
+- [x] Every requirement has evidence or an explicit warning.
+- [x] Every story links to requirement/source refs (traceability 1.0).
+- [x] Generated stories have non-generic acceptance criteria.
+- [x] Export rows exist when stories exist.
+- [x] Quality issues/warnings are meaningful and scores are derived (not faked).
+- [x] Tests pass (212 passed, 0 failed).
+- [~] Docker build — **not verified**: Docker CLI v29.2.0 is installed but the Docker
+  daemon (Docker Desktop) is not running, so `docker compose build` cannot connect.
+  No new dependencies were added and the Dockerfile is unchanged, so the build profile
+  is identical to the previous (working) image; rerun `docker compose build` once the
+  daemon is up to confirm.
+- [x] Docs updated.
 
 ## 7. Backend Integration Notes
 - **What backend calls:** `POST /process` (multipart file) or `POST /process-json`

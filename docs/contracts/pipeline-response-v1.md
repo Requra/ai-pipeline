@@ -93,8 +93,24 @@ Contains high-level analysis summaries:
 
 ### Exports (`exports`)
 Ready-to-use row mappings for tabular exports:
-- `excel`: Excel row maps containing standard columns (`id`, `title`, `user_story`, `acceptance_criteria`, `type`, `priority`, `actor`, `source_requirement_id`, `source_refs`).
-- `jira`: Jira rows containing fields map.
+- `excel`: Excel row maps. Columns (backward-compatible — older keys retained,
+  newer keys added): `id`, `requirement_id`, `title`, `user_story`,
+  `acceptance_criteria`, `type`, `priority`, `actor`, `confidence`, `labels`,
+  `source_requirement_id`, `source_quotes`, `quality_score`, `quality_issues`,
+  `source_refs`.
+- `jira`: Jira rows containing the fields map (now also includes `source_quotes`).
+
+> Note: `user_stories[].type` is derived from the story's labels
+> (FR→Functional, NFR/Constraint/Assumption→Non-Functional, BR→Business) rather
+> than always reported as `Functional`.
+
+### Quality Report (`quality_report`) — additive, optional
+A backward-compatible top-level object with derived run-level scores (all `0.0`–`1.0`,
+higher is better except `duplicate_risk`). May be `null` on error paths. Older
+clients can safely ignore it.
+- `overall_score`, `traceability_coverage`, `groundedness_score`,
+  `story_completeness`, `acceptance_criteria_quality`, `duplicate_risk`
+- `requirement_count`, `story_count`, `high_severity_issue_count`
 
 ### Artifacts (`artifacts`)
 - `excel_file`: Object containing file download parameters (`available`, `file_url`, `file_name`, `mime_type`).
