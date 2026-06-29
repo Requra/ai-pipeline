@@ -183,7 +183,21 @@ classifier sees the strongest available evidence. This matches the spec's target
   `tests/nodes/test_dedupe_requirements.py`.
 - **Commit:** `feat(requirements): dedupe extracted requirements before classification`
 - **Rollback:** `git revert <sha>`.
-- **Checkpoint status:** Not Started
+- **Checkpoint status:** Passed
+  - Changed: `app/nodes/dedupe_requirements.py` (new), `app/graph/pipeline.py`
+    (wire `extract → dedupe_requirements → classify`; **bind `recursion_limit=60`**),
+    `tests/nodes/test_dedupe_requirements.py` (new).
+  - Tests: `pytest -q` → **164 passed, 0 failed** (+10 new).
+  - Notes: exact + near-dup (token Jaccard ≥ 0.8) merge; evidence unioned (never
+    dropped); max confidence + strongest priority + label union preserved; different
+    actor ⇒ kept separate + `POSSIBLE_DUPLICATE_REVIEW`; ids reassigned + legacy
+    projection refreshed; warnings `DUPLICATE_REQUIREMENT_MERGED`/`POSSIBLE_DUPLICATE_REVIEW`.
+  - **Important fix:** adding the 12th node tripped langgraph 0.0.26's default
+    `recursion_limit=25` (this old BSP engine spends extra channel-propagation
+    super-steps per node). Root-caused via step counting (`astream` completes at
+    limit 100), fixed by binding `recursion_limit=60` on the compiled graph via
+    `.with_config(...)` so all callers inherit it (no per-invoke config needed).
+    The graph remains an acyclic DAG — this is only a step budget.
 
 ### Phase 5 — Evidence retrieval per requirement
 - **Goal:** use the RAG index to strengthen per-requirement evidence + traceability.
