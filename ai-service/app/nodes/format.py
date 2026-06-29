@@ -155,12 +155,14 @@ async def format_node(state: PipelineState) -> dict:
             data.setdefault("classification_confidence", 0.0)
             coerced_reqs.append(ClassifiedRequirement(**data))
 
-    # Map status
+    # Map status. Rejection (input judged not useful) takes precedence over
+    # "failed": ingest sets a DOCUMENT_REJECTED reason in `error` when it rejects,
+    # which must not be misreported as a system failure.
     status = "partial"
-    if error and not coerced_stories and not coerced_reqs:
-        status = "failed"
-    elif state.get("is_useful") is False:
+    if state.get("is_useful") is False:
         status = "rejected"
+    elif error and not coerced_stories and not coerced_reqs:
+        status = "failed"
     else:
         if state.get("is_useful") and (not coerced_reqs or not coerced_stories):
             status = "partial"

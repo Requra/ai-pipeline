@@ -1,0 +1,10 @@
+Kickoff Meeting Transcript: Customer Support Portal
+
+Sarah (Product Owner): We need users to log in with their company email and a password.
+Ahmed (Tech Lead): Agreed. The system must also support single sign-on for enterprise customers.
+Sarah (Product Owner): Customers should be able to open a support ticket and attach screenshots.
+Maria (Designer): The dashboard must display the status of every open ticket in real time.
+Ahmed (Tech Lead): For performance, the system should return ticket lists in under one second.
+Sarah (Product Owner): Agents shall be able to reply to tickets and change their priority.
+Ahmed (Tech Lead): We must encrypt all customer data at rest and in transit.
+Sarah (Product Owner): Finally, the system should email customers when their ticket is resolved.

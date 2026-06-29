@@ -286,7 +286,19 @@ classifier sees the strongest available evidence. This matches the spec's target
   `tests/test_mvp_quality.py` (new).
 - **Commit:** `test(pipeline): add MVP regression fixtures and evaluation harness`
 - **Rollback:** `git revert <sha>` (tests/scripts only).
-- **Checkpoint status:** Not Started
+- **Checkpoint status:** Passed
+  - Changed: `tests/fixtures/{simple_project_brief,meeting_transcript,irrelevant_text,
+    duplicate_requirements,nfr_br_requirements}.txt` (new), `scripts/evaluate_pipeline.py`
+    (new), `tests/test_mvp_quality.py` (new), `app/nodes/format.py` (**status-precedence
+    bug fix**).
+  - Tests: `pytest -q` → **212 passed, 0 failed** (+7 new).
+  - Eval (`poetry run python scripts/evaluate_pipeline.py`, mock LLM): **ALL THRESHOLDS
+    MET** — all 4 relevant fixtures get requirements+stories, traceability 1.0,
+    source-refs 1.0, ≥2 ACs, exports available; `duplicate_requirements.txt` merges 3
+    duplicates; `irrelevant_text.txt` → `rejected`.
+  - **Bug fix:** rejection now takes precedence over "failed" in `format` — ingest sets a
+    `DOCUMENT_REJECTED` reason in `error` on rejection, which previously made irrelevant
+    input report `failed` instead of `rejected`. Deterministic mock LLM keeps CI key-free.
 
 ### Phase 10 — Documentation finalization
 - **Goal:** team-readable docs.

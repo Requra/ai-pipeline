@@ -1,0 +1,10 @@
+Non-Functional and Business Rules: Payments Service
+
+The system must process a payment in under three seconds at the 95th percentile.
+The service shall maintain 99.9 percent availability measured monthly.
+All payment data must be encrypted at rest and in transit.
+Only administrators are allowed to issue refunds above one thousand dollars.
+A customer must not place an order below the minimum order value of five dollars.
+The system shall apply a ten percent discount only to verified loyalty members.
+The platform must scale to handle ten thousand concurrent users during peak hours.
+Refund requests must be approved within two business days per company policy.
