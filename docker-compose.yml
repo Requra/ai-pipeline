@@ -14,6 +14,10 @@ services:
     environment:
       - ENV=development
       - PYTHONUNBUFFERED=1
+      # CORS origins for browser callers in direct-demo mode. Comma-separated.
+      # In ENV=production this MUST be set explicitly — empty + production
+      # blocks all browser origins. Add the frontend URL when deploying.
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:5500,http://127.0.0.1:5500,http://localhost:3000,http://127.0.0.1:3000}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
