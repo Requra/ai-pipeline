@@ -55,12 +55,30 @@ async def mocked_ainvoke(messages, **kwargs):
             ]
         }))
         
-    # Generate node
+    # Generate node (v2-compliant: agile description + 2 specific GWT criteria)
     if "Convert requirements into USER STORIES" in system:
         return MagicMock(content=json.dumps({
             "stories": [
-                {"source_requirement_id": 1, "title": "Process payments", "description": "As a System, ...", "acceptance_criteria": ["Given X"], "labels": ["FR"]},
-                {"source_requirement_id": 2, "title": "Improve perf", "description": "As a System, ...", "acceptance_criteria": ["Given Y"], "labels": ["NFR"]}
+                {
+                    "source_requirement_id": 1,
+                    "title": "Process payments securely",
+                    "description": "As a user, I want to process payments securely, so that my transactions are protected.",
+                    "acceptance_criteria": [
+                        "Given a user with a valid payment, when they submit it, then the transaction is processed and encrypted.",
+                        "Given a user with an invalid payment, when they submit it, then the system rejects it with a clear error message.",
+                    ],
+                    "labels": ["FR"],
+                },
+                {
+                    "source_requirement_id": 2,
+                    "title": "Fast response time",
+                    "description": "As a user, I want responses in under two seconds, so that the application feels fast.",
+                    "acceptance_criteria": [
+                        "Given normal load, when a request is made, then the response completes in under two seconds.",
+                        "Given monitoring is enabled, when latency is measured, then it stays within the two-second target.",
+                    ],
+                    "labels": ["NFR"],
+                },
             ]
         }))
         

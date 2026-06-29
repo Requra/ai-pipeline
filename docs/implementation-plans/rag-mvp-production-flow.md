@@ -224,7 +224,20 @@ classifier sees the strongest available evidence. This matches the spec's target
   `tests/validators/test_story_validator.py`.
 - **Commit:** `feat(generate): validate and repair generated stories`
 - **Rollback:** `git revert <sha>`; v1 prompt retained.
-- **Checkpoint status:** Not Started
+- **Checkpoint status:** Passed
+  - Changed: `app/prompts/templates/generate_user_stories_v2.md` (new),
+    `app/prompts/registry.py` (+`GENERATE_USER_STORIES_V2`), `app/validators/story_validator.py`
+    (new), `app/nodes/generate.py` (v2 prompt, `build_specific_acceptance_criteria`,
+    fallback ACs, validation warning), snapshot test (+v2 hash),
+    `tests/validators/test_story_validator.py` (new), `tests/nodes/test_generate_quality.py` (new),
+    `tests/test_e2e_mocked.py` (v2-compliant generate mock).
+  - Tests: `pytest -q` → **183 passed, 0 failed** (+12 new).
+  - Notes: fallback stories now emit **≥2 requirement-specific GWT criteria** (the
+    generic `"Requirement is implemented as specified"` is gone), type-aware
+    (FR/NFR-measurable/BR-rule). A pure validator flags low-quality stories
+    (insufficient/all-generic ACs, missing source ids/evidence ref, duplicates) →
+    aggregate `GENERATE_STORY_QUALITY` warning; LLM stories are flagged, not mutated,
+    so coverage stays consistent. v2 prompt enforces non-generic, type-specific ACs.
 
 ### Phase 7 — Quality gate scoring
 - **Goal:** real numeric scores (traceability, groundedness, completeness, AC quality,
