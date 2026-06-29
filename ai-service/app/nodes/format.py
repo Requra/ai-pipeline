@@ -38,6 +38,20 @@ def generate_dedup_key(title_or_text: str) -> str:
     return slug[:100]
 
 
+def v1_type_from_labels(labels) -> str:
+    """Map requirement/story labels to a V1 type. Shared by requirements and
+    stories so a story's type reflects its source labels (not a hard-coded
+    'Functional')."""
+    labs = set(labels or [])
+    if "FR" in labs:
+        return "Functional"
+    if "NFR" in labs or "Constraint" in labs or "Assumption" in labs:
+        return "Non-Functional"
+    if "BR" in labs:
+        return "Business"
+    return "Functional"
+
+
 def parse_pipeline_error(err_str: str, status: str) -> Optional[PipelineError]:
     if not err_str:
         return None
@@ -221,14 +235,8 @@ async def format_node(state: PipelineState) -> dict:
         req_id_map[r.id] = req_str_id
         
         # Determine requirement type
-        req_type = "Unknown"
         labels = getattr(r, "labels", []) or []
-        if "FR" in labels:
-            req_type = "Functional"
-        elif "NFR" in labels or "Constraint" in labels or "Assumption" in labels:
-            req_type = "Non-Functional"
-        elif "BR" in labels:
-            req_type = "Business"
+        req_type = v1_type_from_labels(labels) if labels else "Unknown"
             
         # Determine priority
         priority = getattr(r, "priority", "Medium") or "Medium"
@@ -341,6 +349,14 @@ async def format_node(state: PipelineState) -> dict:
             story_points=0
         )
         
+        # Story type derived from its labels (falls back to the linked
+        # requirement's type), not hard-coded Functional.
+        story_type = v1_type_from_labels(getattr(s, "labels", []) or [])
+        if not (getattr(s, "labels", []) or []):
+            linked_req = next((r for r in mapped_reqs if r.id == linked_req_id), None)
+            if linked_req is not None:
+                story_type = linked_req.type if linked_req.type != "Unknown" else "Functional"
+
         mapped_stories.append(UserStoryV1(
             id=story_str_id,
             requirement_id=linked_req_id,
@@ -348,7 +364,7 @@ async def format_node(state: PipelineState) -> dict:
             user_story=s.description,
             acceptance_criteria=ac_v1_list,
             priority=priority,
-            type="Functional",
+            type=story_type,
             deduplication_key=generate_dedup_key(s.title),
             source_refs=source_refs,
             quality=quality,
@@ -397,20 +413,30 @@ async def format_node(state: PipelineState) -> dict:
             out_of_scope=[]
         )
 
-    # 5. Exports mapping
+    # 5. Exports mapping — flat, Excel/Jira-friendly rows enriched with
+    #    traceability (source quotes), confidence and quality signals.
+    req_by_str_id = {r.id: r for r in mapped_reqs}
     excel_rows = []
     jira_rows = []
     for s in mapped_stories:
+        linked = req_by_str_id.get(s.requirement_id)
+        source_quotes = " | ".join(ref.quote for ref in s.source_refs if ref.quote)
         excel_rows.append({
             "id": s.id,
+            "requirement_id": s.requirement_id,
             "title": s.title,
             "user_story": s.user_story,
             "acceptance_criteria": "; ".join([ac.text for ac in s.acceptance_criteria]),
             "type": s.type,
             "priority": s.priority,
-            "actor": next((r.actor for r in mapped_reqs if r.id == s.requirement_id), "System"),
+            "actor": linked.actor if linked else "System",
+            "confidence": linked.confidence_score if linked else 0.0,
+            "labels": ", ".join(s.jira_fields.labels),
             "source_requirement_id": s.requirement_id,
-            "source_refs": str([ref.model_dump() for ref in s.source_refs])
+            "source_quotes": source_quotes,
+            "quality_score": s.quality.score,
+            "quality_issues": "; ".join(s.quality.issues),
+            "source_refs": str([ref.model_dump() for ref in s.source_refs]),
         })
         jira_rows.append({
             "issue_type": s.jira_fields.issue_type,
@@ -422,13 +448,19 @@ async def format_node(state: PipelineState) -> dict:
             "components": s.jira_fields.components,
             "epic_name": s.jira_fields.epic_name,
             "story_points": s.jira_fields.story_points,
-            "source_requirement_id": s.requirement_id
+            "source_requirement_id": s.requirement_id,
+            "source_quotes": source_quotes,
         })
-        
+
     exports = ExportsV1(
         excel=ExcelExportV1(
             available=len(excel_rows) > 0,
-            columns=["id", "title", "user_story", "acceptance_criteria", "type", "priority", "actor", "source_requirement_id", "source_refs"],
+            columns=[
+                "id", "requirement_id", "title", "user_story", "acceptance_criteria",
+                "type", "priority", "actor", "confidence", "labels",
+                "source_requirement_id", "source_quotes", "quality_score",
+                "quality_issues", "source_refs",
+            ],
             rows=excel_rows
         ),
         jira=JiraExportV1(

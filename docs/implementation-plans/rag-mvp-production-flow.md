@@ -267,7 +267,18 @@ classifier sees the strongest available evidence. This matches the spec's target
   `tests/nodes/test_summarize*`.
 - **Commit:** `feat(output): polish summary and export-ready rows`
 - **Rollback:** `git revert <sha>`.
-- **Checkpoint status:** Not Started
+- **Checkpoint status:** Passed
+  - Changed: `app/nodes/format.py` (story type from labels via `v1_type_from_labels`;
+    enriched excel/jira rows), `app/nodes/summarize.py` (artifact digest in the
+    summary input), `tests/nodes/test_format_exports.py` (new),
+    `tests/nodes/test_summarize_digest.py` (new).
+  - Tests: `pytest -q` → **205 passed, 0 failed** (+8 new).
+  - Notes: story `type` now maps FR→Functional / NFR/Constraint/Assumption→Non-Functional
+    / BR→Business (was hard-coded "Functional"). Excel rows gained `requirement_id`,
+    `confidence`, `labels`, readable `source_quotes`, `quality_score`, `quality_issues`
+    (old keys retained); jira rows gained `source_quotes`. Summary input now includes a
+    digest of requirements/stories/open-questions. XLSX binary still produced by the
+    backend (no fake artifact URL).
 
 ### Phase 9 — Test and evaluation harness
 - **Goal:** make MVP quality measurable.
