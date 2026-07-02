@@ -316,6 +316,47 @@ classifier sees the strongest available evidence. This matches the spec's target
   - Docker: `docker compose build` could **not** run — Docker daemon not running
     (CLI present). No new deps + unchanged Dockerfile; rerun when the daemon is up.
 
+### Phase 11 — Production hardening (durable store, queue/worker, internal API, hybrid RAG)
+- **Goal:** turn the direct-demo/in-memory service into a production-ready internal
+  AI processing service end to end, without breaking the MVP contract.
+- **Checkpoint status:** Passed
+  - **CP0 — Config + provider fix:** typed production settings (`DATABASE_URL`,
+    `REDIS_URL`, embeddings, backend auth/callback, timeouts, retention) +
+    `is_production`/fail-fast (`collect_config_problems`, `validate_required_config`);
+    `groq` made a first-class LLM provider consistently across `llm.py`,
+    `startup.validate_environment`, and `/ready`. Files: `app/config.py`,
+    `app/startup.py`.
+  - **CP1 — Store seams + in-memory impls:** `JobStore`/`ResultStore`/`ChunkStore`/
+    `EmbeddingStore` protocols + domain records + memory backend (default).
+    Files: `app/store/{models,base,memory,factory,__init__}.py`.
+  - **CP2 — Postgres + pgvector:** SQLAlchemy ORM for all 15 `ai_*` tables, async
+    session, repositories (incl. result decomposition + pgvector cosine search),
+    hand-written Alembic baseline. Files: `app/store/db/*`, `alembic.ini`,
+    `migrations/*`. Lazily imported (only when `DATABASE_URL` set).
+  - **CP3 — Queue + worker:** `QueueClient` (`InProcessQueue` default, `RedisQueue`/RQ
+    prod), `execute_job` runner (stream + per-node cancellation, timeout, artifact
+    persistence, callback), backend client, dispatcher, `python -m app.worker.main`.
+    Files: `app/queue/*`, `app/worker/*`, `app/clients/backend.py`.
+  - **CP4 — Internal API + auth + tracing:** bearer-token guard (401/403),
+    `X-Request-Id` middleware + safe access log, `/internal/jobs` (create/status/
+    result/cancel/retry/callback-test) with idempotency; `/process`,`/process-json`,
+    `/status` reworked to use the same DB-backed job + queue. Files: `app/api/*`,
+    `app/main.py`.
+  - **CP5 — Hybrid RAG + readiness:** opt-in embeddings (`build_source_index`) +
+    hybrid BM25+vector merge (`retrieve_evidence`, `app/rag/{embeddings,hybrid}.py`)
+    scoped by tenant/project/job with quote verification preserved; `/ready`
+    enhanced with DB/Redis/pgvector/token/CORS probes.
+  - **CP6 — Tests/deps/compose/docs:** +39 tests (stores, internal API, hybrid,
+    runner); prod deps added + `poetry.lock` regenerated; `docker-compose.yml`
+    (Postgres+pgvector, Redis, migrate, API, worker); `docs/production-architecture.md`.
+  - **Tests:** `pytest -q` → **251 passed, 0 failed** (+39, 0 regressions). MVP
+    eval → ALL THRESHOLDS MET.
+  - **Not verified offline:** live Postgres+pgvector migration/queries and a running
+    RQ worker (no infra in this environment) — gated by `alembic upgrade head` +
+    integration run in CI/staging. The Postgres/Redis/RQ code is lazily imported so
+    the default in-memory path (and the whole suite) runs without that infra.
+  - **Commit(s):** `feat(prod): durable store, queue/worker, internal API, hybrid RAG`.
+
 ## 6. Global Acceptance Criteria
 
 The project is complete only when:

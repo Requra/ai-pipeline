@@ -43,10 +43,23 @@ poetry run uvicorn app.main:app --reload --port 8000
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | `/health` | Liveness. |
-| GET | `/ready` | Readiness (provider configured?). Safe diagnostics only; 503 when not ready. |
-| POST | `/process` | Multipart file upload (PDF/DOCX/TXT/audio). Returns `202 {job_id, status:"QUEUED"}`. |
-| POST | `/process-json` | Direct text. Returns `202 {job_id, status:"QUEUED"}`. |
-| GET | `/status/{job_id}` | Poll job status/result. |
+| GET | `/ready` | Readiness (providers + DB/Redis/pgvector when configured). Safe diagnostics only; 503 when not ready. |
+| POST | `/process` | Multipart file upload (PDF/DOCX/TXT/audio). Demo/dev. Returns `202 {job_id, status:"QUEUED"}`. |
+| POST | `/process-json` | Direct text. Demo/dev. Returns `202 {job_id, status:"QUEUED"}`. |
+| GET | `/status/{job_id}` | Poll job status/result (DB-backed in production). |
+| POST | `/internal/jobs` | **Production**: create/enqueue a job (service token). See below. |
+| GET | `/internal/jobs/{job_id}` | Durable job status. |
+| GET | `/internal/jobs/{job_id}/result` | Persisted `JobResult` (409 if incomplete). |
+| POST | `/internal/jobs/{job_id}/cancel` | Cancel a queued/running job. |
+| POST | `/internal/jobs/{job_id}/retry` | Retry a terminal job (new attempt). |
+
+> **Production mode** (durable Postgres+pgvector store, Redis/RQ worker,
+> service-to-service auth, idempotency, cancellation, retry, backend callbacks,
+> hybrid retrieval) is documented in
+> **[docs/production-architecture.md](docs/production-architecture.md)**.
+> `/internal/*` requires `Authorization: Bearer <AI_INTERNAL_SERVICE_TOKEN>`.
+> The demo endpoints below stay backward-compatible and run the same
+> DB-backed job + queue internally.
 
 ### Examples
 

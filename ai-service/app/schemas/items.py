@@ -65,8 +65,11 @@ class ExtractedRequirement(BaseModel):
     # Retrieval-grounding scores (Phase 5). Internal only; not in the V1 contract.
     # evidence_match_score: best lexical retrieval score of a supporting chunk.
     # quote_support_score: fraction of this requirement's quotes found in source.
+    # vector_match_score: best semantic (pgvector) similarity of a supporting
+    #   chunk when hybrid retrieval is enabled. Internal only; not in the V1 contract.
     evidence_match_score: Optional[float] = None
     quote_support_score: Optional[float] = None
+    vector_match_score: Optional[float] = None
     needs_review: bool = False
     review_reason: Optional[str] = None
 

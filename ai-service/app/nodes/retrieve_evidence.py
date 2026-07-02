@@ -22,11 +22,15 @@ from __future__ import annotations
 import re
 from typing import List
 
+import logging
+
 from app.progress import update_progress
 from app.rag.scoring import tokenize
 from app.rag.source_index import get_source_index
 from app.schemas.items import EvidenceSpan, ExtractedRequirement, PipelineWarning, SourceChunk
 from app.schemas.pipeline_state import PipelineState
+
+logger = logging.getLogger("app.nodes.retrieve_evidence")
 
 RETRIEVE_TOP_K = 3
 MAX_EVIDENCE_PER_REQ = 4
@@ -88,17 +92,63 @@ async def retrieve_evidence_node(state: PipelineState) -> dict:
             "warnings": (state.get("warnings", []) or []) + [warning],
         }
 
+    # --- Optional hybrid (BM25 + pgvector) setup --------------------------
+    # Opt-in per job. BM25 stays authoritative for exact grounding; vector
+    # search only augments recall and is scoped by tenant/project/job so it can
+    # never surface another tenant's or project's chunks. Any failure degrades
+    # cleanly back to lexical-only retrieval.
+    hybrid = bool(state.get("enable_hybrid_retrieval"))
+    embedder = None
+    embedding_store = None
+    chunks_by_id = {c.chunk_id: c for c in chunks}
+    if hybrid:
+        try:
+            from app.rag.embeddings import get_embedder
+            from app.store.factory import get_stores
+
+            embedder = get_embedder()
+            embedding_store = get_stores().embeddings
+            hybrid = embedder is not None
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("hybrid retrieval disabled (setup failed): %s", type(exc).__name__)
+            hybrid = False
+
     weak_support = 0
     no_hits = 0
     limit_applied = 0
+    vector_used = 0
 
     for req in reqs:
         query = _build_query(req)
         query_tokens = set(tokenize(query))
-        hits = retriever.retrieve(query, top_k=RETRIEVE_TOP_K)
+        bm25_hits = retriever.retrieve(query, top_k=RETRIEVE_TOP_K)
 
-        req.evidence_match_score = round(hits[0].score, 4) if hits else 0.0
+        req.evidence_match_score = round(bm25_hits[0].score, 4) if bm25_hits else 0.0
         req.quote_support_score = _quote_support_score(req, chunk_texts)
+
+        hits = bm25_hits
+        if hybrid:
+            try:
+                from app.rag.hybrid import merge_hits
+
+                q_emb = await embedder.embed_query(query)
+                v_hits = await embedding_store.vector_search(
+                    q_emb,
+                    tenant_id=state.get("tenant_id"),
+                    project_id=state.get("project_id"),
+                    job_id=job_id,
+                    top_k=RETRIEVE_TOP_K,
+                )
+                merged = merge_hits(bm25_hits, v_hits, chunks_by_id, top_k=RETRIEVE_TOP_K)
+                if merged:
+                    hits = merged
+                    req.vector_match_score = round(
+                        max((h.vector_score for h in merged), default=0.0), 4
+                    )
+                    if any("vector" in h.sources for h in merged):
+                        vector_used += 1
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("hybrid retrieval failed for req %s: %s", req.id, type(exc).__name__)
 
         if not hits:
             no_hits += 1
@@ -123,8 +173,12 @@ async def retrieve_evidence_node(state: PipelineState) -> dict:
             ))
             cited.add(hit.chunk_id)
 
-        # Weak support: no quotes grounded AND no relevant retrieval.
-        if req.quote_support_score == 0.0 and req.evidence_match_score == 0.0:
+        # Weak support: no grounded quote AND no relevant lexical/semantic match.
+        if (
+            req.quote_support_score == 0.0
+            and req.evidence_match_score == 0.0
+            and (req.vector_match_score or 0.0) == 0.0
+        ):
             weak_support += 1
             req.needs_review = True
             req.review_reason = (req.review_reason or "") + " [WEAK_EVIDENCE_SUPPORT: no grounded quote and no relevant source match]"
@@ -134,6 +188,14 @@ async def retrieve_evidence_node(state: PipelineState) -> dict:
                 req.confidence = round(0.5 * WEAK_CONFIDENCE_FACTOR, 4)
 
     result: dict = {"extracted_requirements": reqs}
+
+    # Record retrieval mode + hybrid stats alongside the index stats.
+    existing_stats = state.get("retrieval_stats") or {}
+    result["retrieval_stats"] = {
+        **existing_stats,
+        "mode": "hybrid" if hybrid else "lexical",
+        "requirements_with_vector_support": vector_used,
+    }
 
     new_warnings: List[PipelineWarning] = []
     if weak_support:

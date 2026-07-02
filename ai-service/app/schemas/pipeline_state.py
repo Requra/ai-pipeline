@@ -21,6 +21,15 @@ class PipelineState(TypedDict):
     file_type: str                  # e.g., "pdf", "docx", "audio", "text"
     metadata: Dict[str, Any]
 
+    # --- Production scoping + retrieval options (Phase: production hardening) ---
+    # Populated from the ai_job for production jobs; None/False for demo runs.
+    # tenant_id/project_id scope persistent (vector) retrieval so semantic recall
+    # never crosses tenants or projects. enable_* gate embeddings + hybrid search.
+    tenant_id: Optional[str]
+    project_id: Optional[str]
+    enable_embeddings: bool
+    enable_hybrid_retrieval: bool
+
     # --- Intermediate State ---
     raw_text: Optional[str]
     source_metadata: Optional[DocumentSource]
