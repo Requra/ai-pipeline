@@ -409,7 +409,7 @@ async def format_node(state: PipelineState) -> dict:
             "priority": s.priority,
             "actor": next((r.actor for r in mapped_reqs if r.id == s.requirement_id), "System"),
             "source_requirement_id": s.requirement_id,
-            "source_refs": str([ref.model_dump() for ref in s.source_refs])
+            "source_refs": [ref.model_dump() for ref in s.source_refs]
         })
         jira_rows.append({
             "issue_type": s.jira_fields.issue_type,

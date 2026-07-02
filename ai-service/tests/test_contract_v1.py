@@ -84,6 +84,7 @@ async def test_contract_v1_completed():
     assert len(jr.exports.excel.rows) == 1
     assert jr.exports.excel.rows[0]["id"] == "US-001"
     assert jr.exports.excel.rows[0]["actor"] == "System"
+    assert isinstance(jr.exports.excel.rows[0]["source_refs"], list)
     
     # 11. Artifacts check
     assert jr.artifacts is not None
