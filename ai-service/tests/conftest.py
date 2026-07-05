@@ -5,6 +5,10 @@ from dotenv import load_dotenv
 # Load environment variables for real API calls
 load_dotenv()
 
+# Force tests to use in-memory store and in-process runner by unsetting DB/Redis URLs
+os.environ.pop("DATABASE_URL", None)
+os.environ.pop("REDIS_URL", None)
+
 @pytest.fixture
 def sample_pdf_bytes():
     # Return binary content for a real PDF test 

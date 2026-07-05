@@ -115,5 +115,6 @@ docker compose up
 4. Generate any binary `.xlsx` from `exports.excel.rows` on the backend — the AI
    service returns structured rows, not files.
 
-**Limitations:** in-memory job store + per-job source index (single process; not
-durable across restarts). RAG is lexical (no embeddings) by design for the MVP.
+**Local/Dev Limitations:** The default local/dev stack runs with an in-memory job store + per-job source index (single process; not durable across restarts) and uses BM25 lexical retrieval only.
+
+**Production capabilities:** Setting `DATABASE_URL` enables durable PostgreSQL storage (along with `pgvector` for semantic and hybrid RAG retrieval), and setting `REDIS_URL` switches execution to a distributed RQ worker fleet.

@@ -22,19 +22,15 @@ free-form question answering, and no "ask the document" loop. The retriever
 answers one structured query per requirement ("what source text supports this?"),
 never an open user prompt.
 
-## 2. Why no vector database
+## 2. Retrieval Databases: Lexical & Semantic (pgvector)
 
-For the MVP the retriever is **in-memory and lexical (BM25)**:
+For local/development runs, the retriever operates as an **in-memory and lexical (BM25)** index to remain self-contained and reproducible without external database dependencies.
 
-- No hosted vector DB, no embeddings service, no network calls — the pipeline
-  stays a self-contained internal microservice.
-- Deterministic: identical input → identical scores → identical ordering, which
-  makes evaluation and CI reproducible.
-- Cheap and fast for the per-job corpus sizes we see (a handful to a few hundred
-  chunks).
-
-A heavier embedding-based retriever can be added later behind the same
-`LexicalRetriever`-shaped interface without changing any node contracts.
+In production mode, the pipeline supports a hybrid retrieval system backed by **PostgreSQL and pgvector**:
+- **Durable Storage**: Source documents, chunks, and embeddings are stored and queried from Postgres.
+- **Hosted Embeddings**: Supports generating semantic vectors via embedding models.
+- **Hybrid RAG**: Combines lexical (BM25) and semantic vector search (`pgvector` cosine similarity) using a rank-merging algorithm (`merge_hits`) that boosts agreements between both systems.
+- **Isolation**: Vector searches are strictly tenant- and project-isolated.
 
 ## 3. The grounding flow
 
@@ -96,14 +92,8 @@ criteria quality, duplicate risk, and an overall score — and emits meaningful
 issues (missing/weak evidence, missing source ids, generic criteria, duplicate
 stories, low-confidence classification). Nothing is faked.
 
-## 4. Limitations (MVP)
+## 4. Limitations & Production Scope
 
-- **Lexical only.** BM25 matches words, not meaning; paraphrased support without
-  shared vocabulary may score low. (Mitigated by actor/goal-augmented queries.)
-- **Per-process, in-memory index.** The retriever and job store live in the
-  service process; they are not durable across restarts and are not shared across
-  replicas. Fine for the single-process demo; swap in Redis/DB + embeddings for
-  scale.
-- **Quotes are source-language verbatim;** requirement text is translated to
-  English, so a quote and its requirement text may be in different languages by
-  design (traceability over uniformity).
+- **Lexical only (Local/Dev default).** The local/dev mode is BM25-only and matches words, not meaning; paraphrased support without shared vocabulary may score low. This is resolved in production when hybrid/semantic embeddings are enabled.
+- **Per-process, in-memory index (Local/Dev default).** The local/dev job store is not durable across restarts and is not shared across replicas. In production, this is solved by deploying a PostgreSQL database and Redis/RQ queue worker fleet.
+- **Quotes are source-language verbatim;** requirement text is translated to English, so a quote and its requirement text may be in different languages by design (traceability over uniformity).

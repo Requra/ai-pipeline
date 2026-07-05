@@ -14,7 +14,8 @@ Unstructured Data ---> Chunking & BM25 Indexing ---> LLM Grounded Extraction ---
 
 ### Key Differences from Conversational RAG:
 * **No Chat Interface:** The pipeline is a deterministic, async execution flow. It takes unstructured inputs (briefs, meeting transcripts, PDFs) and outputs structured, validated software requirements and user stories.
-* **Deterministic Retrieval:** To ensure reproducible CI/CD testing, the RAG retriever is process-local, in-memory, and uses a deterministic lexical algorithm (**BM25**). It does not depend on external databases, hosted embeddings, or network APIs.
+* **Deterministic Retrieval (Local/Dev):** To ensure reproducible CI/CD testing, the default RAG retriever is process-local, in-memory, and uses a deterministic lexical algorithm (**BM25**). It does not depend on external databases, hosted embeddings, or network APIs.
+* **Semantic & Hybrid Options (Production):** In production deployment, semantic embedding search (via `pgvector`) and hybrid search (BM25 + vector similarity merging) are supported and persisted in a PostgreSQL database.
 * **Bi-directional Traceability:** RAG connects every generated user story to its source requirement, and every requirement to the exact coordinates (page number, speaker, timestamp, verbatim quote) of the source file.
 * **Groundedness Scoring:** The system calculates a mathematical score representing how much of the LLM's output is directly supported by verbatim text in the source document.
 
@@ -97,7 +98,7 @@ graph TD
 ## 3. RAG & Grounding Concepts: Under the Hood
 
 ### 3.1. In-Memory Lexical Indexing (BM25)
-The retrieval engine implements a dependency-free, deterministic variant of the **Okapi BM25** algorithm.
+The retrieval engine implements a dependency-free, deterministic variant of the **Okapi BM25** algorithm for local runs.
 
 1. **Tokenization:** Text is lowercased, split into alphanumeric words, and cleared of small English stopwords (e.g., *the*, *a*, *and*, *with*).
 2. **Deterministic IDF Scoring:** The Inverse Document Frequency (IDF) is calculated using a strictly positive formula:
@@ -109,20 +110,29 @@ The retrieval engine implements a dependency-free, deterministic variant of the 
    * Tuning parameters: $k_1 = 1.5$ (term frequency saturation), $b = 0.75$ (document length normalization).
    * Stable Tie-Breaker: Chunks with identical lexical scores are ordered by their original document index (`start_char` offset) to prevent flaky retrieval orders.
 
-### 3.2. Verification & Retrieval Sequence Diagram
-When requirements are extracted by the LLM, they are grounded using a hybrid approach of **Direct Extraction Alignment** and **Lexical RAG Search**:
+### 3.2. Semantic & Hybrid Retrieval (pgvector)
+In production environments, the pipeline supports semantic embeddings and hybrid search options:
+
+1. **Embedding Generation (`build_source_index`):** If `enable_embeddings` is configured, parsed `SourceChunk`s are embedded using a configured embedding provider (e.g., OpenAI, OpenRouter) and stored in `ai_source_chunk_embeddings` with `pgvector` support, scoped securely by `tenant_id/project_id/job_id`.
+2. **Hybrid Search Flow (`retrieve_evidence`):** If `enable_hybrid_retrieval` is enabled, the pipeline executes both BM25 lexical querying and `pgvector` cosine similarity semantic querying. The results are merged using a rank-merging algorithm (`merge_hits`) that boosts scores where lexical and semantic matches agree.
+3. **Quote Integrity Guarantee:** Semantic retrieval retrieves a chunk's actual source text and extracts a matching sentence snippet. It does not invent or hallucinate text.
+
+### 3.3. Verification & Retrieval Sequence Diagram (Hybrid Flow)
+When requirements are extracted by the LLM, they are grounded using a hybrid approach of **Direct Extraction Alignment** and **Lexical/Semantic Search**:
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant Parse as parse_to_chunks
+    participant DB as Postgres + pgvector
     participant Index as build_source_index
     participant Extract as extract (LLM)
     participant Align as Alignment Check
     participant Retrieve as retrieve_evidence
 
     Parse->>Index: Provide SourceChunks list
-    Note over Index: Tokenizes chunks & builds in-memory BM25 model
+    Index->>DB: Persist Chunks & optional embeddings (pgvector)
+    Note over Index: Tokenizes chunks & builds local BM25 model
     Index->>Extract: Expose chunks for LLM processing
     Extract->>Extract: Prompt LLM to output verbatim quotes for each requirement
     Extract->>Align: Pass requirement text + raw quotes
@@ -140,8 +150,14 @@ sequenceDiagram
     Extract->>Retrieve: Pass grounded requirements
     
     Note over Retrieve: For each requirement, build query: "text + actor + goal"
-    Retrieve->>Index: Execute BM25 Query (Retrieve Top 3 chunks)
-    Index-->>Retrieve: Return Ranked RetrievedChunks
+    alt Hybrid retrieval enabled
+        Retrieve->>Index: Execute BM25 Query
+        Retrieve->>DB: Execute pgvector Cosine Search
+        Retrieve->>Retrieve: merge_hits() and rank results
+    else Lexical only
+        Retrieve->>Index: Execute BM25 Query
+    end
+    Retrieve->>Retrieve: Return Ranked RetrievedChunks
     Retrieve->>Retrieve: Identify highest overlap sentence from a chunk NOT already cited
     Retrieve->>Retrieve: Append sentence snippet as additional evidence (Cap at 4 spans, <= 240 chars)
     alt No chunks returned / Weak score

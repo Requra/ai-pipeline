@@ -1,70 +1,43 @@
 # AI Pipeline Node Status Report
 
-This document provides a detailed breakdown of the current implementation status for each node in the AI pipeline as of April 16, 2026.
+This document provides a detailed breakdown of the implementation status for each node in the compiled 14-node LangGraph pipeline.
 
 ## Executive Summary
 
-The pipeline is fully wired and functional using **LangGraph** and **Gemini 1.5**. Core logic for requirement extraction, classification, and user story generation is implemented with structured output. However, the ingestion layer (PDF/DOCX parsing) and the transcription layer are currently using **mocks** or **simulations** and require integration with specialized libraries or services.
+The AI requirements extraction pipeline is fully implemented, wired, and functional. All nodes (1 through 14) are complete. The pipeline supports real file ingestion (PDF, Word, TXT, and Audio transcription) and operates in two primary modes:
+1. **Local/Development Mode**: Runs synchronously using process-local in-memory jobs and a deterministic BM25 lexical index (no external network or DB dependencies).
+2. **Production Mode**: Runs asynchronously using a Redis/RQ queue worker fleet, storing all jobs, chunks, and requirements in PostgreSQL, and optionally running semantic/hybrid RAG searches via `pgvector` embeddings.
 
 ---
 
 ## Node Status Breakdown
 
-### 1. Ingest Node (`ingest.py`)
-| Status | Component | Description |
-| :--- | :--- | :--- |
-| ✅ **Implemented** | **AI Smart Filter** | Uses Gemini with structured output to verify document relevance and assign a confidence score. |
-| ✅ **Implemented** | **PDF Extraction** | Real-world extraction using `PyMuPDF` (`fitz`) to process binary streams. |
-| ✅ **Implemented** | **DOCX Extraction** | Real-world extraction using `python-docx` to process binary streams. |
-| ✅ **Implemented** | **Short Text Filter** | Rejects documents with less than 50 characters. |
-
-### 2. Transcribe Node (`transcribe.py`)
-| Status | Component | Description |
-| :--- | :--- | :--- |
-| ✅ **Implemented** | **Audio Transcription** | Integrates with **OpenAI Whisper** (`whisper-1`) to process raw audio bytes into text. |
-| ✅ **Implemented** | **Multi-format** | Supports MP3/WAV uploads via binary buffer stream. |
-
-
-### 3. Extract Node (`extract.py`)
-| Status | Component | Description |
-| :--- | :--- | :--- |
-| ✅ **Implemented** | **Entity Extraction** | Uses Gemini to extract `FunctionalRequirement` objects (ID, Text, Actor, Goal). |
-| ✅ **Implemented** | **Resilience** | Includes a fallback mechanism to return a default requirement if the LLM fails. |
-
-### 4. Classify Node (`classify.py`)
-| Status | Component | Description |
-| :--- | :--- | :--- |
-| ✅ **Implemented** | **Categorization** | Categorizes requirements into Functional (FR), Non-Functional (NFR), or Business Rules (BR). |
-| ✅ **Implemented** | **Confidence Scoring** | Models return a confidence score for each classification decision. |
-
-### 5. Generate Node (`generate.py`)
-| Status | Component | Description |
-| :--- | :--- | :--- |
-| ✅ **Implemented** | **User Story Mapping** | Transforms requirements into User Stories using the Given-When-Then format. |
-| ✅ **Implemented** | **1:1 Validation** | Ensures every input requirement results in exactly one user story. |
-
-### 6. Summarize Node (`summarize.py`)
-| Status | Component | Description |
-| :--- | :--- | :--- |
-| ✅ **Implemented** | **Executive Summary** | Generates a concise summary focusing on decisions, open questions, and stakeholder pain points. |
-
-### 7. Format Node (`format.py`)
-| Status | Component | Description |
-| :--- | :--- | :--- |
-| ✅ **Implemented** | **State Assembly** | Consolidates all node outputs into the final response state. |
-| ✅ **Implemented** | **Status Inference** | Logic to determine `success`, `partial`, `rejected`, or `error` statuses based on pipeline results. |
+| # | Node Name | Status | Description |
+|---|---|---|---|
+| 1 | `detect_file_type` | ✅ Implemented | Inspects file headers, MIME-types, or extensions to identify type (pdf, docx, txt, audio). |
+| 2 | `ingest` | ✅ Implemented | Extracts text from raw streams (using `PyMuPDF` for PDF, `python-docx` for DOCX), normalizes text, masks PII, and runs relevance checks. |
+| 3 | `transcribe` | ✅ Implemented | Transcribes audio bytes into text with speaker and timestamp markers (via Whisper-1 or Deepgram). |
+| 4 | `parse_to_chunks` | ✅ Implemented | Segments documents into coordinate-aware `SourceChunk`s (overlapping windowing or PDF page splits). |
+| 5 | `build_source_index` | ✅ Implemented | Compiles local lexical BM25 search indices and optionally generates semantic embeddings via pgvector. |
+| 6 | `extract` | ✅ Implemented | Uses LLM to extract requirements, aligns verbatim evidence quotes, and handles JSON parsing repairs. |
+| 7 | `dedupe_requirements` | ✅ Implemented | Cleans up duplicate requirements based on Token Jaccard similarity; unions evidence and raises actor conflict warnings. |
+| 8 | `retrieve_evidence` | ✅ Implemented | Queries the indexes to attach additional evidence quotes. Supports lexical BM25 and pgvector hybrid search merging. |
+| 9 | `classify` | ✅ Implemented | Categorizes requirements into Functional (FR), Non-Functional (NFR), or Business Rules (BR) with confidence scores. |
+| 10 | `evidence_grounding` | ✅ Implemented | Programmatically verifies that all cited LLM quotes exist in the source document chunks. |
+| 11 | `generate` | ✅ Implemented | Transforms requirements into formatted Agile User Stories with testable Given-When-Then criteria. |
+| 12 | `quality_gate` | ✅ Implemented | Computes numerical quality metrics (traceability, groundedness, story completeness) and flags warnings. |
+| 13 | `summarize` | ✅ Implemented | Generates a structured executive summary with key decisions, risks, assumptions, and stakeholders. |
+| 14 | `format` | ✅ Implemented | Assembles the final versioned public contract (`JobResult`) and prepares spreadsheet rows for Excel/Jira export. |
 
 ---
 
-## Infrastructure Status
+## Infrastructure & Production Status
 
-- **Graph Orchestration**: Fully implemented in `app/graph/pipeline.py` using `StateGraph`.
-- **Schema Management**: Pydantic models in `app/schemas/` ensure type safety across nodes.
-- **LLM Integration**: Centralized in `app/llm.py`, supporting Google Gemini models.
-- **API Surface**: FastAPI endpoints (`/process`, `/process-json`) are fully functional.
+* **Graph Orchestration**: Orchestrated as an acyclic `StateGraph` with a raised recursion limit of 60 to prevent step budget exhaustion.
+* **Database & Persistence**: Postgres stores data across 12+ schemas, including `ai_source_chunks` and `ai_source_chunk_embeddings` supporting `pgvector` similarity searches.
+* **Idempotency & Retry**: Fully supported via fingerprint hashing of incoming payloads, atomic lock-guarded creations, and retry transitions.
+* **Queue**: Redis-backed RQ (Redis Queue) handles background execution in production, while synchronous In-Process queue runs by default in development.
 
-## Next Steps / Gaps
-1.  **Integrate `PyMuPDF`**: Replace `extract_pdf` mock in `ingest.py`.
-2.  **Integrate `python-docx`**: Replace `extract_docx` mock in `ingest.py`.
-3.  **Direct Audio Processing**: Implement Whisper or Gemini 1.5 Flash audio native support in `transcribe.py`.
-4.  **Export Formats**: Add nodes for generating downloadable artifacts (Word/Excel/PDF).
+## Next Steps / Focus Areas
+1. **Live Concurrency Verification**: Validate the PostgreSQL transactional database operations and RQ worker task-locking under heavy concurrent load in staging.
+2. **Integration testing**: Ensure external API endpoints (/internal/*) remain fully verified through automated CI checks when scaling worker replicas.
