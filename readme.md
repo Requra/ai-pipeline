@@ -14,10 +14,11 @@ reduction), not chatbot RAG. See [docs/rag-grounding-architecture.md](docs/rag-g
 - `docs/`: contracts, node reference, RAG architecture, ADRs.
 
 ## Key docs
-- [RAG grounding architecture](docs/rag-grounding-architecture.md)
-- [Node reference](docs/node-reference.md)
-- [Response contract v1](docs/contracts/pipeline-response-v1.md)
-- [Implementation plan](docs/implementation-plans/rag-mvp-production-flow.md)
+- [Documentation Index](docs/README.md)
+- [RAG Grounding Architecture](docs/rag-grounding-architecture.md)
+- [Node Reference](docs/node-reference.md)
+- [Response Contract v1](docs/contracts/pipeline-response-v1.md)
+- [Changelog History](docs/changelog.md)
 
 ## Local setup
 

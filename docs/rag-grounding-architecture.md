@@ -67,11 +67,9 @@ the chunk is skipped, so a single bad chunk never crashes the job. Raw model
 output is only logged at DEBUG and never in production.
 
 ### Deduplication (`dedupe_requirements`)
-Chunk overlap and repetition produce duplicate requirements. Exact and
-near-duplicate (token Jaccard ≥ 0.8) requirements are merged: evidence spans are
-**unioned** (never dropped), the highest confidence and strongest priority win,
-labels are unioned. Requirements that share text but name a **different actor**
-are kept separate and flagged `POSSIBLE_DUPLICATE_REVIEW`.
+Chunk overlap and repetition produce duplicate requirements. Exact and near-duplicate requirements are merged based on a token-based Jaccard similarity calculation:
+$$\text{Jaccard}(A, B) = \frac{|A \cap B|}{|A \cup B|}$$
+If the Jaccard score $\ge 0.8$, the requirements are merged: evidence spans are **unioned** (never dropped), the highest confidence and strongest priority win, and labels are unioned. Requirements that share text but name a **different actor** (e.g. "Customer" vs "Administrator") are kept separate and flagged `POSSIBLE_DUPLICATE_REVIEW` for manual inspection.
 
 ### Evidence retrieval (`retrieve_evidence`)
 For each (de-duplicated) requirement, a query is built from its text + actor +
@@ -97,3 +95,33 @@ stories, low-confidence classification). Nothing is faked.
 - **Lexical only (Local/Dev default).** The local/dev mode is BM25-only and matches words, not meaning; paraphrased support without shared vocabulary may score low. This is resolved in production when hybrid/semantic embeddings are enabled.
 - **Per-process, in-memory index (Local/Dev default).** The local/dev job store is not durable across restarts and is not shared across replicas. In production, this is solved by deploying a PostgreSQL database and Redis/RQ queue worker fleet.
 - **Quotes are source-language verbatim;** requirement text is translated to English, so a quote and its requirement text may be in different languages by design (traceability over uniformity).
+
+## 5. Metric Formula Reference (Quality Gate)
+
+The quality gate generates a `QualityReportV1` containing six metrics:
+
+### 5.1. Groundedness Score
+Measures the proportion of verbatim quotes that exist in the source document.
+$$\text{Groundedness} = \frac{1}{|R|} \sum_{r \in R} \text{quote\_support\_score}(r)$$
+Where $\text{quote\_support\_score}(r)$ is the fraction of requirement $r$'s quotes successfully matched in the source text. If no retrieval was executed, it defaults to $1.0$ if the requirement has evidence, and $0.0$ if it has none.
+
+### 5.2. Traceability Coverage
+Measures the proportion of generated user stories that link back to at least one source requirement.
+$$\text{Traceability} = \frac{|\{s \in S \mid \text{source\_requirement\_ids}(s) \neq \emptyset\}|}{|S|}$$
+
+### 5.3. Story Completeness
+Measures the proportion of user stories containing a title, a valid description, and at least two acceptance criteria.
+$$\text{Completeness} = \frac{|\{s \in S \mid \text{is\_complete}(s)\}|}{|S|}$$
+
+### 5.4. Acceptance Criteria Quality
+Measures the proportion of acceptance criteria that are descriptive rather than generic boilerplate.
+$$\text{AC Quality} = \frac{|\{c \in C_{\text{all}} \mid \neg\text{is\_generic}(c)\}|}{|C_{\text{all}}|}$$
+* *Generic criteria* are flagged if they contain phrases like "works as expected", "implemented as specified", or are less than 15 characters long.
+
+### 5.5. Duplicate Risk
+Measures the proportion of duplicate user stories (identical titles and descriptions).
+$$\text{Duplicate Risk} = \frac{|\text{Duplicate Stories}|}{|S|}$$
+
+### 5.6. Overall Quality Score
+The arithmetic mean of the five dimensions:
+$$\text{Overall Score} = \frac{\text{Traceability} + \text{Groundedness} + \text{Completeness} + \text{AC Quality} + (1.0 - \text{Duplicate Risk})}{5}$$
