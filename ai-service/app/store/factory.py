@@ -55,3 +55,13 @@ def reset_stores() -> None:
     """Drop the cached bundle (used by tests to isolate state)."""
     global _bundle
     _bundle = None
+
+
+async def close_stores() -> None:
+    """Release process-owned database resources during graceful shutdown."""
+    global _bundle
+    if settings.use_database:
+        from app.store.db import close_database
+
+        await close_database()
+    _bundle = None

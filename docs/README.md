@@ -13,10 +13,14 @@ This directory contains the structural architecture plans, API schemas, prompt m
 * **[rag-grounding-architecture.md](rag-grounding-architecture.md)**: Architectural documentation explaining why the pipeline uses RAG for source grounding rather than a conversational QA chatbot. Covers tokenization, BM25 scoring, pgvector semantic search, and the deduplication Jaccard formulas.
 
 ### 🧩 System Guides & Reference
+* **[db-documentation.md](db-documentation.md)**: Database schema and operations guide for Neon DB and Python SQLAlchemy models.
+* **[rag-and-redis.md](rag-and-redis.md)**: Detailed overview of Retrieval-Augmented Generation (RAG) operations and Redis background worker queue.
 * **[node-reference.md](node-reference.md)**: Reference guide mapping out the compiled **14-node LangGraph structure**, individual node responsibilities, routing logic, and standard warning codes.
 * **[NODE_STATUS.md](NODE_STATUS.md)**: Real-time implementation status report across all 14 nodes, detailing what is integrated and active.
 * **[collaboration_rules.md](collaboration_rules.md)**: Collaboration guidelines, Scrum workflows, state dictionary safety rules, and coding best practices for developers.
 * **[prompts/prompt-management.md](prompts/prompt-management.md)**: Centralized management and protection instructions for LLM prompt templates, snapshot protection testing, and template versioning.
+
+
 
 ### 📜 API Contracts
 * **[pipeline-contract.md](pipeline-contract.md)**: API request payload specifications for both development (local/synchronous) and internal production (asynchronous background task) endpoints.

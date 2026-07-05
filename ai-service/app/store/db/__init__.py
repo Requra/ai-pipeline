@@ -39,3 +39,11 @@ def build_db_store_bundle(url: str) -> StoreBundle:
         chunks=PgChunkStore(db),
         embeddings=PgEmbeddingStore(db),
     )
+
+
+async def close_database() -> None:
+    """Dispose the process-wide engine during graceful shutdown."""
+    global _db
+    if _db is not None:
+        await _db.dispose()
+        _db = None

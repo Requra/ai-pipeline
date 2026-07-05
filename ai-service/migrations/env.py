@@ -27,6 +27,13 @@ if config.config_file_name is not None:
 target_metadata = Base.metadata
 
 
+def _include_object(obj, name, type_, reflected, compare_to) -> bool:
+    """Keep Alembic from trying to remove the intentional manual ANN index."""
+    if type_ == "index" and name == "ix_ai_embeddings_vec_cosine":
+        return False
+    return True
+
+
 def _database_url() -> str:
     url = os.environ.get("DATABASE_URL")
     if not url:
@@ -41,6 +48,7 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
+        include_object=_include_object,
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -51,6 +59,7 @@ def _do_run_migrations(connection) -> None:
         connection=connection,
         target_metadata=target_metadata,
         compare_type=True,
+        include_object=_include_object,
     )
     with context.begin_transaction():
         context.run_migrations()

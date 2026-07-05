@@ -196,6 +196,7 @@ async def execute_job(
     # Cancelled before it even started?
     if await stores.jobs.is_cancel_requested(job_id):
         await stores.jobs.set_status(job_id, JobStatus.CANCELLED, current_node="cancelled")
+        await _finalize_attempt(stores, job_id, JobStatus.CANCELLED)
         update_progress(job_id, "cancelled", job.progress_pct, "FAILED",
                          error="JOB_CANCELLED: cancelled before start")
         await _event(stores, job_id, "job_cancelled", severity="warning")
@@ -226,6 +227,7 @@ async def execute_job(
     # Cancelled mid-run (stream returned None).
     if final_state is None:
         await stores.jobs.set_status(job_id, JobStatus.CANCELLED, current_node="cancelled")
+        await _finalize_attempt(stores, job_id, JobStatus.CANCELLED)
         update_progress(job_id, "cancelled", job.progress_pct, "FAILED",
                          error="JOB_CANCELLED: cancelled during processing")
         await _event(stores, job_id, "job_cancelled", severity="warning")
@@ -250,8 +252,16 @@ async def execute_job(
             stores, job, job_result_obj,
             contract_status=contract_status, processing_time_ms=processing_time_ms,
         )
-    except Exception as exc:  # pragma: no cover
-        logger.warning("final persist failed for %s: %s", job_id, type(exc).__name__)
+    except Exception as exc:
+        logger.error("final persist failed for %s: %s", job_id, type(exc).__name__)
+        await _fail(
+            stores,
+            job_id,
+            "PERSISTENCE_ERROR",
+            "final result could not be persisted",
+            started,
+        )
+        return JobStatus.FAILED.value
 
     err_msg = final_state.get("error") if durable == JobStatus.FAILED else None
     await stores.jobs.set_status(
@@ -264,12 +274,7 @@ async def execute_job(
         result=job_result if public_status == "COMPLETED" else None,
         error=err_msg,
     )
-    await stores.jobs.add_attempt(
-        JobAttemptRecord(
-            job_id=job_id, attempt_number=job.attempt_number, status=durable,
-            completed_at=utcnow(),
-        )
-    )
+    await _finalize_attempt(stores, job_id, durable)
     await _event(
         stores, job_id, "job_finished",
         message=f"terminal status={durable.value}", node_name="format",
@@ -280,10 +285,39 @@ async def execute_job(
     return durable.value
 
 
+async def _finalize_attempt(
+    stores: StoreBundle,
+    job_id: str,
+    status: JobStatus,
+    *,
+    error_code: Optional[str] = None,
+    error_message: Optional[str] = None,
+) -> None:
+    job = await stores.jobs.get_job(job_id)
+    await stores.jobs.add_attempt(
+        JobAttemptRecord(
+            job_id=job_id,
+            attempt_number=job.attempt_number if job is not None else 1,
+            status=status,
+            started_at=None,
+            completed_at=utcnow(),
+            error_code=error_code,
+            error_message=error_message,
+        )
+    )
+
+
 async def _fail(stores: StoreBundle, job_id: str, code: str, message: str, started: float) -> None:
     await stores.jobs.set_status(
         job_id, JobStatus.FAILED, current_node="failed", progress_pct=100,
         error_code=code, error_message=message,
+    )
+    await _finalize_attempt(
+        stores,
+        job_id,
+        JobStatus.FAILED,
+        error_code=code,
+        error_message=message,
     )
     update_progress(job_id, "failed", 100, "FAILED", error=f"{code}: {message}")
     await _event(stores, job_id, "job_failed", severity="error",

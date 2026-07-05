@@ -1,0 +1,126 @@
+Project: SmartCRM – Intelligent Customer Relationship Management Platform
+Document Type: Kickoff Meeting Notes & Initial Requirements
+Date: June 15, 2026
+Attendees: Sarah (Product Owner), Ahmed (Tech Lead), Fatma (Business Analyst), Omar (Backend Developer), Nour (QA Lead)
+
+=== MEETING SUMMARY ===
+
+Sarah opened the meeting by outlining the vision for SmartCRM: a modern CRM platform targeting mid-sized B2B sales teams. The system must handle contact management, deal pipeline tracking, automated follow-ups, and AI-powered sales forecasting. Ahmed confirmed the tech stack will be React + Node.js + PostgreSQL with Redis caching.
+
+Fatma presented the initial scope based on stakeholder interviews. The MVP will cover three core modules: Contact Management, Deal Pipeline, and Reporting Dashboard. A mobile app is planned for Phase 2 and is explicitly out of scope for the MVP.
+
+=== KEY DECISIONS ===
+
+1. The team decided to use PostgreSQL instead of MongoDB because the data model is highly relational (contacts → companies → deals → activities).
+2. Authentication will be handled via OAuth 2.0 with support for Google and Microsoft SSO. Local username/password authentication will not be supported in the MVP.
+3. The reporting dashboard will use pre-aggregated materialized views refreshed every 15 minutes rather than real-time queries, to reduce database load.
+4. File attachments (proposals, contracts) will be stored in AWS S3 with a 25MB per-file limit.
+5. The team agreed to follow a two-week sprint cycle with releases every four weeks.
+
+=== FUNCTIONAL REQUIREMENTS ===
+
+FR-01: Contact Management
+The system shall allow users to create, view, edit, and delete customer contacts. Each contact must have the following fields: first name, last name, email address, phone number, company, job title, and tags. Users must be able to search contacts by name, email, or company with results appearing within 2 seconds.
+
+FR-02: Company Profiles
+The system shall maintain company profiles linked to contacts. Each company profile includes: company name, industry, size (number of employees), annual revenue, website URL, and address. A company can have multiple contacts, and each contact belongs to exactly one company.
+
+FR-03: Deal Pipeline Management
+Sales representatives must be able to create deals and move them through customizable pipeline stages. Default stages are: Lead → Qualified → Proposal → Negotiation → Closed Won → Closed Lost. Each deal must track: deal name, expected value, probability percentage, expected close date, and assigned sales representative. The system must calculate weighted pipeline value automatically.
+
+FR-04: Activity Tracking
+The system shall log all activities related to contacts and deals. Activity types include: email sent, phone call, meeting, note, and task. Each activity must record: timestamp, type, description, associated contact, associated deal (optional), and the user who performed it. Users must be able to filter activities by type and date range.
+
+FR-05: Email Integration
+The system shall integrate with Gmail and Outlook to automatically log sent and received emails as activities. The integration must sync emails every 5 minutes. Users must be able to compose and send emails directly from the contact detail page. Email templates must be supported with variable substitution for contact fields.
+
+FR-06: Automated Follow-up Reminders
+The system shall automatically create follow-up reminders when a deal has had no activity for a configurable number of days (default: 7 days). Reminders must appear in the user's notification center and optionally send email notifications. Users must be able to snooze or dismiss reminders.
+
+FR-07: Reporting Dashboard
+The system shall provide a dashboard with the following reports: (a) Pipeline overview showing deals by stage with total and weighted values, (b) Sales forecast for the next 30/60/90 days, (c) Activity summary per sales representative, (d) Win/loss ratio by time period. All reports must support date range filtering and CSV export.
+
+FR-08: User Management and Roles
+The system shall support three user roles: Admin, Sales Manager, and Sales Representative. Admins can manage all users and system settings. Sales Managers can view and edit all deals within their team. Sales Representatives can only view and edit their own deals and contacts. Role-based access control must be enforced on both the frontend and API level.
+
+FR-09: Import and Export
+The system shall allow bulk import of contacts and companies from CSV files. The import must validate data, detect duplicates by email address, and provide a preview before confirming. Export functionality must support CSV and Excel formats for contacts, companies, and deals.
+
+FR-10: Search and Filtering
+The system shall provide global search across contacts, companies, and deals. Search must support partial matching and return results ranked by relevance. Advanced filters must allow combining multiple criteria with AND/OR logic. Saved filters must be supported for frequently used queries.
+
+=== NON-FUNCTIONAL REQUIREMENTS ===
+
+NFR-01: Performance
+Page load time must not exceed 3 seconds for any page with up to 10,000 records. Search results must return within 2 seconds. The system must handle at least 500 concurrent users without degradation. API response time must be under 500ms for 95th percentile of requests.
+
+NFR-02: Security
+All data must be encrypted in transit (TLS 1.2+) and at rest (AES-256). User sessions must expire after 30 minutes of inactivity. Failed login attempts must be rate-limited to 5 attempts per 15 minutes. The system must comply with GDPR requirements for data handling and deletion. All API endpoints must require authentication.
+
+NFR-03: Availability
+The system must maintain 99.5% uptime measured monthly. Planned maintenance windows must not exceed 2 hours per month and must be scheduled during off-peak hours (Saturday 2-4 AM UTC). Database backups must be performed daily with 30-day retention.
+
+NFR-04: Scalability
+The system architecture must support horizontal scaling. The database must handle up to 1 million contacts and 500,000 deals without performance degradation. File storage must support up to 1TB total across all tenants.
+
+NFR-05: Accessibility
+The web application must comply with WCAG 2.1 Level AA standards. All interactive elements must be keyboard navigable. Screen reader compatibility must be tested with NVDA and JAWS.
+
+=== BUSINESS RULES ===
+
+BR-01: Only Sales Managers and Admins can delete deals. Sales Representatives can archive deals but not permanently delete them.
+BR-02: A deal's probability percentage must automatically update when moved to "Closed Won" (100%) or "Closed Lost" (0%).
+BR-03: Contacts marked as "Do Not Contact" must be excluded from all automated follow-up reminders and bulk email campaigns.
+BR-04: When a company is deleted, all associated contacts must be either reassigned to another company or marked as independent. Contacts must never be orphaned without notification.
+BR-05: Deal values must be stored and displayed in the tenant's configured base currency. Multi-currency support is planned for Phase 2.
+BR-06: Import operations must be limited to 10,000 records per batch to prevent system overload.
+
+=== ASSUMPTIONS ===
+
+1. All users will have modern browsers (Chrome, Firefox, Edge, Safari — latest two versions).
+2. The client's sales team has between 20 and 200 active users.
+3. Email integration will only support Gmail and Outlook initially; other providers may be added in future phases.
+4. The client will provide their own AWS account for S3 file storage.
+5. Internet connectivity is assumed; offline mode is not required for the MVP.
+
+=== OPEN QUESTIONS ===
+
+1. Should the system support custom fields on contacts and deals in the MVP, or defer to Phase 2?
+2. What is the data retention policy for deleted records? Should we implement soft delete with a 90-day retention period?
+3. Does the client need audit logging for compliance? If yes, what events need to be tracked?
+4. Should the notification system support push notifications in addition to email and in-app notifications?
+5. What is the expected SLA for the email sync integration? Is a 5-minute sync interval acceptable?
+
+=== RISKS ===
+
+1. Email integration with Gmail and Outlook APIs may have rate limiting issues for large sales teams with high email volume. Mitigation: implement request queuing and exponential backoff.
+2. The 15-minute materialized view refresh for reports may cause data staleness issues for time-sensitive deals. Mitigation: add a manual refresh button and consider real-time updates for critical metrics in Phase 2.
+3. GDPR compliance requirements may require significant additional development for data export, anonymization, and deletion workflows. Mitigation: engage legal counsel early and prioritize the right-to-deletion feature.
+4. Dependency on third-party OAuth providers (Google, Microsoft) introduces a single point of failure for authentication. Mitigation: implement graceful degradation and consider adding local auth as a backup in Phase 2.
+
+=== OUT OF SCOPE (MVP) ===
+
+The following items are explicitly excluded from the MVP and deferred to future phases:
+- Mobile application (iOS and Android)
+- AI-powered sales forecasting and lead scoring
+- Multi-currency support and currency conversion
+- Custom workflow automation builder
+- Direct integration with ERP systems
+- Telephony integration (VoIP)
+- Marketing campaign management
+- Customer support ticketing
+- Advanced analytics with machine learning
+- White-labeling and multi-tenant customization
+
+=== ACTION ITEMS ===
+
+1. Ahmed: Set up the project repository and CI/CD pipeline by June 20.
+2. Fatma: Finalize the entity-relationship diagram and share with the team by June 22.
+3. Omar: Prototype the deal pipeline drag-and-drop UI by June 25.
+4. Sarah: Confirm email integration requirements with the client by June 19.
+5. Nour: Prepare the test strategy document and identify testing tools by June 22.
+6. Ahmed: Schedule a technical architecture review session for next week.
+
+=== NEXT MEETING ===
+
+Sprint planning session scheduled for June 22, 2026 at 10:00 AM.

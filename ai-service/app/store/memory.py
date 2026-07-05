@@ -188,7 +188,16 @@ class MemoryJobStore:
 
     async def add_attempt(self, attempt: JobAttemptRecord) -> None:
         with _LOCK:
-            self._attempts.setdefault(attempt.job_id, []).append(attempt.model_copy(deep=True))
+            attempts = self._attempts.setdefault(attempt.job_id, [])
+            for idx, existing in enumerate(attempts):
+                if existing.attempt_number == attempt.attempt_number:
+                    update = attempt.model_copy(deep=True)
+                    if update.started_at is None:
+                        update.started_at = existing.started_at
+                    attempts[idx] = update
+                    break
+            else:
+                attempts.append(attempt.model_copy(deep=True))
 
     async def list_attempts(self, job_id: str) -> List[JobAttemptRecord]:
         with _LOCK:
@@ -260,15 +269,19 @@ class MemoryChunkStore:
     ) -> List[SourceDocumentRecord]:
         saved: List[SourceDocumentRecord] = []
         with _LOCK:
+            for job_id in {doc.job_id for doc in documents}:
+                self._docs[job_id] = []
             for idx, doc in enumerate(documents):
                 if not doc.id:
                     doc = doc.model_copy(update={"id": f"{doc.job_id}:doc:{idx}"})
-                self._docs.setdefault(doc.job_id, []).append(doc)
+                self._docs[doc.job_id].append(doc)
                 saved.append(doc.model_copy(deep=True))
         return saved
 
     async def save_chunks(self, chunks: List[SourceChunkRecord]) -> None:
         with _LOCK:
+            job_ids = {c.job_id for c in chunks}
+            self._chunks = [c for c in self._chunks if c.job_id not in job_ids]
             self._chunks.extend(c.model_copy(deep=True) for c in chunks)
 
     async def get_chunks(self, job_id: str) -> List[SourceChunkRecord]:
@@ -320,6 +333,10 @@ class MemoryEmbeddingStore:
 
     async def save_embeddings(self, embeddings: List[ChunkEmbeddingRecord]) -> None:
         with _LOCK:
+            job_ids = {e.job_id for e in embeddings}
+            self._embeddings = [
+                e for e in self._embeddings if e.job_id not in job_ids
+            ]
             self._embeddings.extend(e.model_copy(deep=True) for e in embeddings)
 
     async def count_for_job(self, job_id: str) -> int:
@@ -335,6 +352,10 @@ class MemoryEmbeddingStore:
         job_id: Optional[str] = None,
         top_k: int = 5,
     ) -> List[Dict[str, Any]]:
+        if job_id is None and (tenant_id is None or project_id is None):
+            raise ValueError(
+                "vector_search requires job_id or both tenant_id and project_id"
+            )
         with _LOCK:
             scored: List[Dict[str, Any]] = []
             for e in self._embeddings:

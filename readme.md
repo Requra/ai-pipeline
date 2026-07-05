@@ -98,6 +98,18 @@ poetry run python scripts/evaluate_pipeline.py # MVP threshold harness (mock LLM
 poetry run python scripts/evaluate_pipeline.py --real  # uses configured provider
 ```
 
+## LangGraph Studio (Visual Debugging)
+
+To start the LangGraph dev server and run the visual interactive studio:
+```bash
+# Option A: Run the quick-launch batch script from the repo root
+.\run_studio.bat
+
+# Option B: Run via poetry inside the service folder
+cd ai-service
+poetry run langgraph dev
+```
+
 ## Docker
 
 ```bash

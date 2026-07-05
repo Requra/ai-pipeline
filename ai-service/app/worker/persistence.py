@@ -126,6 +126,7 @@ async def persist_result(
             status=contract_status,
             processing_time_ms=processing_time_ms,
         )
-    except Exception as exc:  # pragma: no cover - store dependent
-        logger.warning("persist result failed: %s", type(exc).__name__)
+    except Exception as exc:
+        logger.error("persist result failed: %s", type(exc).__name__)
+        raise
     return payload

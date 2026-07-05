@@ -74,6 +74,36 @@ async def test_pipeline_crash_is_failure_not_exception():
     status = await execute_job(stores, "crash-1", {}, pipe, use_stream=False)
     assert status == JobStatus.FAILED.value
     assert (await stores.jobs.get_job("crash-1")).error_code == "PIPELINE_CRASH"
+    attempts = await stores.jobs.list_attempts("crash-1")
+    assert len(attempts) == 1
+    assert attempts[0].status == JobStatus.FAILED
+    assert attempts[0].completed_at is not None
+
+
+async def test_result_persistence_failure_marks_job_and_attempt_failed():
+    stores = await _new_job("persist-fail-1")
+    stores.results.save_result = AsyncMock(side_effect=RuntimeError("database unavailable"))
+    pipe = MagicMock()
+    pipe.ainvoke = AsyncMock(
+        return_value={
+            "status": "success",
+            "job_result": {"status": "completed", "job_id": "persist-fail-1"},
+        }
+    )
+
+    status = await execute_job(
+        stores, "persist-fail-1", {"chunks": []}, pipe, use_stream=False
+    )
+
+    assert status == JobStatus.FAILED.value
+    job = await stores.jobs.get_job("persist-fail-1")
+    assert job.status == JobStatus.FAILED
+    assert job.error_code == "PERSISTENCE_ERROR"
+    assert progress_store["persist-fail-1"]["status"] == "FAILED"
+    attempts = await stores.jobs.list_attempts("persist-fail-1")
+    assert len(attempts) == 1
+    assert attempts[0].status == JobStatus.FAILED
+    assert attempts[0].error_code == "PERSISTENCE_ERROR"
 
 
 class _StreamGraph:
@@ -149,6 +179,9 @@ async def test_cancellation_before_start():
     pipe.ainvoke = AsyncMock(return_value={"status": "success", "job_result": {"status": "completed"}})
     status = await execute_job(stores, "cancel-early", {}, pipe, use_stream=False)
     assert status == JobStatus.CANCELLED.value
+    attempts = await stores.jobs.list_attempts("cancel-early")
+    assert len(attempts) == 1
+    assert attempts[0].status == JobStatus.CANCELLED
 
 
 async def test_cancellation_between_nodes():

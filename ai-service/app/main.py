@@ -63,6 +63,7 @@ from app.api.service import get_or_create_job, public_status_view
 from app.graph.pipeline import build_pipeline
 from app.services.job_store import sanitize_job_id
 from app.startup import build_readiness_report, run_startup_checks
+from app.store.factory import close_stores
 from app.store.models import JobOptions
 from app.worker.dispatch import dispatch_job
 from app.worker.state import make_initial_state
@@ -78,7 +79,10 @@ logger = logging.getLogger("app.main")
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown events."""
     run_startup_checks()
-    yield
+    try:
+        yield
+    finally:
+        await close_stores()
 
 
 app = FastAPI(
