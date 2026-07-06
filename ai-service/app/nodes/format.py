@@ -438,7 +438,7 @@ async def format_node(state: PipelineState) -> dict:
             "source_quotes": source_quotes,
             "quality_score": s.quality.score,
             "quality_issues": "; ".join(s.quality.issues),
-            "source_refs": str([ref.model_dump() for ref in s.source_refs]),
+            "source_refs": [ref.model_dump() for ref in s.source_refs]
         })
         jira_rows.append({
             "issue_type": s.jira_fields.issue_type,

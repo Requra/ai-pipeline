@@ -75,6 +75,9 @@ services:
     container_name: ai-pipeline-service-rag-mvp
     ports:
       - "8000:8000"
+    volumes:
+      - ./ai-service:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     env_file:
       - ./ai-service/.env
     environment:
