@@ -34,10 +34,10 @@ rejected/irrelevant input straight to `format`, and everything else to
 | 2 | `ingest` | Extract text, normalize, mask light PII, LLM relevance gate. | `raw_text`, `is_useful`, `relevance_score` |
 | 3 | `transcribe` | Audio → text (Groq/Deepgram). Audio path only. | `raw_text`/`chunks` |
 | 4 | `parse_to_chunks` | Split into coordinate-aware `SourceChunk`s. | `chunks` |
-| 5 | `build_source_index` | Build the in-memory BM25 index for the job. | `source_index_id`, `retrieval_stats` |
+| 5 | `build_source_index` | Compile local lexical BM25 index and optionally generate/store semantic embeddings using pgvector. | `source_index_id`, `retrieval_stats` |
 | 6 | `extract` | Grounded requirement extraction (verbatim quotes, JSON repair, confidence grading). | `extracted_requirements` |
 | 7 | `dedupe_requirements` | Merge exact/near-duplicate requirements; preserve evidence; re-id. | `extracted_requirements` (deduped) |
-| 8 | `retrieve_evidence` | Attach best supporting evidence per requirement; record retrieval scores. | `extracted_requirements` (+evidence/scores) |
+| 8 | `retrieve_evidence` | Run BM25 and pgvector hybrid search queries and rank-merge results to append supporting evidence. | `extracted_requirements` (+evidence/scores) |
 | 9 | `classify` | Multi-label classify (FR/NFR/BR + special). | `classified_requirements` |
 | 10 | `evidence_grounding` | Validate every requirement has grounded evidence. | `quality_issues` |
 | 11 | `generate` | Requirements → user stories with ≥2 specific GWT acceptance criteria; coverage map; validation. | `user_stories`, `requirement_coverages` |

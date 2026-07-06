@@ -14,10 +14,11 @@ reduction), not chatbot RAG. See [docs/rag-grounding-architecture.md](docs/rag-g
 - `docs/`: contracts, node reference, RAG architecture, ADRs.
 
 ## Key docs
-- [RAG grounding architecture](docs/rag-grounding-architecture.md)
-- [Node reference](docs/node-reference.md)
-- [Response contract v1](docs/contracts/pipeline-response-v1.md)
-- [Implementation plan](docs/implementation-plans/rag-mvp-production-flow.md)
+- [Documentation Index](docs/README.md)
+- [RAG Grounding Architecture](docs/rag-grounding-architecture.md)
+- [Node Reference](docs/node-reference.md)
+- [Response Contract v1](docs/contracts/pipeline-response-v1.md)
+- [Changelog History](docs/changelog.md)
 
 ## Local setup
 
@@ -97,6 +98,18 @@ poetry run python scripts/evaluate_pipeline.py # MVP threshold harness (mock LLM
 poetry run python scripts/evaluate_pipeline.py --real  # uses configured provider
 ```
 
+## LangGraph Studio (Visual Debugging)
+
+To start the LangGraph dev server and run the visual interactive studio:
+```bash
+# Option A: Run the quick-launch batch script from the repo root
+.\run_studio.bat
+
+# Option B: Run via poetry inside the service folder
+cd ai-service
+poetry run langgraph dev
+```
+
 ## Docker
 
 ```bash
@@ -115,5 +128,6 @@ docker compose up
 4. Generate any binary `.xlsx` from `exports.excel.rows` on the backend — the AI
    service returns structured rows, not files.
 
-**Limitations:** in-memory job store + per-job source index (single process; not
-durable across restarts). RAG is lexical (no embeddings) by design for the MVP.
+**Local/Dev Limitations:** The default local/dev stack runs with an in-memory job store + per-job source index (single process; not durable across restarts) and uses BM25 lexical retrieval only.
+
+**Production capabilities:** Setting `DATABASE_URL` enables durable PostgreSQL storage (along with `pgvector` for semantic and hybrid RAG retrieval), and setting `REDIS_URL` switches execution to a distributed RQ worker fleet.

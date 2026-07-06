@@ -311,17 +311,30 @@ class PgJobStore:
 
     async def add_attempt(self, attempt: JobAttemptRecord) -> None:
         async with self._db.session() as s:
-            s.add(
-                m.AiJobAttempt(
-                    job_id=attempt.job_id,
-                    attempt_number=attempt.attempt_number,
-                    status=attempt.status.value,
-                    started_at=attempt.started_at,
-                    completed_at=attempt.completed_at,
-                    error_code=attempt.error_code,
-                    error_message=attempt.error_message,
-                )
+            stmt = pg_insert(m.AiJobAttempt).values(
+                job_id=attempt.job_id,
+                attempt_number=attempt.attempt_number,
+                status=attempt.status.value,
+                started_at=attempt.started_at,
+                completed_at=attempt.completed_at,
+                error_code=attempt.error_code,
+                error_message=attempt.error_message,
             )
+            update_dict = {
+                "status": stmt.excluded.status,
+            }
+            if attempt.completed_at is not None:
+                update_dict["completed_at"] = stmt.excluded.completed_at
+            if attempt.error_code is not None:
+                update_dict["error_code"] = stmt.excluded.error_code
+            if attempt.error_message is not None:
+                update_dict["error_message"] = stmt.excluded.error_message
+
+            stmt = stmt.on_conflict_do_update(
+                constraint="uq_ai_job_attempts_job_attempt",
+                set_=update_dict,
+            )
+            await s.execute(stmt)
             await s.commit()
 
     async def list_attempts(self, job_id: str) -> List[JobAttemptRecord]:
@@ -407,7 +420,7 @@ class PgResultStore:
                     processing_time_ms=processing_time_ms,
                 )
             )
-            self._decompose(s, job_id, result)
+            await self._decompose(s, job_id, result)
             await s.commit()
 
         return JobResultRecord(
@@ -418,16 +431,19 @@ class PgResultStore:
             processing_time_ms=processing_time_ms,
         )
 
-    @staticmethod
-    def _decompose(s, job_id: str, result: Dict[str, Any]) -> None:
+    async def _decompose(self, s, job_id: str, result: Dict[str, Any]) -> None:
         """Best-effort projection of the contract payload into normalized tables."""
         if not isinstance(result, dict):
             return
         tenant = result.get("tenant_id")
         project = result.get("project_id")
 
+        requirements_to_add = []
+        evidence_to_add = []
         for req in result.get("requirements", []) or []:
+            requirement_db_id = m._uuid()
             row = m.AiRequirement(
+                id=requirement_db_id,
                 job_id=job_id,
                 tenant_id=tenant,
                 project_id=project,
@@ -440,12 +456,11 @@ class PgResultStore:
                 confidence_score=float(req.get("confidence_score", 0.0) or 0.0),
                 deduplication_key=req.get("deduplication_key", ""),
             )
-            s.add(row)
-            s.flush()
+            requirements_to_add.append(row)
             for ref in req.get("source_refs", []) or []:
-                s.add(
+                evidence_to_add.append(
                     m.AiRequirementEvidence(
-                        requirement_id=row.id,
+                        requirement_id=requirement_db_id,
                         job_id=job_id,
                         chunk_id=ref.get("chunk_id"),
                         quote=ref.get("quote", ""),
@@ -454,8 +469,19 @@ class PgResultStore:
                     )
                 )
 
+        for r in requirements_to_add:
+            s.add(r)
+        await s.flush()
+
+        for e in evidence_to_add:
+            s.add(e)
+
+        stories_to_add = []
+        ac_to_add = []
         for story in result.get("user_stories", []) or []:
+            story_db_id = m._uuid()
             row = m.AiUserStory(
+                id=story_db_id,
                 job_id=job_id,
                 tenant_id=tenant,
                 project_id=project,
@@ -470,18 +496,24 @@ class PgResultStore:
                 quality_json=story.get("quality", {}) or {},
                 jira_fields_json=story.get("jira_fields", {}) or {},
             )
-            s.add(row)
-            s.flush()
+            stories_to_add.append(row)
             for ac in story.get("acceptance_criteria", []) or []:
-                s.add(
+                ac_to_add.append(
                     m.AiAcceptanceCriterion(
-                        user_story_id=row.id,
+                        user_story_id=story_db_id,
                         job_id=job_id,
                         criterion_key=ac.get("id", ""),
                         text=ac.get("text", ""),
                         criterion_type=ac.get("criterion_type", "plain"),
                     )
                 )
+
+        for st in stories_to_add:
+            s.add(st)
+        await s.flush()
+
+        for ac_row in ac_to_add:
+            s.add(ac_row)
 
         for cov in result.get("requirement_coverages", []) or []:
             s.add(
@@ -568,8 +600,13 @@ class PgChunkStore:
     async def save_documents(
         self, documents: List[SourceDocumentRecord]
     ) -> List[SourceDocumentRecord]:
+        if not documents:
+            return []
         saved: List[SourceDocumentRecord] = []
         async with self._db.session() as s:
+            job_ids = {doc.job_id for doc in documents}
+            for jid in job_ids:
+                await s.execute(delete(m.AiSourceDocument).where(m.AiSourceDocument.job_id == jid))
             for doc in documents:
                 row = m.AiSourceDocument(
                     job_id=doc.job_id,
@@ -592,7 +629,12 @@ class PgChunkStore:
         return saved
 
     async def save_chunks(self, chunks: List[SourceChunkRecord]) -> None:
+        if not chunks:
+            return
         async with self._db.session() as s:
+            job_ids = {c.job_id for c in chunks}
+            for jid in job_ids:
+                await s.execute(delete(m.AiSourceChunk).where(m.AiSourceChunk.job_id == jid))
             for c in chunks:
                 s.add(
                     m.AiSourceChunk(
@@ -675,7 +717,12 @@ class PgEmbeddingStore:
         self._db = db
 
     async def save_embeddings(self, embeddings: List[ChunkEmbeddingRecord]) -> None:
+        if not embeddings:
+            return
         async with self._db.session() as s:
+            job_ids = {e.job_id for e in embeddings}
+            for jid in job_ids:
+                await s.execute(delete(m.AiSourceChunkEmbedding).where(m.AiSourceChunkEmbedding.job_id == jid))
             for e in embeddings:
                 s.add(
                     m.AiSourceChunkEmbedding(
@@ -712,6 +759,10 @@ class PgEmbeddingStore:
         job_id: Optional[str] = None,
         top_k: int = 5,
     ) -> List[Dict[str, Any]]:
+        if job_id is None and (tenant_id is None or project_id is None):
+            raise ValueError(
+                "vector_search requires job_id or both tenant_id and project_id"
+            )
         col = m.AiSourceChunkEmbedding
         # pgvector cosine distance operator; similarity score = 1 - distance.
         distance = col.embedding.cosine_distance(query_embedding)

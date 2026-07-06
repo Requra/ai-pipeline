@@ -1,0 +1,10 @@
+Project Brief: Online Bookstore Platform
+
+The system shall allow customers to search for books by title, author, and category.
+The system shall allow customers to add books to a shopping cart.
+The system must support secure checkout using credit cards and PayPal.
+Customers shall be able to create an account using their email address.
+The system should send an order confirmation email after each purchase.
+The platform must load search results in under two seconds for typical queries.
+Administrators shall be able to add, edit, and remove books from the catalog.
+The system shall keep an audit log of all administrative changes.

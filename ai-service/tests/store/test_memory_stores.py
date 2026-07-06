@@ -120,6 +120,44 @@ async def test_embedding_store_vector_search_is_tenant_scoped():
     other = await store.vector_search([1.0, 0.0], tenant_id="t1", project_id="p1", top_k=5)
     assert all(h["chunk_id"] != "c3" for h in other)
 
+    with pytest.raises(ValueError, match="requires job_id"):
+        await store.vector_search([1.0, 0.0])
+
+
+async def test_memory_artifact_saves_replace_prior_attempt_data():
+    chunks = MemoryChunkStore()
+    embeddings = MemoryEmbeddingStore()
+
+    await chunks.save_chunks(
+        [SourceChunkRecord(job_id="retry-1", chunk_id="old", text="old")]
+    )
+    await chunks.save_chunks(
+        [SourceChunkRecord(job_id="retry-1", chunk_id="new", text="new")]
+    )
+    assert [c.chunk_id for c in await chunks.get_chunks("retry-1")] == ["new"]
+
+    await embeddings.save_embeddings(
+        [
+            ChunkEmbeddingRecord(
+                job_id="retry-1",
+                chunk_id="old",
+                embedding_model="test",
+                embedding=[1.0, 0.0],
+            )
+        ]
+    )
+    await embeddings.save_embeddings(
+        [
+            ChunkEmbeddingRecord(
+                job_id="retry-1",
+                chunk_id="new",
+                embedding_model="test",
+                embedding=[0.0, 1.0],
+            )
+        ]
+    )
+    assert await embeddings.count_for_job("retry-1") == 1
+
 
 # ---------------------------------------------------------------------------
 # create_or_get / mark_duplicate / try_requeue_for_retry (idempotency)

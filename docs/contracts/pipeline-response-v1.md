@@ -2,6 +2,8 @@
 
 This document defines the frozen **V1 Public Contract** for the Requra AI Pipeline service response (`PipelineResponseV1` / `JobResult`).
 
+For API request payloads, dev/prod endpoint endpoints, and pipeline execution options, refer to the **[API Input Contract Guide](../pipeline-contract.md)**.
+
 The backend, frontend, and mobile clients should consume only the fields documented below. Internal LangGraph states can evolve freely without breaking these public structures.
 
 ## Stability Rules
