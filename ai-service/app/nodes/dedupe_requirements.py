@@ -19,13 +19,33 @@ Merge policy (never lose grounding):
 from __future__ import annotations
 
 import re
-from typing import List, Optional
+import json
+import logging
+import asyncio
+from typing import List, Optional, Tuple
 
 from app.nodes.extract import project_legacy_requirements
 from app.progress import update_progress
 from app.rag.scoring import tokenize
-from app.schemas.items import ExtractedRequirement, PipelineWarning
+from app.schemas.items import ExtractedRequirement, PipelineWarning, QualityIssue
 from app.schemas.pipeline_state import PipelineState
+from app.config import settings
+from app.llm import get_llm
+from app.prompts.loader import load_prompt
+from app.prompts.registry import PromptId
+from app.rag.requirement_embeddings import RequirementEmbeddingService
+
+CONFLICT_USER_PROMPT = """
+Analyze the following requirement pairs for semantic conflicts. 
+
+Requirements List:
+{requirements_text}
+
+Candidate Pairs to Analyze:
+{pairs_text}
+"""
+
+logger = logging.getLogger("app.nodes.dedupe_requirements")
 
 # Token-set Jaccard at/above this is considered a near-duplicate.
 NEAR_DUPLICATE_THRESHOLD = 0.8
@@ -96,6 +116,193 @@ def _merge_into(base: ExtractedRequirement, other: ExtractedRequirement) -> None
         base.review_reason = " ".join(dict.fromkeys(reasons))
 
 
+# --- Conflict Detection Helpers ---
+
+
+def _find_semantic_candidates(
+    reqs: List[ExtractedRequirement], 
+    threshold: float = 0.55,
+    k: int = 5
+) -> List[Tuple[ExtractedRequirement, ExtractedRequirement, float]]:
+    """
+    Find Top-K semantically similar requirement pairs using cosine similarity.
+    Performs comparisons over only the upper triangle of pairs.
+    """
+    pairs_sims = []
+    for i in range(len(reqs)):
+        req_a = reqs[i]
+        if not req_a.embedding:
+            continue
+        for j in range(i + 1, len(reqs)):
+            req_b = reqs[j]
+            if not req_b.embedding:
+                continue
+            sim = RequirementEmbeddingService.similarity(req_a.embedding, req_b.embedding)
+            if sim >= threshold:
+                pairs_sims.append((sim, req_a, req_b))
+
+    # Sort all candidate pairs by similarity descending
+    pairs_sims.sort(key=lambda x: x[0], reverse=True)
+
+    # Distribute matches to limit candidates to Top-K per requirement to avoid hotspots
+    candidates = []
+    req_match_counts = {}
+    for sim, req_a, req_b in pairs_sims:
+        count_a = req_match_counts.get(req_a.id, 0)
+        count_b = req_match_counts.get(req_b.id, 0)
+        if count_a < k and count_b < k:
+            req_match_counts[req_a.id] = count_a + 1
+            req_match_counts[req_b.id] = count_b + 1
+            candidates.append((req_a, req_b, sim))
+            
+    return candidates
+
+
+def _find_jaccard_candidates(
+    reqs: List[ExtractedRequirement], 
+    low_threshold: float = 0.3, 
+    high_threshold: float = 0.8
+) -> List[Tuple[ExtractedRequirement, ExtractedRequirement, float]]:
+    candidates = []
+    seen_pairs = set()
+    token_sets = {req.id: set(tokenize(req.text)) for req in reqs}
+    
+    for i, req_a in enumerate(reqs):
+        tokens_a = token_sets[req_a.id]
+        for j, req_b in enumerate(reqs):
+            if i >= j:
+                continue
+            tokens_b = token_sets[req_b.id]
+            sim = _jaccard(tokens_a, tokens_b)
+            if low_threshold <= sim < high_threshold:
+                pair_key = (req_a.id, req_b.id)
+                if pair_key not in seen_pairs:
+                    seen_pairs.add(pair_key)
+                    candidates.append((req_a, req_b, sim))
+                    
+    return candidates
+
+
+def _format_req_id(req_id: int) -> str:
+    return f"REQ-{str(req_id).zfill(3)}"
+
+
+def _parse_req_int_id(req_str_id: str) -> Optional[int]:
+    match = re.search(r"\d+", req_str_id)
+    return int(match.group(0)) if match else None
+
+
+def _normalize_classification(raw_class: str) -> str:
+    """Robustly normalize LLM classification strings into standard uppercase SNAKE_CASE."""
+    if not raw_class:
+        return "INDEPENDENT"
+    # Convert CamelCase to snake_case
+    s1 = re.sub(r'(.)([A-Z][a-z]+)', r'\1_\2', raw_class)
+    s2 = re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', s1)
+    # Lowercase, clean punctuation/spaces, convert to upper
+    cleaned = s2.replace(" ", "_").replace("-", "_").upper()
+    return re.sub(r"_+", "_", cleaned).strip("_")
+
+
+def _batch_candidates_by_tokens(
+    candidates: List[Tuple[ExtractedRequirement, ExtractedRequirement, float]],
+    max_tokens: int = 2500
+) -> List[List[Tuple[ExtractedRequirement, ExtractedRequirement, float]]]:
+    """Batch candidate pairs based on estimated prompt token count (characters / 4)."""
+    batches = []
+    current_batch = []
+    current_char_count = 0
+    max_chars = max_tokens * 4
+    
+    current_reqs = set()
+    
+    for req_a, req_b, sim in candidates:
+        pair_chars = len(f"Compare REQ-{req_a.id} and REQ-{req_b.id}\n")
+        req_chars = 0
+        if req_a.id not in current_reqs:
+            req_chars += len(req_a.text)
+        if req_b.id not in current_reqs:
+            req_chars += len(req_b.text)
+            
+        total_added_chars = pair_chars + req_chars
+        
+        if current_batch and (current_char_count + total_added_chars > max_chars):
+            batches.append(current_batch)
+            current_batch = [(req_a, req_b, sim)]
+            current_char_count = total_added_chars
+            current_reqs = {req_a.id, req_b.id}
+        else:
+            current_batch.append((req_a, req_b, sim))
+            current_char_count += total_added_chars
+            current_reqs.add(req_a.id)
+            current_reqs.add(req_b.id)
+            
+    if current_batch:
+        batches.append(current_batch)
+        
+    return batches
+
+
+async def _classify_conflicts_batch(
+    llm, 
+    batch: List[Tuple[ExtractedRequirement, ExtractedRequirement, float]]
+) -> List[dict]:
+    unique_reqs = {}
+    for req_a, req_b, _ in batch:
+        unique_reqs[req_a.id] = req_a
+        unique_reqs[req_b.id] = req_b
+        
+    reqs_lines = []
+    for req_id, req in sorted(unique_reqs.items()):
+        reqs_lines.append(f"[{_format_req_id(req_id)}] Text: {req.text} (Actor: {req.actor or 'System'}, Priority: {req.priority})")
+    requirements_text = "\n".join(reqs_lines)
+    
+    pairs_lines = []
+    for idx, (req_a, req_b, sim) in enumerate(batch, start=1):
+        pairs_lines.append(f"Pair {idx}: Compare {_format_req_id(req_a.id)} and {_format_req_id(req_b.id)} (Similarity: {sim:.2f})")
+    pairs_text = "\n".join(pairs_lines)
+    
+    try:
+        # Provider network call timeout wrapper
+        timeout = getattr(settings, "PROVIDER_TIMEOUT_SECONDS", 120)
+        system_prompt = load_prompt(PromptId.DETECT_CONFLICTS_V1)
+        raw = await asyncio.wait_for(
+            llm.ainvoke([
+                ("system", system_prompt),
+                ("user", CONFLICT_USER_PROMPT.format(requirements_text=requirements_text, pairs_text=pairs_text))
+            ]),
+            timeout=float(timeout)
+        )
+        content = getattr(raw, "content", None) or str(raw)
+        
+        content = content.strip()
+        if content.startswith("```"):
+            lines = content.splitlines()
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].startswith("```"):
+                lines = lines[:-1]
+            content = "\n".join(lines).strip()
+            
+        try:
+            parsed = json.loads(content)
+            if isinstance(parsed, list):
+                return parsed
+            elif isinstance(parsed, dict) and "conflicts" in parsed:
+                return parsed["conflicts"]
+            return []
+        except Exception as e:
+            logger.warning("Failed to parse LLM conflict classification JSON: %s", e)
+            return []
+    except asyncio.TimeoutError:
+        logger.warning("LLM conflict classification call timed out after %d seconds.", timeout)
+        return []
+    except Exception as e:
+        logger.warning("LLM conflict classification API error: %s", e)
+        return []
+
+
+
 async def dedupe_requirements_node(state: PipelineState) -> dict:
     print("--- DEDUPE REQUIREMENTS NODE ---")
     update_progress(state.get("job_id"), "dedupe_requirements", 55, "PROCESSING")
@@ -141,6 +348,94 @@ async def dedupe_requirements_node(state: PipelineState) -> dict:
     for new_id, req in enumerate(deduped, start=1):
         req.id = new_id
 
+    # --- Conflict Detection Phase ---
+    candidates = []
+    conflict_warnings: List[PipelineWarning] = []
+    conflict_issues: List[QualityIssue] = []
+
+    if settings.ENABLE_CONFLICT_DETECTION:
+        if settings.ENABLE_EMBEDDINGS:
+            try:
+                await RequirementEmbeddingService.ensure_requirement_embeddings(deduped)
+                candidates = _find_semantic_candidates(
+                    deduped, 
+                    threshold=settings.CONFLICT_SIMILARITY_THRESHOLD, 
+                    k=settings.CONFLICT_TOP_K
+                )
+            except Exception as e:
+                logger.warning("Failed semantic candidate retrieval: %s. Falling back to Jaccard.", e, exc_info=True)
+                candidates = _find_jaccard_candidates(
+                    deduped, 
+                    low_threshold=settings.CONFLICT_JACCARD_LOW, 
+                    high_threshold=settings.CONFLICT_JACCARD_HIGH
+                )
+        else:
+            candidates = _find_jaccard_candidates(
+                deduped, 
+                low_threshold=settings.CONFLICT_JACCARD_LOW, 
+                high_threshold=settings.CONFLICT_JACCARD_HIGH
+            )
+
+        if candidates:
+            llm = get_llm()
+            if llm is not None:
+                all_raw_conflicts = []
+                # Batch candidate pairs based on token budget
+                for batch in _batch_candidates_by_tokens(candidates, max_tokens=2500):
+                    raw_conflicts = await _classify_conflicts_batch(llm, batch)
+                    all_raw_conflicts.extend(raw_conflicts)
+                
+                valid_classifications = {
+                    "CONTRADICTION", "CONSTRAINT_CONFLICT", "PERMISSION_CONFLICT", 
+                    "SCOPE_CONFLICT", "PRIORITY_CONFLICT", "COMPLEMENTARY", "DUPLICATE"
+                }
+                for conflict in all_raw_conflicts:
+                    req_a_id = conflict.get("requirement_a")
+                    req_b_id = conflict.get("requirement_b")
+                    raw_classification = conflict.get("classification", "")
+                    classification = _normalize_classification(raw_classification)
+                    
+                    try:
+                        confidence = float(conflict.get("confidence", 0.0))
+                    except Exception:
+                        confidence = 0.0
+                        
+                    reason = conflict.get("reason", "")
+                    question = conflict.get("clarification_question", "")
+                    
+                    if not req_a_id or not req_b_id:
+                        continue
+                    if classification == "INDEPENDENT" or confidence < settings.CONFLICT_MIN_CONFIDENCE:
+                        continue
+                    if classification not in valid_classifications:
+                        continue
+                    
+                    req_a_int = _parse_req_int_id(req_a_id)
+                    
+                    # Formatting warning and issues text cleanly
+                    details = (
+                        f"Conflict detected between {req_a_id} and {req_b_id}:\n"
+                        f"  - Category: {classification}\n"
+                        f"  - Reason: {reason}\n"
+                        f"  - Clarification Question: {question}"
+                    )
+                    
+                    conflict_warnings.append(PipelineWarning(
+                        node_name="dedupe_requirements",
+                        code=f"SEMANTIC_{classification}",
+                        message=details
+                    ))
+                    
+                    if req_a_int is not None:
+                        severity = "high" if classification in ("CONTRADICTION", "PERMISSION_CONFLICT") else "medium"
+                        conflict_issues.append(QualityIssue(
+                            item_id=req_a_int,
+                            item_type="requirement",
+                            severity=severity,
+                            rule_violated=f"semantic_conflict_{classification.lower()}",
+                            details=details
+                        ))
+
     legacy = project_legacy_requirements(deduped)
 
     result: dict = {
@@ -164,7 +459,13 @@ async def dedupe_requirements_node(state: PipelineState) -> dict:
                 "differ by actor; kept separate and flagged for review."
             ),
         ))
+    
+    # Append conflict warnings and issues
+    new_warnings.extend(conflict_warnings)
     if new_warnings:
         result["warnings"] = (state.get("warnings", []) or []) + new_warnings
+        
+    if conflict_issues:
+        result["quality_issues"] = (state.get("quality_issues", []) or []) + conflict_issues
 
     return result
