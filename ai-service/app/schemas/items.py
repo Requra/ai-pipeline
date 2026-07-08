@@ -72,6 +72,7 @@ class ExtractedRequirement(BaseModel):
     vector_match_score: Optional[float] = None
     needs_review: bool = False
     review_reason: Optional[str] = None
+    embedding: Optional[List[float]] = None
 
 class ClassifiedRequirement(ExtractedRequirement):
     labels: List[RequirementType]

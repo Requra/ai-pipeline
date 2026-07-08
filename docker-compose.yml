@@ -104,6 +104,8 @@ services:
     image: shawky2002/ai-pipeline-service:rag-mvp
     container_name: ai-pipeline-worker
     command: ["python", "-m", "app.worker.main"]
+    volumes:
+      - ./ai-service:/app
     env_file:
       - ./ai-service/.env
     environment:
