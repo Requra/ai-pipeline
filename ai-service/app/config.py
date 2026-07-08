@@ -158,6 +158,12 @@ class Settings:
     CONFLICT_JACCARD_HIGH: float = float(os.getenv("CONFLICT_JACCARD_HIGH", "0.80"))
 
     # ------------------------------------------------------------------
+    # Quality Repair
+    # ------------------------------------------------------------------
+    ENABLE_QUALITY_REPAIR: bool = _env_flag("ENABLE_QUALITY_REPAIR", "false")
+    MAX_REPAIR_ATTEMPTS: int = _env_int("MAX_REPAIR_ATTEMPTS", 1)
+
+    # ------------------------------------------------------------------
     # Derived helpers
     # ------------------------------------------------------------------
     @property
