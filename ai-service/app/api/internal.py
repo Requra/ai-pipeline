@@ -22,8 +22,15 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
+import json
+import asyncio
+from pydantic import ValidationError
+
 from app.api.deps import get_request_id, require_internal_auth
-from app.api.schemas import CreateJobRequest
+from app.api.schemas import CreateJobRequest, RegenerateStoryRequest
+from app.llm import get_llm
+from app.prompts.loader import load_prompt
+from app.prompts.registry import PromptId
 from app.api.service import (
     handle_job_creation,
     internal_status_view,
@@ -328,3 +335,63 @@ async def callback_test(job_id: str, request: Request):
         request_id=get_request_id(request),
     )
     return {"job_id": job_id, "callback_url": callback_url, "delivered": ok}
+
+
+def _build_regeneration_prompt(req: RegenerateStoryRequest) -> str:
+    parts = [
+        f"Requirement Text: {req.requirement_text}",
+        f"Requirement Type: {req.requirement_type}",
+        f"Actor: {req.actor or 'None'}",
+        f"Goal: {req.goal or 'None'}",
+        f"Priority: {req.priority}",
+        f"Human Feedback/Instruction: {req.feedback}"
+    ]
+    if req.original_story:
+        parts.append(f"Original Story (to be refined/improved): {req.original_story}")
+    if req.source_context:
+        parts.append(f"Source/Business Context: {req.source_context}")
+    return "\n".join(parts)
+
+
+@router.post("/stories/regenerate")
+async def regenerate_story(req: RegenerateStoryRequest):
+    """Stateless regeneration of a single user story with feedback."""
+    llm = get_llm()
+    if llm is None:
+        raise HTTPException(status_code=503, detail="LLM reasoning service not initialized or API keys missing.")
+    
+    system_prompt = load_prompt(PromptId.REGENERATE_STORY_V1)
+    user_prompt = _build_regeneration_prompt(req)
+    
+    try:
+        timeout = getattr(settings, "PROVIDER_TIMEOUT_SECONDS", 120)
+        raw = await asyncio.wait_for(
+            llm.ainvoke([
+                ("system", system_prompt),
+                ("user", user_prompt)
+            ]),
+            timeout=float(timeout)
+        )
+        content = getattr(raw, "content", None) or str(raw)
+        
+        content = content.strip()
+        if content.startswith("```"):
+            lines = content.splitlines()
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].startswith("```"):
+                lines = lines[:-1]
+            content = "\n".join(lines).strip()
+            
+        parsed = json.loads(content)
+        from app.api.schemas import RegenerateStoryResponse
+        response = RegenerateStoryResponse.model_validate(parsed)
+        return response
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="LLM reasoning request timed out.")
+    except (json.JSONDecodeError, ValidationError) as e:
+        logger.error("Failed to parse or validate LLM response for story regeneration: %s", e)
+        raise HTTPException(status_code=502, detail=f"LLM response parsing or validation failed: {str(e)}")
+    except Exception as e:
+        logger.error("Unexpected error in story regeneration: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to regenerate story: {str(e)}")
