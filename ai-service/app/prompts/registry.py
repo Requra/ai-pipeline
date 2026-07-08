@@ -10,6 +10,8 @@ class PromptId(str, Enum):
     GENERATE_USER_STORIES_V2 = "generate_user_stories_v2"
     SUMMARIZE_STRUCTURED_V1 = "summarize_structured_v1"
     DETECT_CONFLICTS_V1 = "detect_conflicts_v1"
+    REGENERATE_STORY_V1 = "regenerate_story_v1"
+    REPAIR_STORIES_V1 = "repair_stories_v1"
 
 # Map PromptId to template filename
 PROMPT_MAP = {
@@ -21,6 +23,8 @@ PROMPT_MAP = {
     PromptId.GENERATE_USER_STORIES_V2: "generate_user_stories_v2.md",
     PromptId.SUMMARIZE_STRUCTURED_V1: "summarize_structured_v1.md",
     PromptId.DETECT_CONFLICTS_V1: "detect_conflicts_v1.md",
+    PromptId.REGENERATE_STORY_V1: "regenerate_story_v1.md",
+    PromptId.REPAIR_STORIES_V1: "repair_stories_v1.md",
 }
 
 def get_template_path(prompt_id: PromptId) -> Path:
