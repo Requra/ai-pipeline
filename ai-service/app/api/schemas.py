@@ -70,3 +70,29 @@ class CreateJobResponse(BaseModel):
     result_available: Optional[bool] = None
     # Present when an explicit retry (reprocess=true) was accepted.
     retried: Optional[bool] = None
+
+
+class RegenerateStoryRequest(BaseModel):
+    """Request to regenerate a single user story with human feedback."""
+    requirement_text: str
+    requirement_type: str = "FR"
+    actor: Optional[str] = None
+    goal: Optional[str] = None
+    priority: str = "Medium"
+    feedback: str
+    original_story: Optional[str] = None
+    source_context: Optional[str] = None
+
+
+class AcceptanceCriterionOut(BaseModel):
+    id: str
+    text: str
+    criterion_type: str = "Given-When-Then"
+
+
+class RegenerateStoryResponse(BaseModel):
+    """A single regenerated user story."""
+    title: str
+    description: str
+    acceptance_criteria: List[AcceptanceCriterionOut] = Field(default_factory=list)
+    labels: List[str] = Field(default_factory=list)
