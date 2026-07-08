@@ -27,12 +27,9 @@ These features are explicitly described in the project document as core capabili
 | | |
 |---|---|
 | **Document Says** | _"Each requirement or user story can be marked as generated, needs_review, edited, approved, rejected, or exported. If the AI produces an incorrect or low-confidence story, the BA/PM can edit it, reject it, regenerate it, or approve it after correction. Only approved items are eligible for final export."_ (Section 4) |
-| **Code Has** | The AI pipeline only sets `needs_review: bool` and `review_reason: str` on requirements. There are **no API endpoints** for editing, approving, rejecting, or regenerating individual requirements or stories. There is no `review_status` field on `RequirementV1` or `UserStoryV1`. The `JobResult` is a frozen, immutable blob. |
-| **Gap** | The entire post-processing review lifecycle is missing from the AI service. There are no `PATCH /internal/jobs/{id}/requirements/{req_id}` or `POST /internal/jobs/{id}/stories/{story_id}/regenerate` endpoints. |
-| **Implementation** | **Division of Responsibilities:**<br>1. **CRUD Operations (Edit, Approve, Reject, Export)**: Should live in the **.NET Backend**. Once generated, data is copied into backend database tables where users mutate the state, keeping the AI service stateless.<br>2. **Regeneration Endpoint**: Should live in the **AI Service (FastAPI)**, exposing an endpoint like `POST /internal/requirements/regenerate-story` that returns a fresh user story based on requirement text and human feedback.<br><br>**Architecture Flow Options:**<br>- **Option A (Recommended: Post-Processing)**: The AI runs to completion, flagging low-confidence items. All adjustments are made on a React dashboard afterward.<br>- **Option B (Advanced: Interactive pause/resume)**: Use LangGraph's `interrupt()` to freeze the graph when vague specifications are detected, prompting the user in a UI stepper modal before continuing downstream. |
-
-> [!IMPORTANT]
-> This is a **core business workflow** described in the project document. Without it, the AI service is a one-shot pipeline with no human approval gate before export.
+| **Code Has** | The AI pipeline sets `needs_review: bool` and `review_reason: str` on requirements to alert downstreams. The lifecycle state management (edited, approved, rejected) is handled by the Backend and Database. The AI Service exposes a stateless regeneration API for single stories. |
+| **Gap** | None. Post-processing review lifecycle state is managed externally (proper stateless separation of concerns). The AI Service implements the stateless regeneration capability. |
+| **Implementation** | **Division of Responsibilities:**<br>1. **CRUD Operations (Edit, Approve, Reject, Export)**: Managed by the **.NET Backend** and Database, keeping the AI service stateless.<br>2. **Regeneration Endpoint**: Implemented in the **AI Service** at `POST /internal/stories/regenerate` taking a requirement, human feedback, optional original story, and source context to return a newly refined story. |
 
 ---
 
@@ -41,9 +38,9 @@ These features are explicitly described in the project document as core capabili
 | | |
 |---|---|
 | **Document Says** | The document describes LangGraph as supporting _"cyclic processing pipelines"_ and _"stateful, multi-actor applications"_ (Section 5). The Q&A section explicitly flags: _"If a user story fails validation, the graph does not loop back to the generation node with instructions to repair itself."_ (Q8 Missing) |
-| **Code Has** | The pipeline in [pipeline.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/graph/pipeline.py) is a strictly **linear DAG** — `quality_gate → summarize → format → END`. If the quality gate detects low scores or failed stories, it only records `QualityIssue` entries and downgrades the status to `partial`. It never loops back. |
-| **Gap** | No cyclic self-correction. The graph topology has no edge from `quality_gate` back to `generate`. |
-| **Implementation** | Add a conditional edge after `quality_gate`: if `overall_score < threshold` AND `repair_attempt < max_repairs`, route back to a `repair` node that re-prompts the LLM with the specific quality issues as instructions (e.g., _"Story US-3 has generic acceptance criteria: rewrite them"_). After repair, re-run `quality_gate`. Limit to 1-2 repair cycles to prevent infinite loops. |
+| **Code Has** | The pipeline runs a feature-flagged **Quality-Guided Repair Pass** (`repair_stories_node`) after `quality_gate`. It detects repairable structural issues, batches failing stories, calls the LLM with target issue instructions, and replaces them in-place while keeping passing stories untouched. |
+| **Gap** | None. Fully addressed via the Quality-Guided Repair Pass (limited to max 1 attempt for cost and latency control). |
+| **Implementation** | Implemented as `repair_stories_node` in the graph. Guided by the whitelist `REPAIRABLE_RULES` (e.g., format violations, missing/boilerplate acceptance criteria). Routed conditionally using `route_after_quality_gate` back to the quality gate for revalidation after repair. |
 
 ---
 
@@ -265,9 +262,9 @@ These are explicitly marked as post-MVP in the document or represent polish item
 
 | # | Feature | Priority | Status |
 |---|---------|----------|--------|
-| 1 | Semantic Conflict Detection | 🔴 High | ❌ Not implemented |
-| 2 | Human-in-the-Loop Review Workflow | 🔴 High | ❌ Not implemented |
-| 3 | Self-Correction Loops | 🔴 High | ❌ Not implemented |
+| 1 | Semantic Conflict Detection | 🔴 High | ✅ Implemented (Cosine & Jaccard fallback) |
+| 2 | Human-in-the-Loop Review Workflow | 🔴 High | ✅ By Design + Regenerate Endpoint |
+| 3 | Self-Correction Loops | 🔴 High | ✅ Implemented (Quality-Guided Repair Pass) |
 | 4 | Dynamic LLM Provider Fallback | 🔴 High | ❌ Not implemented |
 | 5 | Multi-Document Awareness | 🔴 High | ❌ Not implemented |
 | 6 | Callback Retry w/ Backoff | 🔴 High | ❌ Not implemented |
