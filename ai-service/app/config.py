@@ -148,6 +148,16 @@ class Settings:
     PROVIDER_TIMEOUT_SECONDS: int = _env_int("PROVIDER_TIMEOUT_SECONDS", 120)
 
     # ------------------------------------------------------------------
+    # Conflict Detection
+    # ------------------------------------------------------------------
+    ENABLE_CONFLICT_DETECTION: bool = _env_flag("ENABLE_CONFLICT_DETECTION", "false")
+    CONFLICT_MIN_CONFIDENCE: float = float(os.getenv("CONFLICT_MIN_CONFIDENCE", "0.80"))
+    CONFLICT_SIMILARITY_THRESHOLD: float = float(os.getenv("CONFLICT_SIMILARITY_THRESHOLD", "0.55"))
+    CONFLICT_TOP_K: int = _env_int("CONFLICT_TOP_K", 5)
+    CONFLICT_JACCARD_LOW: float = float(os.getenv("CONFLICT_JACCARD_LOW", "0.30"))
+    CONFLICT_JACCARD_HIGH: float = float(os.getenv("CONFLICT_JACCARD_HIGH", "0.80"))
+
+    # ------------------------------------------------------------------
     # Derived helpers
     # ------------------------------------------------------------------
     @property
