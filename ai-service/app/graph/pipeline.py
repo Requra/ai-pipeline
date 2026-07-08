@@ -14,7 +14,8 @@ from app.nodes.summarize import summarize_node
 from app.nodes.format import format_node
 from app.nodes.evidence_grounding import evidence_grounding_node
 from app.nodes.quality_gate import quality_gate_node
-from app.graph.router import route_after_ingest
+from app.nodes.repair_stories import repair_stories_node
+from app.graph.router import route_after_ingest, route_after_quality_gate
 
 # The pipeline is a long linear DAG (14 nodes). langgraph 0.0.26 advances one
 # BSP super-step per node plus extra channel-propagation steps, so the default
@@ -41,6 +42,7 @@ def build_pipeline():
     workflow.add_node("generate", generate_node)
     workflow.add_node("evidence_grounding", evidence_grounding_node)
     workflow.add_node("quality_gate", quality_gate_node)
+    workflow.add_node("repair_stories", repair_stories_node)
     workflow.add_node("summarize", summarize_node)
     workflow.add_node("format", format_node)
 
@@ -77,7 +79,17 @@ def build_pipeline():
 
     # After generation, run quality gate before summarization
     workflow.add_edge("generate", "quality_gate")
-    workflow.add_edge("quality_gate", "summarize")
+    
+    workflow.add_conditional_edges(
+        "quality_gate",
+        route_after_quality_gate,
+        {
+            "summarize": "summarize",
+            "repair_stories": "repair_stories",
+        }
+    )
+    workflow.add_edge("repair_stories", "quality_gate")
+    
     workflow.add_edge("summarize", "format")
     workflow.add_edge("format", END)
 
