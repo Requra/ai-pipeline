@@ -71,6 +71,10 @@ class PipelineState(TypedDict):
     started_at: float
     processing_time_ms: int
 
+    # --- Quality Repair (internal only, never in API response) ---
+    repair_attempts: int
+    resolved_quality_issues: List[QualityIssue]
+
     # --- Legacy Fields (Backwards Compatibility) ---
     # Use replacement semantics for legacy lists as well.
     functional_requirements: List[FunctionalRequirement]

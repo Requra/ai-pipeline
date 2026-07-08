@@ -63,5 +63,7 @@ def base_state():
         "status": "started",
         "error": None,
         "started_at": time.time(),
-        "processing_time_ms": 0
+        "processing_time_ms": 0,
+        "repair_attempts": 0,
+        "resolved_quality_issues": []
     }
