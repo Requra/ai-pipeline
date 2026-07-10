@@ -56,6 +56,7 @@ def make_initial_state(
         "chunks": [],
         "source_index_id": None,
         "retrieval_stats": None,
+        "pii_stats": None,
         "extracted_requirements": [],
         "classified_requirements": [],
         "requirement_coverages": [],

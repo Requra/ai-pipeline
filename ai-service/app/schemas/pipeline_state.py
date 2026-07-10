@@ -63,6 +63,7 @@ class PipelineState(TypedDict):
     quality_report: Optional[Dict[str, Any]]
     # Final serialized job result produced by `format` node
     job_result: Optional[JobResult]
+    pii_stats: Optional[Dict[str, int]]
     
     # --- Flow Control and Tracking ---
     is_useful: bool

@@ -16,6 +16,8 @@ from app.schemas.pipeline_state import PipelineState
 from app.prompts.loader import load_prompt
 from app.prompts.registry import PromptId
 
+from app.config import settings
+
 logger = logging.getLogger(__name__)
 
 MIN_TEXT_LENGTH = 50
@@ -24,6 +26,19 @@ RELEVANCE_SNIPPET_CHARS = 2000
 EMAIL_PATTERN = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 PHONE_PATTERN = re.compile(r"(?<!\w)(?:\+?\d[\d\s().-]{7,}\d)(?!\w)")
 
+# High-confidence Cloud Provider and generic token patterns
+OPENAI_KEY_PATTERN = re.compile(r"\b(?:sk-proj-[a-zA-Z0-9_]{32,}|sk-[a-zA-Z0-9]{32,})\b")
+AWS_KEY_PATTERN = re.compile(r"\b(?:AKIA|ASCA)[A-Z0-9]{16}\b")
+GITHUB_KEY_PATTERN = re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[a-zA-Z0-9]{36}\b")
+HF_KEY_PATTERN = re.compile(r"\bhf_[a-zA-Z0-9]{34}\b")
+GOOGLE_KEY_PATTERN = re.compile(r"\bAIzaSy[a-zA-Z0-9_\-]{33}\b")
+GENERIC_SECRET_PATTERN = re.compile(
+    r"(?i)\b(api_key|secret_key|private_key|access_token|db_password)(\s*=\s*['\"]?)([a-zA-Z0-9_\-]{16,})(['\"]?)\b"
+)
+
+# Credit Card Candidate Pattern (13 to 16 digits, with optional spaces or hyphens)
+CREDIT_CARD_CANDIDATE_PATTERN = re.compile(r"\b(?:\d[ -]*?){13,16}\b")
+
 
 class IngestOutput(TypedDict):
     raw_text: Optional[str]
@@ -31,6 +46,7 @@ class IngestOutput(TypedDict):
     relevance_score: float
     status: str
     error: Optional[str]
+    pii_stats: Optional[dict[str, int]]
 
 
 class RelevanceCheck(BaseModel):
@@ -51,6 +67,7 @@ def _build_output(
     relevance_score: float,
     status: str,
     error: Optional[str],
+    pii_stats: Optional[dict[str, int]] = None,
 ) -> IngestOutput:
     return {
         "raw_text": raw_text,
@@ -58,6 +75,7 @@ def _build_output(
         "relevance_score": max(0.0, min(1.0, float(relevance_score))),
         "status": status,
         "error": error,
+        "pii_stats": pii_stats,
     }
 
 
@@ -81,19 +99,85 @@ def _normalize_text(text: str) -> str:
     return "\n".join(lines).strip()
 
 
-def _mask_phone(match: re.Match[str]) -> str:
+def _is_luhn_valid(number: str) -> bool:
+    """Implement Luhn checksum algorithm to validate credit card numbers."""
+    digits = [int(c) for c in number if c.isdigit()]
+    if not digits:
+        return False
+    checksum = 0
+    reverse_digits = digits[::-1]
+    for idx, digit in enumerate(reverse_digits):
+        if idx % 2 == 1:
+            digit *= 2
+            if digit > 9:
+                digit -= 9
+        checksum += digit
+    return (checksum % 10) == 0
+
+
+def _mask_phone(match: re.Match[str], stats: dict[str, int]) -> str:
     candidate = match.group(0)
     digits_only = re.sub(r"\D", "", candidate)
     if 7 <= len(digits_only) <= 15:
+        stats["phones"] += 1
         return "[PHONE]"
     return candidate
 
 
-def _mask_pii(text: str) -> str:
-    """Mask lightweight PII fields before downstream LLM processing."""
-    masked = EMAIL_PATTERN.sub("[EMAIL]", text)
-    masked = PHONE_PATTERN.sub(_mask_phone, masked)
-    return masked
+def _mask_pii(text: str) -> tuple[str, dict[str, int]]:
+    """Mask lightweight PII and secret fields before downstream LLM processing.
+
+    Returns a tuple of (masked_text, stats_dict).
+    """
+    stats = {
+        "emails": 0,
+        "phones": 0,
+        "credit_cards": 0,
+        "api_keys": 0
+    }
+
+    # 1. Emails
+    emails = EMAIL_PATTERN.findall(text)
+    if emails:
+        stats["emails"] = len(emails)
+        text = EMAIL_PATTERN.sub("[EMAIL]", text)
+
+    # 2. Phones
+    def phone_repl(m):
+        return _mask_phone(m, stats)
+    text = PHONE_PATTERN.sub(phone_repl, text)
+
+    # 3. Credit Cards with Luhn validation
+    def cc_repl(match: re.Match[str]) -> str:
+        candidate = match.group(0)
+        clean = re.sub(r"\D", "", candidate)
+        if _is_luhn_valid(clean):
+            stats["credit_cards"] += 1
+            return "[CREDIT_CARD]"
+        return candidate
+    text = CREDIT_CARD_CANDIDATE_PATTERN.sub(cc_repl, text)
+
+    # 4. API Keys (OpenAI, AWS, GitHub, Hugging Face, Google API)
+    def api_repl(match: re.Match[str]) -> str:
+        stats["api_keys"] += 1
+        return "[API_KEY]"
+
+    text = OPENAI_KEY_PATTERN.sub(api_repl, text)
+    text = AWS_KEY_PATTERN.sub(api_repl, text)
+    text = GITHUB_KEY_PATTERN.sub(api_repl, text)
+    text = HF_KEY_PATTERN.sub(api_repl, text)
+    text = GOOGLE_KEY_PATTERN.sub(api_repl, text)
+
+    # 5. Generic Secrets
+    def generic_repl(match: re.Match[str]) -> str:
+        stats["api_keys"] += 1
+        key_name = match.group(1)
+        delimiter = match.group(2)
+        closing_quote = match.group(4)
+        return f"{key_name}{delimiter}[API_KEY]{closing_quote}"
+    text = GENERIC_SECRET_PATTERN.sub(generic_repl, text)
+
+    return text, stats
 
 
 def _extract_pdf(raw_bytes: bytes) -> tuple[str, Optional[str]]:
@@ -279,7 +363,15 @@ async def ingest_node(state: PipelineState) -> IngestOutput:
                 error=f"INGEST_EMPTY: text too short ({len(normalized_text)} chars)",
             )
 
-        masked_text = _mask_pii(normalized_text)
+        if settings.ENABLE_PII_MASKING:
+            masked_text, stats = _mask_pii(normalized_text)
+            non_zero_stats = {k: v for k, v in stats.items() if v > 0}
+            if non_zero_stats:
+                logger.info("PII masking completed: %s", json.dumps(non_zero_stats))
+        else:
+            masked_text = normalized_text
+            stats = None
+
         if len(masked_text) < MIN_TEXT_LENGTH:
             return _build_output(
                 raw_text=masked_text or None,
@@ -287,6 +379,7 @@ async def ingest_node(state: PipelineState) -> IngestOutput:
                 relevance_score=0.0,
                 status="rejected",
                 error=f"INGEST_EMPTY: text too short after masking ({len(masked_text)} chars)",
+                pii_stats=stats,
             )
 
         relevance = await _run_relevance_check(masked_text[:RELEVANCE_SNIPPET_CHARS])
@@ -297,6 +390,7 @@ async def ingest_node(state: PipelineState) -> IngestOutput:
                 relevance_score=relevance.relevance_score,
                 status="rejected",
                 error=f"DOCUMENT_REJECTED: {relevance.reason}",
+                pii_stats=stats,
             )
 
         return _build_output(
@@ -305,6 +399,7 @@ async def ingest_node(state: PipelineState) -> IngestOutput:
             relevance_score=relevance.relevance_score,
             status="ready_for_chunking",
             error=None,
+            pii_stats=stats,
         )
     except Exception as exc:
         logger.exception("Unhandled ingest failure")

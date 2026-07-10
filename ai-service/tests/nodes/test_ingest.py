@@ -238,3 +238,82 @@ def test_route_after_ingest_logic():
     assert ingest.route_after_ingest({"status": "rejected"}) == "format"
     # Default
     assert ingest.route_after_ingest({}) == "parse_to_chunks"
+
+
+@pytest.mark.asyncio
+async def test_mask_pii_detailed_categories(base_state, monkeypatch):
+    async def fake_relevance(_: str) -> ingest.RelevanceCheck:
+        return ingest.RelevanceCheck(
+            is_useful=True,
+            relevance_score=0.95,
+            reason="Software requirements content",
+        )
+
+    monkeypatch.setattr(ingest, "_run_relevance_check", fake_relevance)
+
+    text = (
+        "Project config: we use openai token sk-proj-1234567890abcdef1234567890abcdef12345 "
+        "and AWS credentials AKIA1234567890ABCDEF. "
+        "GitHub token is ghp_1234567890abcdef1234567890abcdef1234. "
+        "Google API key AIzaSy1234567890abcdef1234567890abcdef1. "
+        "Huggingface token hf_1234567890abcdef1234567890abcdef12. "
+        "Generic credentials: db_password = 'my_super_secret_password_123'. "
+        "Valid Credit Card: 4012888888881881. "
+        "Invalid Credit Card: 4012888888881882. "
+        "False Positive Check: This project has 200 users and costs $5000. Transaction ID 123456."
+    )
+
+    state = base_state.copy()
+    state["file_type"] = "text"
+    state["raw_bytes"] = text.encode("utf-8")
+
+    # Verify masking is active by default
+    result = await ingest.ingest_node(state)
+    assert result["status"] == "ready_for_chunking"
+    assert result["pii_stats"] is not None
+    assert result["pii_stats"]["api_keys"] == 6  # OpenAI, AWS, GitHub, Google, HF, db_password
+    assert result["pii_stats"]["credit_cards"] == 1  # only the Luhn valid one
+
+    masked_text = result["raw_text"]
+    assert "[API_KEY]" in masked_text
+    assert "[CREDIT_CARD]" in masked_text
+    assert "sk-proj-" not in masked_text
+    assert "AKIA" not in masked_text
+    assert "ghp_" not in masked_text
+    assert "AIzaSy" not in masked_text
+    assert "hf_" not in masked_text
+    assert "my_super_secret_password_123" not in masked_text
+    
+    # Valid CC masked
+    assert "4012888888881881" not in masked_text
+    # Invalid CC NOT masked
+    assert "4012888888881882" in masked_text
+    # Normal numbers NOT masked
+    assert "200" in masked_text
+    assert "5000" in masked_text
+    assert "123456" in masked_text
+
+
+@pytest.mark.asyncio
+async def test_pii_masking_config_disabled(base_state, monkeypatch):
+    async def fake_relevance(_: str) -> ingest.RelevanceCheck:
+        return ingest.RelevanceCheck(
+            is_useful=True,
+            relevance_score=0.95,
+            reason="Software requirements content",
+        )
+
+    monkeypatch.setattr(ingest, "_run_relevance_check", fake_relevance)
+    monkeypatch.setattr(ingest.settings, "ENABLE_PII_MASKING", False)
+
+    text = "We use credit card 4012888888881881 and email contact@example.com."
+    state = base_state.copy()
+    state["file_type"] = "text"
+    state["raw_bytes"] = text.encode("utf-8")
+
+    result = await ingest.ingest_node(state)
+    assert result["status"] == "ready_for_chunking"
+    assert result["pii_stats"] is None
+    assert "4012888888881881" in result["raw_text"]
+    assert "contact@example.com" in result["raw_text"]
+

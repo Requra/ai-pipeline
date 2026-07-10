@@ -61,6 +61,7 @@ class Settings:
     # full prompts, and full model responses never reach production logs. Access
     # via `settings.debug_llm_io_enabled` which enforces the production override.
     DEBUG_LLM_IO: bool = _env_flag("DEBUG_LLM_IO")
+    ENABLE_PII_MASKING: bool = _env_flag("ENABLE_PII_MASKING", "true")
 
     # Comma-separated browser origins for CORS (direct-demo endpoints).
     ALLOWED_ORIGINS_RAW: Optional[str] = os.getenv("ALLOWED_ORIGINS")
