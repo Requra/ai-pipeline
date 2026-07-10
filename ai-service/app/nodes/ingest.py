@@ -152,7 +152,7 @@ def _extract_from_state(state: PipelineState, file_type: str) -> tuple[str, Opti
     if file_type == "docx":
         return _extract_docx(raw_bytes)
 
-    if file_type == "text":
+    if file_type in ("text", "document"):
         if not raw_bytes:
             return "", None
         try:

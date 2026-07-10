@@ -11,23 +11,29 @@ logger = logging.getLogger(__name__)
 CHUNK_SIZE_CHARS = 3000  # Approx 500-700 tokens
 CHUNK_OVERLAP_CHARS = 500
 
+
 def _create_chunk(
     job_id: str, 
     text: str, 
     index: int, 
     start_char: int, 
-    page: Optional[int] = None
+    page: Optional[int] = None,
+    document_id: Optional[str] = None
 ) -> SourceChunk:
     """Helper to create a SourceChunk with metadata."""
+    page_str = "None" if page is None else str(page)
+    chunk_id = f"chk_{job_id}_{document_id}_p{page_str}_c{index}" if document_id else f"chk_{job_id}_{index}"
     return SourceChunk(
-        chunk_id=f"chk_{job_id}_{index}",
+        chunk_id=chunk_id,
         text=text,
         start_char=start_char,
         end_char=start_char + len(text),
-        page_number=page
+        page_number=page,
+        document_id=document_id
     )
 
-def _chunk_pdf_pages(job_id: str, raw_text: str) -> List[SourceChunk]:
+
+def _chunk_pdf_pages(job_id: str, raw_text: str, document_id: Optional[str] = None) -> List[SourceChunk]:
     """Split text by form-feed markers indicating pages."""
     pages = raw_text.split('\f')
     chunks = []
@@ -39,12 +45,13 @@ def _chunk_pdf_pages(job_id: str, raw_text: str) -> List[SourceChunk]:
             current_pos += len(page_text) + 1 # +1 for \f
             continue
             
-        chunks.append(_create_chunk(job_id, clean_page, i, current_pos, page=i+1))
+        chunks.append(_create_chunk(job_id, clean_page, i, current_pos, page=i+1, document_id=document_id))
         current_pos += len(page_text) + 1
         
     return chunks
 
-def _chunk_text_sliding_window(job_id: str, raw_text: str) -> List[SourceChunk]:
+
+def _chunk_text_sliding_window(job_id: str, raw_text: str, document_id: Optional[str] = None) -> List[SourceChunk]:
     """Split text into overlapping chunks of fixed character length."""
     chunks = []
     if not raw_text:
@@ -65,7 +72,7 @@ def _chunk_text_sliding_window(job_id: str, raw_text: str) -> List[SourceChunk]:
                 end = start + last_space
                 chunk_text = raw_text[start:end]
         
-        chunks.append(_create_chunk(job_id, chunk_text, index, start))
+        chunks.append(_create_chunk(job_id, chunk_text, index, start, document_id=document_id))
         
         index += 1
         start = end - CHUNK_OVERLAP_CHARS
@@ -75,7 +82,9 @@ def _chunk_text_sliding_window(job_id: str, raw_text: str) -> List[SourceChunk]:
             
     return chunks
 
+
 from app.progress import update_progress
+
 
 async def parse_to_chunks_node(state: PipelineState) -> dict:
     """
@@ -89,34 +98,47 @@ async def parse_to_chunks_node(state: PipelineState) -> dict:
     raw_text = state.get("raw_text")
     
     # If chunks already exist (e.g. from transcription), pass them through
-    # Phase 4 will handle transcribing directly to chunks.
     if state.get("chunks"):
         return {"status": "chunks_parsed"}
 
-    if not raw_text:
-        # If it's audio, we don't have text yet (Phase 4 will handle this)
-        if file_type == "audio":
-            return {"status": "waiting_for_transcription"}
-        return {
-            "status": "error",
-            "error": "CHUNK_FAILED: No text provided for chunking"
-        }
+    source_docs = state.get("source_documents") or []
+    has_source_docs_with_text = any(doc.get("text") for doc in source_docs)
 
     chunks: List[SourceChunk] = []
     
     try:
-        if file_type == "pdf":
-            chunks = _chunk_pdf_pages(job_id, raw_text)
-        elif file_type == "docx":
-            # For now DOCX is treated as text, but separated by paragraphs in ingest.
-            # We use sliding window for stability until Phase 5.
-            chunks = _chunk_text_sliding_window(job_id, raw_text)
+        if has_source_docs_with_text:
+            chunk_idx = 0
+            for doc in source_docs:
+                doc_text = doc.get("text") or ""
+                doc_id = doc.get("document_id")
+                doc_file_type = doc.get("file_type") or "text"
+                
+                if doc_file_type == "pdf":
+                    doc_chunks = _chunk_pdf_pages(job_id, doc_text, document_id=doc_id)
+                else:
+                    doc_chunks = _chunk_text_sliding_window(job_id, doc_text, document_id=doc_id)
+                    
+                chunks.extend(doc_chunks)
         else:
-            # text or fallback
-            chunks = _chunk_text_sliding_window(job_id, raw_text)
+            # Legacy / Single document fallback
+            if not raw_text:
+                if file_type == "audio":
+                    return {"status": "waiting_for_transcription"}
+                return {
+                    "status": "error",
+                    "error": "CHUNK_FAILED: No text provided for chunking"
+                }
 
-        if not chunks and raw_text:
-            chunks = [_create_chunk(job_id, raw_text, 0, 0)]
+            if file_type == "pdf":
+                chunks = _chunk_pdf_pages(job_id, raw_text)
+            elif file_type == "docx":
+                chunks = _chunk_text_sliding_window(job_id, raw_text)
+            else:
+                chunks = _chunk_text_sliding_window(job_id, raw_text)
+
+            if not chunks and raw_text:
+                chunks = [_create_chunk(job_id, raw_text, 0, 0)]
 
         return {
             "chunks": chunks,
