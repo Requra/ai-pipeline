@@ -23,6 +23,7 @@ class SourceChunk(BaseModel):
     speaker: Optional[str] = None
     start_time_sec: Optional[float] = None
     end_time_sec: Optional[float] = None
+    document_id: Optional[str] = None
 
 class RetrievedChunk(BaseModel):
     """A chunk returned by the lexical retriever, annotated with its score.
@@ -46,6 +47,7 @@ class EvidenceSpan(BaseModel):
     page_number: Optional[int] = None
     speaker: Optional[str] = None
     timestamp: Optional[str] = None
+    document_id: Optional[str] = None
 
 class ExtractedRequirement(BaseModel):
     id: int

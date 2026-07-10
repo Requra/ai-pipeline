@@ -38,6 +38,7 @@ def make_initial_state(
     project_id: Optional[str] = None,
     enable_embeddings: bool = False,
     enable_hybrid_retrieval: bool = False,
+    source_documents: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Build the canonical initial ``PipelineState`` dict."""
     return {
@@ -51,6 +52,7 @@ def make_initial_state(
         "enable_embeddings": enable_embeddings,
         "enable_hybrid_retrieval": enable_hybrid_retrieval,
         "source_metadata": None,
+        "source_documents": source_documents or [],
         "chunks": [],
         "source_index_id": None,
         "retrieval_stats": None,
@@ -163,6 +165,7 @@ async def build_worker_initial_state(
         for ref in source_documents:
             text = await backend_client.fetch_document_text(ref)
             if text:
+                ref["text"] = text
                 texts.append(text)
         if texts:
             raw_text = "\n\n".join(texts)
@@ -189,4 +192,5 @@ async def build_worker_initial_state(
         project_id=job.project_id,
         enable_embeddings=job.options.enable_embeddings,
         enable_hybrid_retrieval=job.options.enable_hybrid_retrieval,
+        source_documents=source_documents,
     )

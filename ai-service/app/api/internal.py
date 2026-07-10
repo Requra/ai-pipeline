@@ -109,6 +109,7 @@ async def _build_state_and_cache(req: CreateJobRequest, job) -> tuple[Dict[str, 
             for ref in source_docs_payload:
                 text = await client.fetch_document_text(ref)
                 if text:
+                    ref["text"] = text
                     texts.append(text)
             if texts:
                 raw_text = "\n\n".join(texts)
@@ -123,6 +124,7 @@ async def _build_state_and_cache(req: CreateJobRequest, job) -> tuple[Dict[str, 
         project_id=req.project_id,
         enable_embeddings=req.options.enable_embeddings,
         enable_hybrid_retrieval=req.options.enable_hybrid_retrieval,
+        source_documents=source_docs_payload,
     )
     cache_input = {
         "raw_text": req.content or "",

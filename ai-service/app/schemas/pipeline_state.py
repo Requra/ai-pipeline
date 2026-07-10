@@ -33,6 +33,7 @@ class PipelineState(TypedDict):
     # --- Intermediate State ---
     raw_text: Optional[str]
     source_metadata: Optional[DocumentSource]
+    source_documents: List[Dict[str, Any]]
     
     # NOTE: For MVP we use simple replacement semantics for list fields.
     # Previously these fields used Annotated([...], operator.add) reducers to
