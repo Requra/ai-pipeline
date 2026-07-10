@@ -40,7 +40,7 @@ def result_to_public(job_result: Any) -> Dict[str, Any]:
 async def persist_source_documents_and_chunks(
     stores: StoreBundle, job: AiJobRecord, state: Dict[str, Any]
 ) -> List[SourceChunkRecord]:
-    """Persist a source-document row + all parsed chunks for the job.
+    """Persist all source-document rows + all parsed chunks for the job.
 
     Returns the persisted chunk records (used downstream for embeddings).
     """
@@ -48,42 +48,80 @@ async def persist_source_documents_and_chunks(
     if not chunks:
         return []
 
-    # One synthetic source-document row capturing the input's metadata. The AI
-    # DB stores only the reference/metadata, never the raw file bytes.
-    src_meta = state.get("source_metadata")
-    file_name = "unknown"
-    mime_type = "application/octet-stream"
-    if src_meta is not None:
-        file_name = getattr(src_meta, "filename", file_name)
-        mime_type = getattr(src_meta, "mime_type", mime_type)
-    else:
-        meta = state.get("metadata") or {}
-        file_name = meta.get("filename") or meta.get("file_name") or file_name
+    doc_records: List[SourceDocumentRecord] = []
+    doc_map: Dict[str, str] = {}
+    default_doc_id: Optional[str] = None
 
-    doc = SourceDocumentRecord(
-        job_id=job.job_id,
-        tenant_id=job.tenant_id,
-        project_id=job.project_id,
-        source_type=str(state.get("file_type") or "text"),
-        file_name=file_name,
-        mime_type=mime_type,
-        language=job.options.language,
-    )
-    document_id: Optional[str] = None
-    try:
-        saved = await stores.chunks.save_documents([doc])
-        document_id = saved[0].id if saved else None
-    except Exception as exc:  # pragma: no cover - store dependent
-        logger.warning("persist source document failed: %s", type(exc).__name__)
+    state_source_docs = state.get("source_documents") or []
+    if state_source_docs:
+        for idx, doc in enumerate(state_source_docs, start=1):
+            d_id = doc.get("document_id") or f"SRC-{str(idx).zfill(3)}"
+            doc_rec = SourceDocumentRecord(
+                job_id=job.job_id,
+                tenant_id=job.tenant_id,
+                project_id=job.project_id,
+                source_type=doc.get("file_type") or "text",
+                file_name=doc.get("filename") or doc.get("file_name") or d_id,
+                mime_type=doc.get("mime_type") or "application/octet-stream",
+                language=job.options.language,
+            )
+            doc_records.append(doc_rec)
+            
+        try:
+            saved_docs = await stores.chunks.save_documents(doc_records)
+            for idx, doc_rec in enumerate(doc_records):
+                d_id = state_source_docs[idx].get("document_id") or f"SRC-{str(idx+1).zfill(3)}"
+                if idx < len(saved_docs):
+                    doc_map[d_id] = saved_docs[idx].id
+                    if default_doc_id is None:
+                        default_doc_id = saved_docs[idx].id
+        except Exception as exc:  # pragma: no cover - store dependent
+            logger.warning("persist source documents failed: %s", type(exc).__name__)
+    
+    if not doc_records:
+        src_meta = state.get("source_metadata")
+        file_name = "unknown"
+        mime_type = "application/octet-stream"
+        if src_meta is not None:
+            file_name = getattr(src_meta, "filename", file_name)
+            mime_type = getattr(src_meta, "mime_type", mime_type)
+        else:
+            meta = state.get("metadata") or {}
+            file_name = meta.get("filename") or meta.get("file_name") or file_name
+
+        doc = SourceDocumentRecord(
+            job_id=job.job_id,
+            tenant_id=job.tenant_id,
+            project_id=job.project_id,
+            source_type=str(state.get("file_type") or "text"),
+            file_name=file_name,
+            mime_type=mime_type,
+            language=job.options.language,
+        )
+        try:
+            saved = await stores.chunks.save_documents([doc])
+            default_doc_id = saved[0].id if saved else None
+        except Exception as exc:  # pragma: no cover - store dependent
+            logger.warning("persist source document fallback failed: %s", type(exc).__name__)
 
     records: List[SourceChunkRecord] = []
     for idx, ch in enumerate(chunks):
+        ch_doc_id = getattr(ch, "document_id", None)
+        if not ch_doc_id and getattr(ch, "chunk_id", None) and state_source_docs:
+            for doc in state_source_docs:
+                d_id = doc.get("document_id")
+                if d_id and f"_{d_id}_" in ch.chunk_id:
+                    ch_doc_id = d_id
+                    break
+
+        resolved_doc_id = doc_map.get(ch_doc_id) if ch_doc_id else default_doc_id
+
         records.append(
             SourceChunkRecord(
                 job_id=job.job_id,
                 tenant_id=job.tenant_id,
                 project_id=job.project_id,
-                source_document_id=document_id,
+                source_document_id=resolved_doc_id,
                 chunk_id=getattr(ch, "chunk_id", f"chunk-{idx}"),
                 chunk_index=idx,
                 text=getattr(ch, "text", ""),

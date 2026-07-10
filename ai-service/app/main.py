@@ -52,6 +52,7 @@ from fastapi import (
     HTTPException,
     Request,
     UploadFile,
+    Response,
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -176,6 +177,24 @@ app.include_router(internal_router)
 async def health_check():
     """Liveness probe for Docker/monitoring — lightweight, no dependencies."""
     return {"status": "healthy", "service": "ai-pipeline"}
+
+
+# ---------------------------------------------------------------------------
+# Dev Mock Document Endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/mock-doc-a")
+def get_mock_doc_a():
+    """Returns mock PDF pages separated by Form-Feed (\\f)."""
+    content = "This is Page 1 content containing authentication requirements.\\fThis is Page 2 content detailing validation schemas."
+    return Response(content=content, media_type="text/plain")
+
+
+@app.get("/mock-doc-b")
+def get_mock_doc_b():
+    """Returns mock plain text."""
+    content = "The system must process card payments and return a confirmation code."
+    return Response(content=content, media_type="text/plain")
 
 
 @app.get("/ready")
