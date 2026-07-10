@@ -19,9 +19,12 @@ Rules honoured here:
 from __future__ import annotations
 
 import os
-from typing import List, Optional
+import logging
+from typing import List, Optional, Dict, Any
 
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 # Load environment variables from .env if present
 load_dotenv()
@@ -84,6 +87,7 @@ class Settings:
 
     # LLM Settings — default reasoning provider: 'openrouter', 'openai', or 'groq'.
     LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "openrouter").lower().strip()
+    LLM_FALLBACK_CHAIN: Optional[str] = os.getenv("LLM_FALLBACK_CHAIN")
     GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
     # Transcribe Settings
@@ -188,6 +192,20 @@ class Settings:
     @property
     def allowed_origins(self) -> List[str]:
         return _split_csv(self.ALLOWED_ORIGINS_RAW)
+
+    @property
+    def llm_fallback_chain(self) -> List[Dict[str, Any]]:
+        if not self.LLM_FALLBACK_CHAIN:
+            return []
+        import json
+        try:
+            parsed = json.loads(self.LLM_FALLBACK_CHAIN)
+            if isinstance(parsed, list):
+                return parsed
+            return []
+        except Exception as e:
+            logger.warning("Failed to parse LLM_FALLBACK_CHAIN: %s", e)
+            return []
 
 
 settings = Settings()
