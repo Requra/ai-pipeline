@@ -220,7 +220,36 @@ async def format_node(state: PipelineState) -> dict:
         elif meta.get("file_name"):
             file_name = meta.get("file_name")
             
-    if file_name != "unknown" or file_type != "unknown" or source_metadata:
+    state_source_docs = state.get("source_documents") or []
+    if state_source_docs:
+        for idx, doc in enumerate(state_source_docs, start=1):
+            doc_id = doc.get("document_id") or f"SRC-{str(idx).zfill(3)}"
+            doc_file_type = doc.get("file_type") or "text"
+            doc_name = doc.get("filename") or doc.get("file_name") or doc_id
+            doc_mime_type = doc.get("mime_type") or "application/octet-stream"
+
+            s_type = "unknown"
+            if doc_file_type:
+                dft_lower = doc_file_type.lower()
+                if dft_lower in ("text", "txt"):
+                    s_type = "text"
+                elif dft_lower == "pdf":
+                    s_type = "pdf"
+                elif dft_lower in ("docx", "doc"):
+                    s_type = "docx"
+                elif dft_lower in ("audio", "mp3", "wav", "m4a"):
+                    s_type = "audio"
+                elif dft_lower == "transcript":
+                    s_type = "transcript"
+
+            source_docs.append(SourceDocumentV1(
+                source_id=doc_id,
+                source_type=s_type,
+                file_name=doc_name,
+                mime_type=doc_mime_type,
+                language="en"
+            ))
+    elif file_name != "unknown" or file_type != "unknown" or source_metadata:
         source_docs.append(SourceDocumentV1(
             source_id="SRC-001",
             source_type=source_type,
@@ -248,10 +277,33 @@ async def format_node(state: PipelineState) -> dict:
         # Source refs mapping
         source_refs = []
         for ev in getattr(r, "evidence", []) or []:
+            ref_doc_id = getattr(ev, "document_id", None)
+            
+            # Robust fallback: if ref_doc_id is not set, parse it from chunk_id
+            if not ref_doc_id and getattr(ev, "chunk_id", None) and state_source_docs:
+                for doc in state_source_docs:
+                    d_id = doc.get("document_id")
+                    if d_id and f"_{d_id}_" in ev.chunk_id:
+                        ref_doc_id = d_id
+                        break
+
+            ref_doc_name = file_name
+            ref_source_id = "SRC-001"
+            ref_source_type = "document" if source_type != "audio" else "audio"
+
+            if ref_doc_id and state_source_docs:
+                for doc in state_source_docs:
+                    if doc.get("document_id") == ref_doc_id:
+                        ref_source_id = ref_doc_id
+                        ref_doc_name = doc.get("filename") or doc.get("file_name") or ref_doc_id
+                        dft_lower = (doc.get("file_type") or "text").lower()
+                        ref_source_type = "audio" if dft_lower in ("audio", "mp3", "wav", "m4a") else "document"
+                        break
+
             source_refs.append(SourceRefV1(
-                source_id="SRC-001",
-                source_type="document" if source_type != "audio" else "audio",
-                document_name=file_name,
+                source_id=ref_source_id,
+                source_type=ref_source_type,
+                document_name=ref_doc_name,
                 page=ev.page_number,
                 chunk_id=ev.chunk_id,
                 quote=ev.quote,
@@ -302,10 +354,33 @@ async def format_node(state: PipelineState) -> dict:
         # Source refs mapping
         source_refs = []
         for ev in getattr(s, "evidence_reference", []) or []:
+            ref_doc_id = getattr(ev, "document_id", None)
+            
+            # Robust fallback: if ref_doc_id is not set, parse it from chunk_id
+            if not ref_doc_id and getattr(ev, "chunk_id", None) and state_source_docs:
+                for doc in state_source_docs:
+                    d_id = doc.get("document_id")
+                    if d_id and f"_{d_id}_" in ev.chunk_id:
+                        ref_doc_id = d_id
+                        break
+
+            ref_doc_name = file_name
+            ref_source_id = "SRC-001"
+            ref_source_type = "document" if source_type != "audio" else "audio"
+
+            if ref_doc_id and state_source_docs:
+                for doc in state_source_docs:
+                    if doc.get("document_id") == ref_doc_id:
+                        ref_source_id = ref_doc_id
+                        ref_doc_name = doc.get("filename") or doc.get("file_name") or ref_doc_id
+                        dft_lower = (doc.get("file_type") or "text").lower()
+                        ref_source_type = "audio" if dft_lower in ("audio", "mp3", "wav", "m4a") else "document"
+                        break
+
             source_refs.append(SourceRefV1(
-                source_id="SRC-001",
-                source_type="document" if source_type != "audio" else "audio",
-                document_name=file_name,
+                source_id=ref_source_id,
+                source_type=ref_source_type,
+                document_name=ref_doc_name,
                 page=ev.page_number,
                 chunk_id=ev.chunk_id,
                 quote=ev.quote,

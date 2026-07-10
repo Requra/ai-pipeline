@@ -164,12 +164,17 @@ async def retrieve_evidence_node(state: PipelineState) -> dict:
             snippet = _best_snippet(hit.text, query_tokens)
             if not snippet:
                 continue
+            
+            orig_chunk = chunks_by_id.get(hit.chunk_id)
+            orig_doc_id = getattr(orig_chunk, "document_id", None) if orig_chunk else None
+
             req.evidence.append(EvidenceSpan(
                 chunk_id=hit.chunk_id,
                 quote=snippet,
                 page_number=hit.page_number,
                 speaker=hit.speaker,
                 timestamp=hit.timestamp,
+                document_id=orig_doc_id,
             ))
             cited.add(hit.chunk_id)
 

@@ -2,10 +2,9 @@
 from app.schemas.pipeline_state import PipelineState
 from app.schemas.items import ClassifiedRequirement
 from app.llm import get_llm
-from langchain_core.prompts import ChatPromptTemplate
 from app.prompts.loader import load_prompt
 from app.prompts.registry import PromptId
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from typing import List, Literal, Dict
 from collections import defaultdict
 import json

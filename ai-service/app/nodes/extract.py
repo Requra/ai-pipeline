@@ -301,7 +301,8 @@ async def process_chunk(llm, chunk: SourceChunk) -> List[ExtractedRequirement]:
                     quote=chunk.text[:min(200, len(chunk.text))],  # Snippet from ORIGINAL text
                     page_number=chunk.page_number,
                     speaker=chunk.speaker,
-                    timestamp=str(chunk.start_time_sec) if chunk.start_time_sec is not None else None
+                    timestamp=str(chunk.start_time_sec) if chunk.start_time_sec is not None else None,
+                    document_id=getattr(chunk, "document_id", None)
                 )]
                 r.needs_review = True
                 r.review_reason = (r.review_reason or "") + " [AUTO_FIX: Missing evidence quote fallback to source snippet]"
@@ -332,6 +333,8 @@ async def process_chunk(llm, chunk: SourceChunk) -> List[ExtractedRequirement]:
                         ev.speaker = chunk.speaker
                     if ev.timestamp is None and chunk.start_time_sec is not None:
                         ev.timestamp = str(chunk.start_time_sec)
+                    if ev.document_id is None:
+                        ev.document_id = getattr(chunk, "document_id", None)
 
             if penalty < 1.0:
                 try:
