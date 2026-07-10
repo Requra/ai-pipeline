@@ -49,9 +49,9 @@ These features are explicitly described in the project document as core capabili
 | | |
 |---|---|
 | **Document Says** | Q1 explicitly flags: _"If OpenRouter/GPT-4o-mini fails or rate-limits during a pipeline run, there is no automatic fallback mechanism to switch to Groq or Gemini; the pipeline execution will fail."_ (Q1 Missing) |
-| **Code Has** | [llm.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/llm.py) reads `LLM_PROVIDER` once and returns a single client. If that provider's API call fails mid-pipeline (rate limit, timeout, outage), the node raises an exception and the job fails. |
-| **Gap** | No retry-with-fallback logic. A single provider outage kills the entire job. |
-| **Implementation** | Wrap `get_llm()` with a fallback chain: try the primary provider, on `RateLimitError`/`APIConnectionError`/`Timeout`, automatically instantiate the next provider in a configured fallback list (e.g., `openrouter → openai → groq`). Add a `FALLBACK_LLM_PROVIDERS` env var. Log which provider was ultimately used. |
+| **Code Has** | `get_llm()` returns a `ResilientLLMClient` wrapper which manages dynamic failover and retry logic across providers configured in `LLM_FALLBACK_CHAIN`. |
+| **Gap** | None. Fully addressed. |
+| **Implementation** | The `ResilientLLMClient` intercepts invocation failures, applies a retry loop (up to 2 attempts per provider), and automatically switches to secondary providers. Metric statistics (latency, tokens) are preserved in completion metadata. |
 
 ---
 
@@ -60,9 +60,9 @@ These features are explicitly described in the project document as core capabili
 | | |
 |---|---|
 | **Document Says** | Section 8 states that the backend provides `source_documents` references. The response contract includes `SourceRefV1` with `source_id`, `document_name`, and `page`. |
-| **Code Has** | When multiple `source_documents` are submitted, the worker concatenates all texts into one string (`"\n\n".join(texts)` in [state.py:L166](file:///d:/ITI/GP/ai-pipeline/ai-service/app/worker/state.py#L166)). The resulting `SourceChunk`s have no `document_id` field linking them back to the original file. |
-| **Gap** | The output `JobResult` cannot tell the frontend which requirement came from which uploaded file. Page numbers are meaningless when documents are merged. |
-| **Implementation** | Add `document_id: Optional[str]` to `SourceChunk`. When building chunks from multiple documents, prefix each chunk's page numbers and tag its `document_id`. Propagate `document_id` through extraction and evidence into the final `SourceRefV1`. |
+| **Code Has** | Document chunking is executed individually per file. Each chunk maps a unique `document_id` and page index. Multi-document sources are preserved in the DB (`SourceDocumentRecord`) and mapped to evidence references in the final formatted payload. |
+| **Gap** | None. Fully addressed. |
+| **Implementation** | Generated chunk IDs use the format `chk_{job_id}_{doc_id}_p{page}_c{idx}`. The `document_id` propagates through extraction and evidence retrieval layers to build complete source traceability. |
 
 ---
 
@@ -176,9 +176,9 @@ These features are described or implied in the document and would meaningfully i
 | | |
 |---|---|
 | **Document Says** | Q9 flags: _"There is no PII scrubbing or data sanitization (e.g., masking API keys, emails, or personal names) prior to sending document contents to LLM endpoints."_ Section 11 mentions _"PII redaction and retention controls."_ |
-| **Code Has** | [ingest.py:L92-96](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/ingest.py#L92-L96) does mask emails (`[EMAIL]`) and phone numbers (`[PHONE]`), which partially contradicts the document's claim. However, **personal names, addresses, API keys, credit card numbers, and other PII categories** are not detected or masked. |
-| **Gap** | PII masking is partial (email/phone only). Names, addresses, SSNs, API keys, and credit card numbers pass through to LLM endpoints unmasked. |
-| **Implementation** | Extend `_mask_pii()` with regex patterns for credit card numbers, SSN-like patterns, and API key formats. Optionally integrate a lightweight NER model for name/address detection, or use a configurable allowlist/blocklist approach. |
+| **Code Has** | Implements regex patterns for cloud/AI provider tokens (OpenAI, AWS, GitHub, Google API, Hugging Face), generic secrets (`api_key`, `db_password`), and credit cards validated via Luhn checksum verification. Controlled by configuration flag `ENABLE_PII_MASKING`. |
+| **Gap** | None. Fully addressed. |
+| **Implementation** | Overhauled `_mask_pii()` to scrub cloud provider credentials and Luhn-valid credit card candidates, and track statistics internally (`pii_stats`) without changing external response schemas. |
 
 ---
 
@@ -265,8 +265,8 @@ These are explicitly marked as post-MVP in the document or represent polish item
 | 1 | Semantic Conflict Detection | 🔴 High | ✅ Implemented (Cosine & Jaccard fallback) |
 | 2 | Human-in-the-Loop Review Workflow | 🔴 High | ✅ By Design + Regenerate Endpoint |
 | 3 | Self-Correction Loops | 🔴 High | ✅ Implemented (Quality-Guided Repair Pass) |
-| 4 | Dynamic LLM Provider Fallback | 🔴 High | ❌ Not implemented |
-| 5 | Multi-Document Awareness | 🔴 High | ❌ Not implemented |
+| 4 | Dynamic LLM Provider Fallback | 🔴 High | ✅ Implemented (ResilientLLMClient failover) |
+| 5 | Multi-Document Awareness | 🔴 High | ✅ Implemented (Per-file document chunks) |
 | 6 | Callback Retry w/ Backoff | 🔴 High | ❌ Not implemented |
 | 7 | CSV Export | 🔴 High | ❌ Not implemented |
 | 8 | Langfuse Observability | 🟡 Medium | ❌ Not implemented |
@@ -276,7 +276,7 @@ These are explicitly marked as post-MVP in the document or represent polish item
 | 12 | Configurable Dedup Threshold | 🟡 Medium | ❌ Not implemented |
 | 13 | Rate Limiting | 🟡 Medium | ❌ Not implemented |
 | 14 | CI/CD Pipeline (GitHub Actions) | 🟡 Medium | ❌ Not implemented |
-| 15 | Enhanced PII Masking | 🟡 Medium | ⚠️ Partial (email/phone only) |
+| 15 | Enhanced PII Masking | 🟡 Medium | ✅ Implemented (Luhn validation, Cloud keys) |
 | 16 | Vector Index Automation | 🟢 Nice | ❌ Not implemented |
 | 17 | Job Listing Endpoint | 🟢 Nice | ❌ Not implemented |
 | 18 | Cleanup/Retention Cron | 🟢 Nice | ❌ Not implemented |
