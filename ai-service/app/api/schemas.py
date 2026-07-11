@@ -34,7 +34,7 @@ class JobOptionsIn(BaseModel):
 
 class CreateJobRequest(BaseModel):
     job_id: str
-    tenant_id: str
+    tenant_id: Optional[str] = None
     project_id: str
     requested_by: Optional[str] = None
     user_id: Optional[str] = None

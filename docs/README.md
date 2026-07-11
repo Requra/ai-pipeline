@@ -25,6 +25,7 @@ This directory contains the structural architecture plans, API schemas, prompt m
 ### 📜 API Contracts
 * **[pipeline-contract.md](pipeline-contract.md)**: API request payload specifications for both development (local/synchronous) and internal production (asynchronous background task) endpoints.
 * **[contracts/pipeline-response-v1.md](contracts/pipeline-response-v1.md)**: Frozen V1 output contract (`JobResult`) schema details and JSON examples (Golden Success, Partial Failure, and System Failure).
+* **[contracts/mvp-results-dashboard-api-contract.md](contracts/mvp-results-dashboard-api-contract.md)**: Comprehensive contract detailing Client ↔ Backend Server ↔ AI Pipeline integration for the Results Dashboard.
 
 ### 📈 Decisions & History
 * **[adr/](adr/)**: Directory containing Architecture Decision Records (ADRs) tracking foundational design and framework selections.
