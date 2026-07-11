@@ -18,8 +18,9 @@ from __future__ import annotations
 
 import logging
 from typing import Any, Dict, List, Optional
+import uuid
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 
 import json
@@ -27,7 +28,7 @@ import asyncio
 from pydantic import ValidationError
 
 from app.api.deps import get_request_id, require_internal_auth
-from app.api.schemas import CreateJobRequest, RegenerateStoryRequest
+from app.api.schemas import CreateJobRequest, RegenerateStoryRequest, ProcessJsonRequest
 from app.llm import get_llm
 from app.prompts.loader import load_prompt
 from app.prompts.registry import PromptId
@@ -35,6 +36,7 @@ from app.api.service import (
     handle_job_creation,
     internal_status_view,
     resolve_pipeline,
+    prepare_and_dispatch_job,
 )
 from app.config import settings
 from app.services.job_store import sanitize_job_id
@@ -46,6 +48,9 @@ from app.worker.state import build_worker_initial_state, make_initial_state
 logger = logging.getLogger("app.api.internal")
 
 router = APIRouter(prefix="/internal", tags=["internal"], dependencies=[Depends(require_internal_auth)])
+
+
+MOCK_DOCUMENT_STORAGE: Dict[str, bytes] = {}
 
 
 def _links(job_id: str) -> Dict[str, str]:
@@ -70,69 +75,18 @@ def _options_from_request(req: CreateJobRequest) -> JobOptions:
     )
 
 
-async def _build_state_and_cache(req: CreateJobRequest, job) -> tuple[Dict[str, Any], Dict[str, Any]]:
-    """Build the in-process initial state and the Redis cache_input for a job."""
-    metadata: Dict[str, Any] = {
-        "tenant_id": req.tenant_id,
-        "project_id": req.project_id,
-    }
-    source_docs_payload: List[Dict[str, Any]] = [
-        {
-            "document_id": d.document_id,
-            "file_type": d.file_type,
-            "mime_type": d.mime_type,
-            "storage_key": d.storage_key,
-            "file_url": d.file_url,
-            "sha256_hash": d.hash,
-            "page_count": d.page_count,
-        }
-        for d in req.source_documents
-    ]
-
-    raw_text = ""
-    file_type = "text"
-    if req.input_type in ("text", "backend_transcript"):
-        raw_text = req.content or ""
-        file_type = "text" if req.input_type == "text" else "transcript"
-        if req.source_documents:
-            metadata["filename"] = req.source_documents[0].document_id
-    else:  # backend_document / backend_audio
-        file_type = "document" if req.input_type == "backend_document" else "audio"
-        if req.source_documents:
-            metadata["filename"] = req.source_documents[0].document_id
-        # In-process (no worker): fetch backend text now so the job can run here.
-        if not settings.use_redis_queue:
-            from app.clients.backend import BackendDocumentClient
-
-            client = BackendDocumentClient()
-            texts: List[str] = []
-            for ref in source_docs_payload:
-                text = await client.fetch_document_text(ref)
-                if text:
-                    ref["text"] = text
-                    texts.append(text)
-            if texts:
-                raw_text = "\n\n".join(texts)
-                file_type = "text"
-
-    initial_state = make_initial_state(
-        job.job_id,
-        raw_text=raw_text,
-        file_type=file_type,
-        metadata=metadata,
-        tenant_id=req.tenant_id,
-        project_id=req.project_id,
-        enable_embeddings=req.options.enable_embeddings,
-        enable_hybrid_retrieval=req.options.enable_hybrid_retrieval,
-        source_documents=source_docs_payload,
+# Helper to build options from CreateJobRequest for fingerprinting
+def _options_from_request(req: CreateJobRequest) -> JobOptions:
+    o = req.options
+    return JobOptions(
+        generate_user_stories=o.generate_user_stories,
+        generate_summary=o.generate_summary,
+        enable_embeddings=o.enable_embeddings,
+        enable_hybrid_retrieval=o.enable_hybrid_retrieval,
+        language=o.language,
+        callback_url=o.callback_url,
+        priority=o.priority,
     )
-    cache_input = {
-        "raw_text": req.content or "",
-        "file_type": file_type,
-        "metadata": metadata,
-        "source_documents": source_docs_payload,
-    }
-    return initial_state, cache_input
 
 
 @router.post("/jobs", status_code=status.HTTP_202_ACCEPTED)
@@ -141,17 +95,7 @@ async def create_job(
     background_tasks: BackgroundTasks,
     request: Request,
 ):
-    """Create/enqueue a job — idempotent and race-safe by job_id.
-
-    A repeated ``job_id`` is handled per the request's fingerprint (production-
-    relevant fields only, see ``app.services.fingerprint``) and the existing
-    job's current status. See ``handle_job_creation`` for the full matrix:
-    running+same-payload -> 202 idempotent; running+different-payload -> 409;
-    completed/partial/rejected+same-payload -> 200 idempotent; failed/
-    cancelled+same-payload -> 200 (report only) unless ``reprocess=true``
-    (matching payload) -> 202 new attempt; any payload mismatch -> 409.
-    Concurrent identical requests race-safely produce exactly one dispatch.
-    """
+    """Create/enqueue a job — idempotent and race-safe by job_id."""
     request_id = get_request_id(request)
 
     # Validate job id.
@@ -184,19 +128,219 @@ async def create_job(
         return JSONResponse(status_code=outcome.http_status, content=outcome.body)
 
     rec = outcome.job
-    initial_state, cache_input = await _build_state_and_cache(req, rec)
-    await dispatch_job(
-        job_id,
-        initial_state=initial_state,
-        pipeline=resolve_pipeline(),
+    
+    # Resolve inputs for prepare_and_dispatch_job
+    raw_bytes = b""
+    raw_text = ""
+    file_type = "text"
+    audio_format = None
+    transcribe_options = {}
+
+    if req.input_type in ("text", "backend_transcript"):
+        raw_text = req.content or ""
+        file_type = "text" if req.input_type == "text" else "transcript"
+    else:  # backend_document / backend_audio
+        file_type = "document" if req.input_type == "backend_document" else "audio"
+
+    await prepare_and_dispatch_job(
+        req,
+        rec,
         background_tasks=background_tasks,
         request_id=request_id,
-        cache_input=cache_input,
+        raw_bytes=raw_bytes,
+        raw_text=raw_text,
+        file_type=file_type,
+        metadata={"tenant_id": req.tenant_id, "project_id": req.project_id},
+        audio_format=audio_format,
+        transcribe_options=transcribe_options,
     )
+    
     logger.info(
         "job dispatched job_id=%s tenant=%s project=%s input_type=%s attempt=%s request_id=%s",
         job_id, req.tenant_id, req.project_id, req.input_type, rec.attempt_number, request_id,
     )
+    return JSONResponse(status_code=outcome.http_status, content=outcome.body)
+
+
+@router.post("/process", status_code=status.HTTP_202_ACCEPTED)
+async def process_compatibility(
+    background_tasks: BackgroundTasks,
+    request: Request,
+    file: UploadFile = File(...),
+    job_id: str = Form(...),
+    project_id: str = Form(...),
+    tenant_id: Optional[str] = Form(None),
+    requested_by: Optional[str] = Form(None),
+    document_id: Optional[str] = Form(None),
+    metadata: str = Form("{}"),
+    callback_url: Optional[str] = Form(None),
+    language: Optional[str] = Form("en"),
+    reprocess: bool = Form(False),
+):
+    """File/audio compatibility upload endpoint (multipart/form-data)."""
+    request_id = get_request_id(request)
+
+    # 1. Parse metadata JSON
+    try:
+        parsed_metadata = json.loads(metadata) if metadata else {}
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid metadata JSON: {exc.msg}")
+    if not isinstance(parsed_metadata, dict):
+        raise HTTPException(status_code=400, detail="metadata must be a JSON object")
+
+    # 2. Validate job ID
+    try:
+        sanitized_job_id = sanitize_job_id(job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"invalid job_id: {exc}") from None
+
+    # 3. Validate project ID
+    if not project_id or not project_id.strip():
+        raise HTTPException(status_code=400, detail="project_id is required")
+
+    # 4. Read bytes with a bounded strategy
+    file_bytes = await file.read()
+    file_size = len(file_bytes)
+    if file_size == 0:
+        raise HTTPException(status_code=400, detail="file is empty")
+
+    # 5. Detect type and signatures
+    from app.services.file_inspection import detect_mime_and_type, MAX_DOC_SIZE, MAX_AUDIO_SIZE
+    import hashlib
+
+    file_type, mime_type, subtype = detect_mime_and_type(file_bytes, file.filename)
+    if file_type == "unknown":
+        raise HTTPException(status_code=415, detail="Unsupported media type or signature not recognized")
+
+    # Bounded size verification
+    if file_type == "audio":
+        if file_size > MAX_AUDIO_SIZE:
+            raise HTTPException(status_code=413, detail=f"Audio file too large ({file_size} > {MAX_AUDIO_SIZE})")
+    else:
+        if file_size > MAX_DOC_SIZE:
+            raise HTTPException(status_code=413, detail=f"Document too large ({file_size} > {MAX_DOC_SIZE})")
+
+    file_hash = hashlib.sha256(file_bytes).hexdigest()
+
+    # Require a stable retrievable source identity for production retries
+    resolved_doc_id = document_id
+    if not resolved_doc_id:
+        resolved_doc_id = f"doc_{file_hash[:16]}"
+
+    mapped_input_type = "backend_audio" if file_type == "audio" else "backend_document"
+
+    from app.api.schemas import SourceDocumentIn, CreateJobRequest, JobOptionsIn
+    source_doc = SourceDocumentIn(
+        document_id=resolved_doc_id,
+        file_type=file_type,
+        mime_type=mime_type,
+        storage_key=None,
+        file_url=None,
+        sha256_hash=file_hash,
+        page_count=None,
+    )
+
+    req = CreateJobRequest(
+        job_id=sanitized_job_id,
+        tenant_id=tenant_id,
+        project_id=project_id,
+        requested_by=requested_by,
+        input_type=mapped_input_type,
+        source_documents=[source_doc],
+        content=None,
+        options=JobOptionsIn(
+            generate_user_stories=True,
+            generate_summary=True,
+            enable_embeddings=False,
+            enable_hybrid_retrieval=False,
+            language=language or "en",
+            callback_url=callback_url,
+            priority="normal",
+        ),
+        reprocess=reprocess,
+    )
+
+    outcome = await handle_job_creation(req, job_id=sanitized_job_id, request_id=request_id)
+    if not outcome.dispatch:
+        return JSONResponse(status_code=outcome.http_status, content=outcome.body)
+
+    rec = outcome.job
+    # Cache raw bytes locally for content recovery endpoint / mock testing
+    MOCK_DOCUMENT_STORAGE[resolved_doc_id] = file_bytes
+    await prepare_and_dispatch_job(
+        req,
+        rec,
+        background_tasks=background_tasks,
+        request_id=request_id,
+        raw_bytes=file_bytes,
+        raw_text="",
+        file_type=file_type,
+        metadata=parsed_metadata,
+        audio_format=subtype if file_type == "audio" else None,
+        transcribe_options={},
+    )
+
+    return JSONResponse(status_code=outcome.http_status, content=outcome.body)
+
+
+@router.post("/process-json", status_code=status.HTTP_202_ACCEPTED)
+async def process_json_compatibility(
+    req: ProcessJsonRequest,
+    background_tasks: BackgroundTasks,
+    request: Request,
+):
+    """Text/transcript compatibility submission endpoint (application/json)."""
+    request_id = get_request_id(request)
+
+    # 1. Validate job ID
+    try:
+        sanitized_job_id = sanitize_job_id(req.job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"invalid job_id: {exc}") from None
+
+    # 2. Validate project ID
+    if not req.project_id or not req.project_id.strip():
+        raise HTTPException(status_code=400, detail="project_id is required")
+
+    # 3. Validate content
+    if not req.content or not req.content.strip():
+        raise HTTPException(status_code=400, detail="content is required")
+
+    # 4. Map source type
+    mapped_input_type = "text" if req.source_type == "text" else "backend_transcript"
+    file_type = "text" if req.source_type == "text" else "transcript"
+
+    from app.api.schemas import CreateJobRequest
+    canonical_req = CreateJobRequest(
+        job_id=sanitized_job_id,
+        tenant_id=req.tenant_id,
+        project_id=req.project_id,
+        requested_by=req.requested_by,
+        input_type=mapped_input_type,
+        source_documents=req.source_documents,
+        content=req.content,
+        options=req.options,
+        reprocess=req.reprocess,
+    )
+
+    outcome = await handle_job_creation(canonical_req, job_id=sanitized_job_id, request_id=request_id)
+    if not outcome.dispatch:
+        return JSONResponse(status_code=outcome.http_status, content=outcome.body)
+
+    rec = outcome.job
+    await prepare_and_dispatch_job(
+        canonical_req,
+        rec,
+        background_tasks=background_tasks,
+        request_id=request_id,
+        raw_bytes=b"",
+        raw_text=req.content,
+        file_type=file_type,
+        metadata=req.metadata,
+        audio_format=None,
+        transcribe_options={},
+    )
+
     return JSONResponse(status_code=outcome.http_status, content=outcome.body)
 
 
@@ -301,12 +445,10 @@ async def retry_job(job_id: str, background_tasks: BackgroundTasks, request: Req
 
     update_progress(job_id, updated.current_node, updated.progress_pct, updated.status.value)
 
-    # Reconstruct input (redis cache → backend → persisted chunks) so the retry
-    # needs no re-upload and does not duplicate source documents.
-    initial_state = await build_worker_initial_state(updated, stores)
+    # Reconstruct input: the worker or in-process queue factory will build this state asynchronously.
     await dispatch_job(
         job_id,
-        initial_state=initial_state,
+        initial_state=None,
         pipeline=resolve_pipeline(),
         background_tasks=background_tasks,
         request_id=request_id,
@@ -397,3 +539,53 @@ async def regenerate_story(req: RegenerateStoryRequest):
     except Exception as e:
         logger.error("Unexpected error in story regeneration: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to regenerate story: {str(e)}")
+
+
+@router.get("/documents/{document_id}/content")
+async def get_document_content(document_id: str):
+    """Retrieve raw document content by its document ID."""
+    from fastapi.responses import Response
+
+    # 1. Check local mock storage first (for mock/test uploads)
+    if document_id in MOCK_DOCUMENT_STORAGE:
+        content_bytes = MOCK_DOCUMENT_STORAGE[document_id]
+        from app.services.file_inspection import detect_mime_and_type
+        _, mime_type, _ = detect_mime_and_type(content_bytes)
+        return Response(content=content_bytes, media_type=mime_type)
+
+    # 2. Lookup in durable database
+    stores = get_stores()
+    doc = await stores.chunks.get_document_by_backend_id(document_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # 3. Check Redis cache for stashed bytes if no URL
+    if not doc.file_url:
+        from app.worker.state import load_input
+        cached = load_input(doc.job_id)
+        if cached:
+            b64 = cached.get("raw_bytes_b64", "")
+            if b64:
+                import base64
+                content_bytes = base64.b64decode(b64)
+                return Response(content=content_bytes, media_type=doc.mime_type or "application/octet-stream")
+
+    # 4. If URL exists, fetch the bytes using the secure fetcher
+    if doc.file_url:
+        from app.clients.backend import BackendDocumentClient, SourceDownloadError
+        client = BackendDocumentClient()
+        try:
+            content_bytes = await client.fetch_document_bytes({
+                "document_id": doc.backend_document_id,
+                "file_type": doc.source_type,
+                "mime_type": doc.mime_type,
+                "storage_key": doc.storage_key,
+                "file_url": doc.file_url,
+                "sha256_hash": doc.sha256_hash,
+            })
+            return Response(content=content_bytes, media_type=doc.mime_type or "application/octet-stream")
+        except SourceDownloadError as e:
+            raise HTTPException(status_code=400, detail=f"Source download failed: {str(e)}")
+
+    raise HTTPException(status_code=404, detail="Raw content is not cached or reachable")
+

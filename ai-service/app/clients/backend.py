@@ -23,6 +23,87 @@ from app.config import settings
 logger = logging.getLogger("app.clients.backend")
 
 
+# ── Typed Download Exceptions ──────────────────────────────────────────────────
+
+class SourceDownloadError(Exception):
+    code: str
+
+
+class SourceUnavailableError(SourceDownloadError):
+    code = "SOURCE_INPUT_UNAVAILABLE"
+
+
+class SourceIntegrityError(SourceDownloadError):
+    code = "SOURCE_HASH_MISMATCH"
+
+
+class SourceTooLargeError(SourceDownloadError):
+    code = "SOURCE_TOO_LARGE"
+
+
+class SourceSecurityError(SourceDownloadError):
+    code = "SOURCE_URL_REJECTED"
+
+
+# ── URL Helpers ───────────────────────────────────────────────────────────────
+
+def _is_safe_ip(ip_str: str) -> bool:
+    import ipaddress
+    try:
+        ip = ipaddress.ip_address(ip_str)
+        return not (ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_multicast)
+    except ValueError:
+        return False
+
+
+def _validate_host_safety(host: str, is_backend: bool) -> None:
+    import socket
+    if not host:
+        raise SourceSecurityError("Invalid host")
+    
+    if is_backend:
+        return
+        
+    try:
+        addr_info = socket.getaddrinfo(host, None)
+        for item in addr_info:
+            ip = item[4][0]
+            # Strip scope id if IPv6
+            if "%" in ip:
+                ip = ip.split("%")[0]
+            if not _is_safe_ip(ip):
+                raise SourceSecurityError("Unsafe destination address resolved")
+    except socket.gaierror:
+        raise SourceSecurityError("DNS resolution failed for source host")
+
+
+def _is_approved_host(host: str, base_url: str) -> bool:
+    import urllib.parse
+    import os
+    
+    if base_url:
+        parsed_base = urllib.parse.urlparse(base_url)
+        if parsed_base.hostname and host.lower() == parsed_base.hostname.lower():
+            return True
+            
+    allowed_raw = os.environ.get("ALLOWED_DOWNLOAD_DOMAINS", "")
+    allowed_domains = [d.strip().lower() for d in allowed_raw.split(",") if d.strip()]
+    if not allowed_domains:
+        allowed_domains = [
+            "s3.amazonaws.com",
+            "res.cloudinary.com",
+            "storage.googleapis.com",
+            "cloudfront.net",
+        ]
+        
+    host_lower = host.lower()
+    for domain in allowed_domains:
+        if host_lower == domain or host_lower.endswith("." + domain):
+            return True
+            
+    return False
+
+
 class BackendDocumentClient:
     def __init__(
         self,
@@ -74,6 +155,125 @@ class BackendDocumentClient:
             )
             return None
 
+    async def fetch_document_bytes(self, document_ref: Dict[str, Any]) -> bytes:
+        """Download raw binary document/audio bytes safely.
+
+        Applies security checks (SSRF, redirects, no credential leak, domain check, size limit, hash check).
+        """
+        import httpx
+        import urllib.parse
+        import hashlib
+
+        url: Optional[str] = document_ref.get("file_url")
+        doc_id = document_ref.get("document_id")
+        
+        # If no url is supplied, default to the backend document endpoint
+        if not url and self.base_url and doc_id:
+            url = f"{self.base_url}/internal/documents/{doc_id}/content"
+
+        if not url:
+            raise SourceUnavailableError("No URL or document ID provided for retrieval")
+
+        # 1. Parse and validate host safety
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            raise SourceSecurityError("Only HTTP and HTTPS schemes are allowed")
+
+        hostname = parsed.hostname
+        if not hostname:
+            raise SourceSecurityError("Invalid URL hostname")
+
+        # Resolve is_backend flag
+        is_backend = False
+        if self.base_url:
+            parsed_base = urllib.parse.urlparse(self.base_url)
+            if parsed.netloc.lower() == parsed_base.netloc.lower():
+                is_backend = True
+
+        # Check approved domain
+        if not _is_approved_host(hostname, self.base_url):
+            raise SourceSecurityError("Host is not allowlisted for downloads")
+
+        # SSRF checks
+        _validate_host_safety(hostname, is_backend)
+
+        # Set up headers
+        headers = {"Accept": "*/*"}
+        if is_backend and self.service_token:
+            headers["Authorization"] = f"Bearer {self.service_token}"
+
+        # Bounded limits based on file type
+        file_type = document_ref.get("file_type") or "document"
+        max_bytes = 50 * 1024 * 1024 if file_type == "audio" else 20 * 1024 * 1024
+
+        # Download safely in chunks without logging credentials/URL query parameters
+        safe_url = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+        logger.info("fetch_document_bytes starting download: %s", safe_url)
+        
+        downloaded = bytearray()
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                # Enforce manual redirect handling for SSRF/token leak prevention
+                async with client.stream("GET", url, headers=headers, follow_redirects=False) as resp:
+                    if resp.status_code in (301, 302, 303, 307, 308):
+                        redirect_location = resp.headers.get("location")
+                        if not redirect_location:
+                            raise SourceUnavailableError("Redirect has no location header")
+                        
+                        redirect_url = urllib.parse.urljoin(url, redirect_location)
+                        parsed_redir = urllib.parse.urlparse(redirect_url)
+                        if parsed_redir.scheme not in ("http", "https"):
+                            raise SourceSecurityError("Only HTTP/HTTPS redirect URLs are allowed")
+                        
+                        redir_hostname = parsed_redir.hostname
+                        if not redir_hostname:
+                            raise SourceSecurityError("Invalid redirect URL hostname")
+                            
+                        # Recheck redirects safety
+                        redir_is_backend = False
+                        if self.base_url:
+                            if parsed_redir.netloc.lower() == parsed_base.netloc.lower():
+                                redir_is_backend = True
+                                
+                        if not _is_approved_host(redir_hostname, self.base_url):
+                            raise SourceSecurityError("Redirect host is not allowlisted")
+                            
+                        _validate_host_safety(redir_hostname, redir_is_backend)
+                        
+                        redir_headers = {"Accept": "*/*"}
+                        if redir_is_backend and self.service_token:
+                            redir_headers["Authorization"] = f"Bearer {self.service_token}"
+                            
+                        async with client.stream("GET", redirect_url, headers=redir_headers, follow_redirects=False) as resp2:
+                            resp2.raise_for_status()
+                            async for chunk in resp2.aiter_bytes():
+                                downloaded.extend(chunk)
+                                if len(downloaded) > max_bytes:
+                                    raise SourceTooLargeError("Source file exceeds allowable size limit")
+                    else:
+                        resp.raise_for_status()
+                        async for chunk in resp.aiter_bytes():
+                            downloaded.extend(chunk)
+                            if len(downloaded) > max_bytes:
+                                raise SourceTooLargeError("Source file exceeds allowable size limit")
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code in (404, 410):
+                raise SourceUnavailableError(f"Source file not found (status {e.response.status_code})")
+            raise SourceUnavailableError(f"Source download HTTP error: {e.response.status_code}")
+        except httpx.RequestError as e:
+            raise SourceUnavailableError(f"Network request error occurred: {type(e).__name__}")
+
+        raw_bytes = bytes(downloaded)
+
+        # Integrity check
+        expected_hash = document_ref.get("sha256_hash") or document_ref.get("hash")
+        if expected_hash:
+            actual_hash = hashlib.sha256(raw_bytes).hexdigest()
+            if actual_hash.lower() != expected_hash.lower():
+                raise SourceIntegrityError("Checksum verification failed for downloaded content")
+
+        return raw_bytes
+
     async def send_callback(
         self, callback_url: str, payload: Dict[str, Any], *, request_id: Optional[str] = None
     ) -> bool:
@@ -96,3 +296,4 @@ class BackendDocumentClient:
                 type(exc).__name__,
             )
             return False
+

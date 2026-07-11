@@ -153,7 +153,7 @@ def _validate_ffmpeg():
 def _compress_audio_sync(raw_bytes: bytes, file_subtype: str) -> bytes:
     import tempfile
     import subprocess
-    fmt = file_subtype if file_subtype in ("mp3", "wav", "ogg", "flac", "m4a") else "mp3"
+    fmt = file_subtype if file_subtype in ("mp3", "wav", "ogg", "flac", "m4a", "webm") else "mp3"
     with tempfile.TemporaryDirectory() as tmpdir:
         input_file = os.path.join(tmpdir, f"input.{fmt}")
         output_file = os.path.join(tmpdir, "compressed.ogg")
@@ -172,7 +172,16 @@ def _compress_audio_sync(raw_bytes: bytes, file_subtype: str) -> bytes:
 def _chunk_audio_sync(raw_bytes: bytes, file_subtype: str) -> list[tuple[int, bytes, float]]:
     import tempfile
     import subprocess
-    fmt = file_subtype if file_subtype in ("mp3", "wav", "ogg", "flac", "m4a") else "mp3"
+    
+    # If input is webm, transcode to ogg first for reliable copy chunking/decoding
+    if file_subtype == "webm":
+        try:
+            raw_bytes = _compress_audio_sync(raw_bytes, "webm")
+            file_subtype = "ogg"
+        except Exception as e:
+            logger.warning(f"WebM pre-transcoding failed: {e}")
+
+    fmt = file_subtype if file_subtype in ("mp3", "wav", "ogg", "flac", "m4a", "webm") else "mp3"
     chunks = []
     with tempfile.TemporaryDirectory() as tmpdir:
         input_file = os.path.join(tmpdir, f"input.{fmt}")
@@ -229,7 +238,14 @@ async def _transcribe_groq(
             logger.warning(f"Groq compression failed: {e}")
 
     async def _call_api(chunk_bytes: bytes, chunk_name: str, start_time_offset: float) -> List[SourceChunk]:
-        mime_map = {"mp3": "audio/mpeg", "wav": "audio/wav", "ogg": "audio/ogg", "flac": "audio/flac", "m4a": "audio/mp4"}
+        mime_map = {
+            "mp3": "audio/mpeg",
+            "wav": "audio/wav",
+            "ogg": "audio/ogg",
+            "flac": "audio/flac",
+            "m4a": "audio/mp4",
+            "webm": "audio/webm",
+        }
         mime = mime_map.get(file_subtype, "audio/mpeg")
         audio_file = (chunk_name, io.BytesIO(chunk_bytes), mime)
         response = await client.audio.transcriptions.create(

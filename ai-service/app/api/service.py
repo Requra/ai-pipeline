@@ -492,3 +492,158 @@ async def internal_status_view(job_id: str) -> Optional[Dict[str, Any]]:
         if isinstance(report, dict):
             quality_score = report.get("overall_score")
     return rec.to_internal_view(warning_count=warning_count, quality_score=quality_score)
+
+
+async def prepare_and_dispatch_job(
+    req: Any,  # CreateJobRequest or ProcessJsonRequest
+    job: AiJobRecord,
+    *,
+    background_tasks: Any,  # fastapi.BackgroundTasks
+    request_id: Optional[str] = None,
+    raw_bytes: bytes = b"",
+    raw_text: str = "",
+    file_type: str = "text",
+    metadata: Optional[Dict[str, Any]] = None,
+    audio_format: Optional[str] = None,
+    transcribe_options: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Centralized job manifest persistence, initial state prep, caching, and dispatch."""
+    from fastapi import HTTPException
+    from app.store.models import SourceDocumentRecord
+    
+    stores = get_stores()
+
+    # 1. Persist source-document manifest to ai_source_documents
+    doc_records = []
+    source_docs_payload = []
+    
+    # We duck-type req.source_documents. Each element may be a Pydantic model or dict.
+    req_docs = getattr(req, "source_documents", []) or []
+    for idx, d in enumerate(req_docs):
+        d_id = getattr(d, "document_id", None) or d.get("document_id") if isinstance(d, dict) else getattr(d, "document_id", None)
+        f_type = getattr(d, "file_type", None) or d.get("file_type") if isinstance(d, dict) else getattr(d, "file_type", None)
+        mime = getattr(d, "mime_type", None) or d.get("mime_type") if isinstance(d, dict) else getattr(d, "mime_type", None)
+        s_key = getattr(d, "storage_key", None) or d.get("storage_key") if isinstance(d, dict) else getattr(d, "storage_key", None)
+        f_url = getattr(d, "file_url", None) or d.get("file_url") if isinstance(d, dict) else getattr(d, "file_url", None)
+        h = getattr(d, "hash", None) or getattr(d, "sha256_hash", None) or d.get("sha256_hash") or d.get("hash") if isinstance(d, dict) else (getattr(d, "hash", None) or getattr(d, "sha256_hash", None))
+        p_count = getattr(d, "page_count", None) or d.get("page_count") if isinstance(d, dict) else getattr(d, "page_count", None)
+        
+        doc_rec = SourceDocumentRecord(
+            job_id=job.job_id,
+            tenant_id=job.tenant_id,
+            project_id=job.project_id,
+            backend_document_id=d_id,
+            source_type=f_type or ("audio" if file_type == "audio" else "text"),
+            file_name=d_id or "unknown",
+            mime_type=mime or "application/octet-stream",
+            storage_key=s_key,
+            file_url=f_url,
+            sha256_hash=h,
+            language=job.options.language,
+            page_count=p_count,
+        )
+        doc_records.append(doc_rec)
+        source_docs_payload.append({
+            "document_id": d_id,
+            "file_type": f_type,
+            "mime_type": mime,
+            "storage_key": s_key,
+            "file_url": f_url,
+            "sha256_hash": h,
+            "page_count": p_count,
+        })
+
+    try:
+        if doc_records:
+            await stores.chunks.save_documents(doc_records)
+    except Exception as exc:
+        logger.error("Failed to save source documents manifest for job %s: %s", job.job_id, exc)
+        await stores.jobs.set_status(
+            job.job_id, JobStatus.FAILED, current_node="failed", progress_pct=100,
+            error_code="SOURCE_MANIFEST_PERSIST_FAILED", error_message=str(exc)
+        )
+        await stores.jobs.add_event(
+            JobEventRecord(
+                job_id=job.job_id,
+                event_type="DISPATCH_FAILED",
+                severity="error",
+                message=f"SOURCE_MANIFEST_PERSIST_FAILED: {exc}",
+                metadata={"error_code": "SOURCE_MANIFEST_PERSIST_FAILED", "request_id": request_id}
+            )
+        )
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Failed to persist source document manifest.",
+                "error_code": "SOURCE_MANIFEST_PERSIST_FAILED",
+                "job_id": job.job_id,
+            }
+        )
+
+    # 2. Build initial state
+    initial_state = make_initial_state(
+        job.job_id,
+        raw_bytes=raw_bytes,
+        raw_text=raw_text,
+        file_type=file_type,
+        metadata=metadata or {},
+        tenant_id=job.tenant_id,
+        project_id=job.project_id,
+        enable_embeddings=job.options.enable_embeddings,
+        enable_hybrid_retrieval=job.options.enable_hybrid_retrieval,
+        source_documents=source_docs_payload,
+        audio_format=audio_format,
+        language=job.options.language,
+        transcribe_options=transcribe_options or {},
+    )
+
+    # 3. Cache input
+    cache_input = {
+        "raw_text": raw_text,
+        "raw_bytes": raw_bytes,
+        "file_type": file_type,
+        "metadata": metadata or {},
+        "source_documents": source_docs_payload,
+        "audio_format": audio_format,
+        "language": job.options.language,
+        "transcribe_options": transcribe_options or {},
+    }
+
+    # 4. Dispatch the job
+    try:
+        await dispatch_job(
+            job.job_id,
+            initial_state=initial_state,
+            pipeline=resolve_pipeline(),
+            background_tasks=background_tasks,
+            request_id=request_id,
+            cache_input=cache_input,
+        )
+    except Exception as exc:
+        code = "INPUT_CACHE_FAILED" if "INPUT_CACHE_FAILED" in str(exc) else "QUEUE_DISPATCH_FAILED"
+        status_code = 503 if code == "QUEUE_DISPATCH_FAILED" else 500
+        message = str(exc)
+        logger.error("Failed to dispatch job %s: %s", job.job_id, message)
+        
+        await stores.jobs.set_status(
+            job.job_id, JobStatus.FAILED, current_node="failed", progress_pct=100,
+            error_code=code, error_message=message,
+        )
+        await stores.jobs.add_event(
+            JobEventRecord(
+                job_id=job.job_id,
+                event_type="DISPATCH_FAILED",
+                severity="error",
+                message=message,
+                metadata={"error_code": code, "request_id": request_id},
+            )
+        )
+        raise HTTPException(
+            status_code=status_code,
+            detail={
+                "message": "Failed to dispatch AI job to the queue.",
+                "error_code": code,
+                "job_id": job.job_id,
+            }
+        )
+

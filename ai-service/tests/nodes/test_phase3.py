@@ -17,8 +17,16 @@ async def test_detect_file_type_pdf():
 
 @pytest.mark.asyncio
 async def test_detect_file_type_docx():
+    import zipfile
+    import io
+    bio = io.BytesIO()
+    with zipfile.ZipFile(bio, "w") as z:
+        z.writestr("[Content_Types].xml", "<types></types>")
+        z.writestr("word/document.xml", "<document></document>")
+    docx_bytes = bio.getvalue()
+
     state = {
-        "raw_bytes": b"PK\x03\x04\x14\x00\x06\x00", # Minimal zip signature
+        "raw_bytes": docx_bytes,
         "metadata": {"filename": "test.docx"}
     }
     result = await detect_file_type_node(state)

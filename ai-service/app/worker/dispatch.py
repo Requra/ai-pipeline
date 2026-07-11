@@ -37,6 +37,40 @@ async def dispatch_job(
         stores = get_stores()
 
         async def _factory() -> None:
+            import logging
+            logger = logging.getLogger("app.worker.dispatch")
+            nonlocal initial_state
+            
+            is_reference_job = (
+                initial_state is None
+                or (not initial_state.get("raw_bytes") and not initial_state.get("raw_text"))
+            )
+            
+            if is_reference_job:
+                try:
+                    from app.worker.state import build_worker_initial_state
+                    job = await stores.jobs.get_job(job_id)
+                    if job:
+                        initial_state = await build_worker_initial_state(job, stores)
+                except Exception as exc:
+                    logger.error("In-process background state reconstruction failed for %s: %s", job_id, exc)
+                    
+                    import time
+                    from app.worker.runner import _fail, _maybe_callback
+                    from app.store.models import JobStatus
+                    
+                    code = getattr(exc, "code", "SOURCE_RECOVERY_FAILED")
+                    message = str(exc)
+                    await _fail(stores, job_id, code, message, time.time())
+                    
+                    job = await stores.jobs.get_job(job_id)
+                    if job:
+                        try:
+                            await _maybe_callback(stores, job, {}, JobStatus.FAILED, request_id=request_id, backend_client=None)
+                        except Exception as cb_exc:
+                            logger.warning("Failed to fire callback for in-process reconstruction error: %s", cb_exc)
+                    return
+
             await execute_job(
                 stores,
                 job_id,
@@ -53,6 +87,12 @@ async def dispatch_job(
     # Redis path: stash transient input for the worker, then dispatch by id.
     if cache_input is not None:
         from app.worker.state import stash_input
+        try:
+            stash_input(job_id, **cache_input)
+        except Exception as exc:
+            raise RuntimeError(f"INPUT_CACHE_FAILED: {exc}") from exc
 
-        stash_input(job_id, **cache_input)
-    queue.enqueue(job_id)
+    try:
+        queue.enqueue(job_id)
+    except Exception as exc:
+        raise RuntimeError(f"QUEUE_DISPATCH_FAILED: {exc}") from exc

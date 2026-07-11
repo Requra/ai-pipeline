@@ -36,12 +36,35 @@ def _get_pipeline():
 
 async def run_job_entry(job_id: str) -> str:
     """Reconstruct state from the durable store + input cache and run the job."""
+    import time
+    from app.store.models import JobStatus
+    from app.worker.runner import _fail
+
     stores = get_stores()
     job = await stores.jobs.get_job(job_id)
     if job is None:
         logger.error("run_job_entry: job %s not found", job_id)
         return "FAILED"
-    initial_state = await build_worker_initial_state(job, stores)
+
+    try:
+        initial_state = await build_worker_initial_state(job, stores)
+    except Exception as exc:
+        code = getattr(exc, "code", "SOURCE_RECOVERY_FAILED")
+        message = str(exc)
+        logger.error("Reconstruction failed for job %s: [%s] %s", job_id, code, message)
+        
+        # Durable failure update: fail the job, record attempt, write job event
+        await _fail(stores, job_id, code, message, time.time())
+        
+        # Fire callback if configured
+        try:
+            from app.worker.runner import _maybe_callback
+            await _maybe_callback(stores, job, {}, JobStatus.FAILED, request_id=None, backend_client=None)
+        except Exception as cb_exc:
+            logger.warning("Failed to fire fallback callback for reconstruction error: %s", cb_exc)
+            
+        return "FAILED"
+
     return await execute_job(
         stores, job_id, initial_state, _get_pipeline(), use_stream=True
     )

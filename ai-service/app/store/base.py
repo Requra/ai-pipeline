@@ -135,6 +135,9 @@ class ResultStore(Protocol):
 
 @runtime_checkable
 class ChunkStore(Protocol):
+    async def get_documents(self, job_id: str) -> List[SourceDocumentRecord]: ...
+    async def get_document_by_backend_id(self, backend_id: str) -> Optional[SourceDocumentRecord]: ...
+
     async def save_documents(
         self, documents: List[SourceDocumentRecord]
     ) -> List[SourceDocumentRecord]: ...

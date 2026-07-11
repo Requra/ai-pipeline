@@ -20,6 +20,9 @@ class PipelineState(TypedDict):
     raw_bytes: bytes
     file_type: str                  # e.g., "pdf", "docx", "audio", "text"
     metadata: Dict[str, Any]
+    audio_format: Optional[str]
+    language: str
+    transcribe_options: Dict[str, Any]
 
     # --- Production scoping + retrieval options (Phase: production hardening) ---
     # Populated from the ai_job for production jobs; None/False for demo runs.

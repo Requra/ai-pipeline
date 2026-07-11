@@ -52,19 +52,53 @@ async def persist_source_documents_and_chunks(
     doc_map: Dict[str, str] = {}
     default_doc_id: Optional[str] = None
 
+    # Load existing documents for the job to merge/preserve fields
+    try:
+        existing_docs = await stores.chunks.get_documents(job.job_id)
+    except Exception as exc:
+        logger.warning("Failed to fetch existing source documents for merge: %s", exc)
+        existing_docs = []
+
+    existing_by_backend_id = {
+        doc.backend_document_id: doc for doc in existing_docs if doc.backend_document_id
+    }
+
     state_source_docs = state.get("source_documents") or []
     if state_source_docs:
         for idx, doc in enumerate(state_source_docs, start=1):
             d_id = doc.get("document_id") or f"SRC-{str(idx).zfill(3)}"
-            doc_rec = SourceDocumentRecord(
-                job_id=job.job_id,
-                tenant_id=job.tenant_id,
-                project_id=job.project_id,
-                source_type=doc.get("file_type") or "text",
-                file_name=doc.get("filename") or doc.get("file_name") or d_id,
-                mime_type=doc.get("mime_type") or "application/octet-stream",
-                language=job.options.language,
-            )
+            existing = existing_by_backend_id.get(d_id)
+            if existing:
+                doc_rec = SourceDocumentRecord(
+                    id=existing.id,
+                    job_id=job.job_id,
+                    tenant_id=job.tenant_id or existing.tenant_id,
+                    project_id=job.project_id or existing.project_id,
+                    backend_document_id=d_id,
+                    source_type=doc.get("file_type") or existing.source_type or "text",
+                    file_name=doc.get("filename") or doc.get("file_name") or existing.file_name or d_id,
+                    mime_type=doc.get("mime_type") or existing.mime_type or "application/octet-stream",
+                    storage_key=doc.get("storage_key") or existing.storage_key,
+                    file_url=doc.get("file_url") or existing.file_url,
+                    sha256_hash=doc.get("sha256_hash") or doc.get("hash") or existing.sha256_hash,
+                    language=doc.get("language") or existing.language or job.options.language,
+                    page_count=doc.get("page_count") or existing.page_count,
+                )
+            else:
+                doc_rec = SourceDocumentRecord(
+                    job_id=job.job_id,
+                    tenant_id=job.tenant_id,
+                    project_id=job.project_id,
+                    backend_document_id=d_id,
+                    source_type=doc.get("file_type") or "text",
+                    file_name=doc.get("filename") or doc.get("file_name") or d_id,
+                    mime_type=doc.get("mime_type") or "application/octet-stream",
+                    storage_key=doc.get("storage_key"),
+                    file_url=doc.get("file_url"),
+                    sha256_hash=doc.get("sha256_hash") or doc.get("hash"),
+                    language=doc.get("language") or job.options.language,
+                    page_count=doc.get("page_count"),
+                )
             doc_records.append(doc_rec)
             
         try:
@@ -79,30 +113,39 @@ async def persist_source_documents_and_chunks(
             logger.warning("persist source documents failed: %s", type(exc).__name__)
     
     if not doc_records:
-        src_meta = state.get("source_metadata")
-        file_name = "unknown"
-        mime_type = "application/octet-stream"
-        if src_meta is not None:
-            file_name = getattr(src_meta, "filename", file_name)
-            mime_type = getattr(src_meta, "mime_type", mime_type)
+        if existing_docs:
+            doc_records = existing_docs
+            # Populate doc_map from existing
+            for doc in existing_docs:
+                if doc.backend_document_id:
+                    doc_map[doc.backend_document_id] = doc.id
+                    if default_doc_id is None:
+                        default_doc_id = doc.id
         else:
-            meta = state.get("metadata") or {}
-            file_name = meta.get("filename") or meta.get("file_name") or file_name
+            src_meta = state.get("source_metadata")
+            file_name = "unknown"
+            mime_type = "application/octet-stream"
+            if src_meta is not None:
+                file_name = getattr(src_meta, "filename", file_name)
+                mime_type = getattr(src_meta, "mime_type", mime_type)
+            else:
+                meta = state.get("metadata") or {}
+                file_name = meta.get("filename") or meta.get("file_name") or file_name
 
-        doc = SourceDocumentRecord(
-            job_id=job.job_id,
-            tenant_id=job.tenant_id,
-            project_id=job.project_id,
-            source_type=str(state.get("file_type") or "text"),
-            file_name=file_name,
-            mime_type=mime_type,
-            language=job.options.language,
-        )
-        try:
-            saved = await stores.chunks.save_documents([doc])
-            default_doc_id = saved[0].id if saved else None
-        except Exception as exc:  # pragma: no cover - store dependent
-            logger.warning("persist source document fallback failed: %s", type(exc).__name__)
+            doc = SourceDocumentRecord(
+                job_id=job.job_id,
+                tenant_id=job.tenant_id,
+                project_id=job.project_id,
+                source_type=str(state.get("file_type") or "text"),
+                file_name=file_name,
+                mime_type=mime_type,
+                language=job.options.language,
+            )
+            try:
+                saved = await stores.chunks.save_documents([doc])
+                default_doc_id = saved[0].id if saved else None
+            except Exception as exc:  # pragma: no cover - store dependent
+                logger.warning("persist source document fallback failed: %s", type(exc).__name__)
 
     records: List[SourceChunkRecord] = []
     for idx, ch in enumerate(chunks):

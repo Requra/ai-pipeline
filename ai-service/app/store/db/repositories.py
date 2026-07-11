@@ -597,6 +597,43 @@ class PgChunkStore:
     def __init__(self, db: Database) -> None:
         self._db = db
 
+    @staticmethod
+    def _document_to_domain(row: m.AiSourceDocument) -> SourceDocumentRecord:
+        return SourceDocumentRecord(
+            id=row.id,
+            job_id=row.job_id,
+            tenant_id=row.tenant_id,
+            project_id=row.project_id,
+            backend_document_id=row.backend_document_id,
+            source_type=row.source_type,
+            file_name=row.file_name,
+            mime_type=row.mime_type,
+            storage_key=row.storage_key,
+            file_url=row.file_url,
+            sha256_hash=row.sha256_hash,
+            language=row.language,
+            page_count=row.page_count,
+            created_at=row.created_at,
+        )
+
+    async def get_documents(self, job_id: str) -> List[SourceDocumentRecord]:
+        async with self._db.session() as s:
+            rows = (
+                await s.execute(
+                    select(m.AiSourceDocument).where(m.AiSourceDocument.job_id == job_id)
+                )
+            ).scalars().all()
+            return [self._document_to_domain(r) for r in rows]
+
+    async def get_document_by_backend_id(self, backend_id: str) -> Optional[SourceDocumentRecord]:
+        async with self._db.session() as s:
+            row = (
+                await s.execute(
+                    select(m.AiSourceDocument).where(m.AiSourceDocument.backend_document_id == backend_id)
+                )
+            ).scalars().first()
+            return self._document_to_domain(row) if row else None
+
     async def save_documents(
         self, documents: List[SourceDocumentRecord]
     ) -> List[SourceDocumentRecord]:

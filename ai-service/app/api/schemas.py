@@ -96,3 +96,18 @@ class RegenerateStoryResponse(BaseModel):
     description: str
     acceptance_criteria: List[AcceptanceCriterionOut] = Field(default_factory=list)
     labels: List[str] = Field(default_factory=list)
+
+
+class ProcessJsonRequest(BaseModel):
+    """Request schema for JSON text/transcript compatibility uploads."""
+    job_id: str
+    project_id: str
+    tenant_id: Optional[str] = None
+    requested_by: Optional[str] = None
+    source_type: Literal["text", "meeting_transcript"] = "text"
+    content: str
+    source_documents: List[SourceDocumentIn] = Field(default_factory=list)
+    metadata: dict = Field(default_factory=dict)
+    options: JobOptionsIn = Field(default_factory=JobOptionsIn)
+    reprocess: bool = False
+

@@ -264,6 +264,18 @@ class MemoryChunkStore:
         self._docs: Dict[str, List[SourceDocumentRecord]] = {}
         self._chunks: List[SourceChunkRecord] = []
 
+    async def get_documents(self, job_id: str) -> List[SourceDocumentRecord]:
+        with _LOCK:
+            return [doc.model_copy(deep=True) for doc in self._docs.get(job_id, [])]
+
+    async def get_document_by_backend_id(self, backend_id: str) -> Optional[SourceDocumentRecord]:
+        with _LOCK:
+            for job_id, docs in self._docs.items():
+                for doc in docs:
+                    if doc.backend_document_id == backend_id:
+                        return doc.model_copy(deep=True)
+            return None
+
     async def save_documents(
         self, documents: List[SourceDocumentRecord]
     ) -> List[SourceDocumentRecord]:
