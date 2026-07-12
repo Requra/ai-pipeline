@@ -80,7 +80,9 @@ def _resolve_terminal(final_state: Dict[str, Any], job_result: Dict[str, Any]):
     if isinstance(job_result, dict):
         raw = job_result.get("status")
     raw = raw or final_state.get("status") or "completed"
-    return _STATUS_MAP.get(str(raw).lower(), (JobStatus.COMPLETED, "COMPLETED", "completed"))
+    return _STATUS_MAP.get(
+        str(raw).lower(), (JobStatus.COMPLETED, "COMPLETED", "completed")
+    )
 
 
 async def _event(stores: StoreBundle, job_id: str, event_type: str, **kw) -> None:
@@ -163,7 +165,9 @@ async def _persist_incremental(
         if node_name in ("parse_to_chunks", "transcribe"):
             await persist_source_documents_and_chunks(stores, job, state)
     except Exception as exc:  # pragma: no cover
-        logger.warning("incremental persist failed at %s: %s", node_name, type(exc).__name__)
+        logger.warning(
+            "incremental persist failed at %s: %s", node_name, type(exc).__name__
+        )
 
 
 async def execute_job(
@@ -195,10 +199,17 @@ async def execute_job(
 
     # Cancelled before it even started?
     if await stores.jobs.is_cancel_requested(job_id):
-        await stores.jobs.set_status(job_id, JobStatus.CANCELLED, current_node="cancelled")
+        await stores.jobs.set_status(
+            job_id, JobStatus.CANCELLED, current_node="cancelled"
+        )
         await _finalize_attempt(stores, job_id, JobStatus.CANCELLED)
-        update_progress(job_id, "cancelled", job.progress_pct, "FAILED",
-                         error="JOB_CANCELLED: cancelled before start")
+        update_progress(
+            job_id,
+            "cancelled",
+            job.progress_pct,
+            "FAILED",
+            error="JOB_CANCELLED: cancelled before start",
+        )
         await _event(stores, job_id, "job_cancelled", severity="warning")
         return JobStatus.CANCELLED.value
 
@@ -216,7 +227,9 @@ async def execute_job(
     except asyncio.TimeoutError:
         await _fail(stores, job_id, "JOB_TIMEOUT", "job exceeded max runtime", started)
         return JobStatus.FAILED.value
-    except Exception as exc:  # pragma: no cover - pipeline should not crash, but be safe
+    except (
+        Exception
+    ) as exc:  # pragma: no cover - pipeline should not crash, but be safe
         err = f"{type(exc).__name__}: {exc}"
         logger.error("job %s crashed: %s", job_id, type(exc).__name__)
         await _fail(stores, job_id, "PIPELINE_CRASH", err, started)
@@ -226,10 +239,17 @@ async def execute_job(
 
     # Cancelled mid-run (stream returned None).
     if final_state is None:
-        await stores.jobs.set_status(job_id, JobStatus.CANCELLED, current_node="cancelled")
+        await stores.jobs.set_status(
+            job_id, JobStatus.CANCELLED, current_node="cancelled"
+        )
         await _finalize_attempt(stores, job_id, JobStatus.CANCELLED)
-        update_progress(job_id, "cancelled", job.progress_pct, "FAILED",
-                         error="JOB_CANCELLED: cancelled during processing")
+        update_progress(
+            job_id,
+            "cancelled",
+            job.progress_pct,
+            "FAILED",
+            error="JOB_CANCELLED: cancelled during processing",
+        )
         await _event(stores, job_id, "job_cancelled", severity="warning")
         return JobStatus.CANCELLED.value
 
@@ -239,7 +259,9 @@ async def execute_job(
 
     if not job_result and durable != JobStatus.FAILED:
         # Pipeline finished but produced no result payload — treat as failure.
-        await _fail(stores, job_id, "NO_RESULT", "pipeline produced no job_result", started)
+        await _fail(
+            stores, job_id, "NO_RESULT", "pipeline produced no job_result", started
+        )
         return JobStatus.FAILED.value
 
     processing_time_ms = int(max(0, (time.time() - started) * 1000))
@@ -249,8 +271,11 @@ async def execute_job(
         if not use_stream:
             await persist_source_documents_and_chunks(stores, job, final_state)
         job_result = await persist_result(
-            stores, job, job_result_obj,
-            contract_status=contract_status, processing_time_ms=processing_time_ms,
+            stores,
+            job,
+            job_result_obj,
+            contract_status=contract_status,
+            processing_time_ms=processing_time_ms,
         )
     except Exception as exc:
         logger.error("final persist failed for %s: %s", job_id, type(exc).__name__)
@@ -265,19 +290,28 @@ async def execute_job(
 
     err_msg = final_state.get("error") if durable == JobStatus.FAILED else None
     await stores.jobs.set_status(
-        job_id, durable, current_node="format", progress_pct=100,
+        job_id,
+        durable,
+        current_node="format",
+        progress_pct=100,
         error_message=err_msg,
     )
     # Mirror to the legacy in-memory /status store (keeps existing clients/tests working).
     update_progress(
-        job_id, "format", 100, public_status,
+        job_id,
+        "format",
+        100,
+        public_status,
         result=job_result if public_status == "COMPLETED" else None,
         error=err_msg,
     )
     await _finalize_attempt(stores, job_id, durable)
     await _event(
-        stores, job_id, "job_finished",
-        message=f"terminal status={durable.value}", node_name="format",
+        stores,
+        job_id,
+        "job_finished",
+        message=f"terminal status={durable.value}",
+        node_name="format",
         metadata={"processing_time_ms": processing_time_ms},
     )
 
@@ -307,10 +341,16 @@ async def _finalize_attempt(
     )
 
 
-async def _fail(stores: StoreBundle, job_id: str, code: str, message: str, started: float) -> None:
+async def _fail(
+    stores: StoreBundle, job_id: str, code: str, message: str, started: float
+) -> None:
     await stores.jobs.set_status(
-        job_id, JobStatus.FAILED, current_node="failed", progress_pct=100,
-        error_code=code, error_message=message,
+        job_id,
+        JobStatus.FAILED,
+        current_node="failed",
+        progress_pct=100,
+        error_code=code,
+        error_message=message,
     )
     await _finalize_attempt(
         stores,
@@ -320,19 +360,30 @@ async def _fail(stores: StoreBundle, job_id: str, code: str, message: str, start
         error_message=message,
     )
     update_progress(job_id, "failed", 100, "FAILED", error=f"{code}: {message}")
-    await _event(stores, job_id, "job_failed", severity="error",
-                 message=message, metadata={"error_code": code})
+    await _event(
+        stores,
+        job_id,
+        "job_failed",
+        severity="error",
+        message=message,
+        metadata={"error_code": code},
+    )
 
 
 async def _maybe_callback(
-    stores: StoreBundle, job: AiJobRecord, result: Dict[str, Any],
-    status: JobStatus, request_id: Optional[str], backend_client: Any,
+    stores: StoreBundle,
+    job: AiJobRecord,
+    result: Dict[str, Any],
+    status: JobStatus,
+    request_id: Optional[str],
+    backend_client: Any,
 ) -> None:
     callback_url = job.callback_url or job.options.callback_url
     if not callback_url:
         return
     if backend_client is None:
         from app.clients.backend import BackendDocumentClient
+
         backend_client = BackendDocumentClient()
     payload = {
         "job_id": job.job_id,
@@ -341,9 +392,13 @@ async def _maybe_callback(
         "status": status.value,
         "result": result,
     }
-    ok = await backend_client.send_callback(callback_url, payload, request_id=request_id)
+    ok = await backend_client.send_callback(
+        callback_url, payload, request_id=request_id
+    )
     await _event(
-        stores, job.job_id, "callback_sent" if ok else "callback_failed",
+        stores,
+        job.job_id,
+        "callback_sent" if ok else "callback_failed",
         severity="info" if ok else "warning",
-        message=f"callback to {callback_url[:120]}",
+        message="callback delivery attempted",
     )

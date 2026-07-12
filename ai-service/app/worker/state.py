@@ -90,6 +90,7 @@ def make_initial_state(
 # Transient input cache (Redis)
 # ---------------------------------------------------------------------------
 
+
 def _input_key(job_id: str) -> str:
     return f"aijob:input:{job_id}"
 
@@ -106,12 +107,19 @@ def stash_input(
     language: Optional[str] = None,
     transcribe_options: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Cache the transient job input in Redis (best effort)."""
+    """Cache the transient job input in Redis.
+
+    This is intentionally not best effort in Redis/RQ mode: if the worker cannot
+    reconstruct the original input, returning 202 would leave a queued job that
+    is destined to fail for infrastructure reasons.
+    """
     from app.queue.redis_queue import get_redis_connection
 
     payload = {
         "raw_text": raw_text or "",
-        "raw_bytes_b64": base64.b64encode(raw_bytes).decode("ascii") if raw_bytes else "",
+        "raw_bytes_b64": (
+            base64.b64encode(raw_bytes).decode("ascii") if raw_bytes else ""
+        ),
         "file_type": file_type,
         "metadata": metadata or {},
         "source_documents": source_documents or [],
@@ -121,9 +129,12 @@ def stash_input(
     }
     try:
         conn = get_redis_connection()
-        conn.set(_input_key(job_id), json.dumps(payload), ex=_INPUT_TTL_SECONDS)
+        ok = conn.set(_input_key(job_id), json.dumps(payload), ex=_INPUT_TTL_SECONDS)
     except Exception as exc:  # pragma: no cover - infra dependent
         logger.warning("stash_input failed for %s: %s", job_id, type(exc).__name__)
+        raise
+    if ok is False:
+        raise RuntimeError("Redis SET returned false")
 
 
 def load_input(job_id: str) -> Optional[Dict[str, Any]]:
@@ -209,7 +220,10 @@ async def build_worker_initial_state(
         if backend_client is None:
             backend_client = BackendDocumentClient()
 
-        if job.input_type in (InputType.BACKEND_DOCUMENT.value, InputType.BACKEND_AUDIO.value):
+        if job.input_type in (
+            InputType.BACKEND_DOCUMENT.value,
+            InputType.BACKEND_AUDIO.value,
+        ):
             bytes_list = []
             for ref in source_documents:
                 # Downloader will raise SourceDownloadError subclasses on failure
@@ -221,19 +235,27 @@ async def build_worker_initial_state(
                 # Re-run file inspection on the downloaded bytes
                 det_type, det_mime, det_subtype = detect_mime_and_type(raw_bytes)
                 # Confirm type is valid for the job input type
-                expected_type = "audio" if job.input_type == InputType.BACKEND_AUDIO.value else "document"
-                
+                expected_type = (
+                    "audio"
+                    if job.input_type == InputType.BACKEND_AUDIO.value
+                    else "document"
+                )
+
                 is_type_match = False
                 if expected_type == "audio" and det_type == "audio":
                     is_type_match = True
-                elif expected_type == "document" and det_type in ("pdf", "docx", "text"):
+                elif expected_type == "document" and det_type in (
+                    "pdf",
+                    "docx",
+                    "text",
+                ):
                     is_type_match = True
-                    
+
                 if not is_type_match:
                     raise SourceSecurityError(
                         f"Downloaded content type is invalid for job input type"
                     )
-                
+
                 file_type = det_type
                 if file_type == "audio":
                     audio_format = det_subtype
@@ -246,7 +268,11 @@ async def build_worker_initial_state(
                     texts.append(text)
             if texts:
                 raw_text = "\n\n".join(texts)
-                file_type = "text" if job.input_type != InputType.BACKEND_AUDIO.value else "transcript"
+                file_type = (
+                    "text"
+                    if job.input_type != InputType.BACKEND_AUDIO.value
+                    else "transcript"
+                )
 
     # If still no content and this is NOT a reference type, we can fallback to chunks (only for "text" inputs)
     if not raw_text and not raw_bytes:
@@ -259,7 +285,9 @@ async def build_worker_initial_state(
                 raw_text = "\n\n".join(c.text for c in chunks if c.text)
                 file_type = "text"
         else:
-            raise SourceUnavailableError("Original source bytes/text could not be recovered for the job")
+            raise SourceUnavailableError(
+                "Original source bytes/text could not be recovered for the job"
+            )
 
     # If we still have no raw_text and no raw_bytes, it's a recovery failure!
     if not raw_text and not raw_bytes:

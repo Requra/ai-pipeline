@@ -12,26 +12,8 @@
           "internal"
         ],
         "summary": "Create Job",
-        "description": "Create/enqueue a job \u2014 idempotent and race-safe by job_id.",
+        "description": "Create/enqueue a job — idempotent and race-safe by job_id.",
         "operationId": "create_job_internal_jobs_post",
-        "parameters": [
-          {
-            "name": "authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -61,7 +43,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
       }
     },
     "/internal/process": {
@@ -72,24 +59,6 @@
         "summary": "Process Compatibility",
         "description": "File/audio compatibility upload endpoint (multipart/form-data).",
         "operationId": "process_compatibility_internal_process_post",
-        "parameters": [
-          {
-            "name": "authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -119,7 +88,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
       }
     },
     "/internal/process-json": {
@@ -130,24 +104,6 @@
         "summary": "Process Json Compatibility",
         "description": "Text/transcript compatibility submission endpoint (application/json).",
         "operationId": "process_json_compatibility_internal_process_json_post",
-        "parameters": [
-          {
-            "name": "authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -177,7 +133,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
       }
     },
     "/internal/jobs/{job_id}": {
@@ -196,22 +157,6 @@
               "type": "string",
               "title": "Job Id"
             }
-          },
-          {
-            "name": "authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
           }
         ],
         "responses": {
@@ -233,7 +178,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
       }
     },
     "/internal/jobs/{job_id}/result": {
@@ -252,22 +202,6 @@
               "type": "string",
               "title": "Job Id"
             }
-          },
-          {
-            "name": "authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
           }
         ],
         "responses": {
@@ -289,7 +223,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
       }
     },
     "/internal/jobs/{job_id}/cancel": {
@@ -308,22 +247,6 @@
               "type": "string",
               "title": "Job Id"
             }
-          },
-          {
-            "name": "authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
           }
         ],
         "responses": {
@@ -345,7 +268,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
       }
     },
     "/internal/jobs/{job_id}/retry": {
@@ -354,7 +282,7 @@
           "internal"
         ],
         "summary": "Retry Job",
-        "description": "Retry a failed/cancelled job as a new attempt.\n\nOnly ``FAILED``/``CANCELLED`` jobs are retryable (matches the ``reprocess``\nflag rules on ``POST /internal/jobs``) \u2014 a running or already-terminal-\nsuccess job returns 409. The check-and-requeue is atomic (row-locked), so\ntwo concurrent ``/retry`` calls for the same job can never both dispatch.",
+        "description": "Retry a failed/cancelled job as a new attempt.\n\nOnly ``FAILED``/``CANCELLED`` jobs are retryable (matches the ``reprocess``\nflag rules on ``POST /internal/jobs``) — a running or already-terminal-\nsuccess job returns 409. The check-and-requeue is atomic (row-locked), so\ntwo concurrent ``/retry`` calls for the same job can never both dispatch.",
         "operationId": "retry_job_internal_jobs__job_id__retry_post",
         "parameters": [
           {
@@ -364,22 +292,6 @@
             "schema": {
               "type": "string",
               "title": "Job Id"
-            }
-          },
-          {
-            "name": "authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
             }
           }
         ],
@@ -402,7 +314,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
       }
     },
     "/internal/jobs/{job_id}/callback-test": {
@@ -421,22 +338,6 @@
             "schema": {
               "type": "string",
               "title": "Job Id"
-            }
-          },
-          {
-            "name": "authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
             }
           }
         ],
@@ -459,7 +360,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
       }
     },
     "/internal/stories/regenerate": {
@@ -470,24 +376,6 @@
         "summary": "Regenerate Story",
         "description": "Stateless regeneration of a single user story with feedback.",
         "operationId": "regenerate_story_internal_stories_regenerate_post",
-        "parameters": [
-          {
-            "name": "authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -517,7 +405,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
       }
     },
     "/internal/documents/{document_id}/content": {
@@ -536,22 +429,6 @@
             "schema": {
               "type": "string",
               "title": "Document Id"
-            }
-          },
-          {
-            "name": "authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
             }
           }
         ],
@@ -574,13 +451,18 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
       }
     },
     "/health": {
       "get": {
         "summary": "Health Check",
-        "description": "Liveness probe for Docker/monitoring \u2014 lightweight, no dependencies.",
+        "description": "Liveness probe for Docker/monitoring — lightweight, no dependencies.",
         "operationId": "health_check_health_get",
         "responses": {
           "200": {
@@ -1334,6 +1216,13 @@
           "type"
         ],
         "title": "ValidationError"
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "service-token"
       }
     }
   }
