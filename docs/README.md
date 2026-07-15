@@ -1,32 +1,48 @@
-# Requra AI Pipeline Technical Documentation
+# Documentation index
 
-Welcome to the technical documentation index for the Requra AI Pipeline repository. 
+Purpose: provide one maintained entry point to the verified Requra.AI codebase. Audience: new developers, AI and backend engineers, reviewers, and maintainers.
 
-This directory contains the structural architecture plans, API schemas, prompt management guides, and implementation history for the FastAPI + LangGraph microservice.
+## Recommended reading order
 
----
+1. [01-codebase-overview.md](01-codebase-overview.md) — what is in this repository and where to start tracing.
+2. [02-local-development.md](02-local-development.md) — verified setup, commands, and local modes.
+3. [03-system-architecture.md](03-system-architecture.md) — runtime boundaries and job flow.
+4. [04-ai-pipeline.md](04-ai-pipeline.md) — the complete implemented AI pipeline.
+5. [05-api-and-data-flow.md](05-api-and-data-flow.md) — HTTP workflows and contracts.
+6. [06-database-and-storage.md](06-database-and-storage.md) — durable entities, stores, and retention.
+7. [07-testing-debugging-and-observability.md](07-testing-debugging-and-observability.md) — tests and diagnostics.
+8. [08-deployment-and-operations.md](08-deployment-and-operations.md) — Compose, workers, migrations, and operational risks.
+9. [09-security-and-configuration.md](09-security-and-configuration.md) — trust boundaries, secrets, and feature flags.
+10. [10-contributor-onboarding.md](10-contributor-onboarding.md) — safe change paths and documentation ownership.
+11. [glossary.md](glossary.md) — project vocabulary.
 
-## 🗺️ Documentation Directory Map
+## Canonical ownership
 
-### 🚀 Getting Started (Read First)
-* **[production-architecture.md](production-architecture.md)**: The definitive guide to the production deployment. Read this first to understand the FastAPI API server, Redis background queue workers, PostgreSQL/pgvector durability, and security features.
-* **[rag-grounding-architecture.md](rag-grounding-architecture.md)**: Architectural documentation explaining why the pipeline uses RAG for source grounding rather than a conversational QA chatbot. Covers tokenization, BM25 scoring, pgvector semantic search, and the deduplication Jaccard formulas.
+| Topic | Canonical document |
+|---|---|
+| Repository responsibilities and code map | [01-codebase-overview.md](01-codebase-overview.md) |
+| Setup and local commands | [02-local-development.md](02-local-development.md) |
+| Services, queues, stores, and trust boundaries | [03-system-architecture.md](03-system-architecture.md) |
+| Node graph, prompts, retrieval, model calls, persistence, and failure paths | [04-ai-pipeline.md](04-ai-pipeline.md) |
+| HTTP routes and end-to-end request workflows | [05-api-and-data-flow.md](05-api-and-data-flow.md) |
+| PostgreSQL schema, pgvector, Redis cache, and retention | [06-database-and-storage.md](06-database-and-storage.md) |
+| Tests, logs, readiness, and debugging | [07-testing-debugging-and-observability.md](07-testing-debugging-and-observability.md) |
+| Deployment and release operations | [08-deployment-and-operations.md](08-deployment-and-operations.md) |
+| Configuration, authentication, privacy, and security gaps | [09-security-and-configuration.md](09-security-and-configuration.md) |
+| Contributor workflow and safe modifications | [10-contributor-onboarding.md](10-contributor-onboarding.md) |
+| Definitions | [glossary.md](glossary.md) |
+| Runtime prompt text | `ai-service/app/prompts/templates/*.md` (source assets, not prose documentation) |
 
-### 🧩 System Guides & Reference
-* **[db-documentation.md](db-documentation.md)**: Database schema and operations guide for Neon DB and Python SQLAlchemy models.
-* **[rag-and-redis.md](rag-and-redis.md)**: Detailed overview of Retrieval-Augmented Generation (RAG) operations and Redis background worker queue.
-* **[node-reference.md](node-reference.md)**: Reference guide mapping out the compiled **14-node LangGraph structure**, individual node responsibilities, routing logic, and standard warning codes.
-* **[NODE_STATUS.md](NODE_STATUS.md)**: Real-time implementation status report across all 14 nodes, detailing what is integrated and active.
-* **[collaboration_rules.md](collaboration_rules.md)**: Collaboration guidelines, Scrum workflows, state dictionary safety rules, and coding best practices for developers.
-* **[prompts/prompt-management.md](prompts/prompt-management.md)**: Centralized management and protection instructions for LLM prompt templates, snapshot protection testing, and template versioning.
+The generated OpenAPI artifact is [ai-service/docs/openapi/requra-ai-internal.openapi.json](../ai-service/docs/openapi/requra-ai-internal.openapi.json). Do not manually duplicate every generated endpoint here.
 
+## Documentation maintenance policy
 
-
-### 📜 API Contracts
-* **[pipeline-contract.md](pipeline-contract.md)**: API request payload specifications for both development (local/synchronous) and internal production (asynchronous background task) endpoints.
-* **[contracts/pipeline-response-v1.md](contracts/pipeline-response-v1.md)**: Frozen V1 output contract (`JobResult`) schema details and JSON examples (Golden Success, Partial Failure, and System Failure).
-* **[contracts/mvp-results-dashboard-api-contract.md](contracts/mvp-results-dashboard-api-contract.md)**: Comprehensive contract detailing Client ↔ Backend Server ↔ AI Pipeline integration for the Results Dashboard.
-
-### 📈 Decisions & History
-* **[adr/](adr/)**: Directory containing Architecture Decision Records (ADRs) tracking foundational design and framework selections.
-* **[changelog.md](changelog.md)**: Chronological feature log and git transition changes mapping commit-by-commit RAG enhancements.
+- Every subject has one canonical document.
+- Other documents link to the canonical owner instead of repeating it.
+- Temporary implementation plans must not remain indefinitely.
+- Completed plans are removed after durable knowledge is incorporated.
+- Architecture changes update the corresponding canonical document in the same change.
+- New Markdown files require a clearly distinct purpose.
+- Generated audit reports are not permanent documentation by default; this audit should be deleted after review if the team does not need it for traceability.
+- Obsolete docs are removed, not kept “just in case.”
+- Historical documents belong in `docs/archive/` only when they retain genuine migration, decision, or incident value.
