@@ -14,7 +14,8 @@ Purpose: provide one maintained entry point to the verified Requra.AI codebase. 
 8. [08-deployment-and-operations.md](08-deployment-and-operations.md) — Compose, workers, migrations, and operational risks.
 9. [09-security-and-configuration.md](09-security-and-configuration.md) — trust boundaries, secrets, and feature flags.
 10. [10-contributor-onboarding.md](10-contributor-onboarding.md) — safe change paths and documentation ownership.
-11. [glossary.md](glossary.md) — project vocabulary.
+11. [11-endpoint-code-interactions.md](11-endpoint-code-interactions.md) — code-level endpoint handlers and file interactions.
+12. [glossary.md](glossary.md) — project vocabulary.
 
 ## Canonical ownership
 
@@ -30,6 +31,7 @@ Purpose: provide one maintained entry point to the verified Requra.AI codebase. 
 | Deployment and release operations | [08-deployment-and-operations.md](08-deployment-and-operations.md) |
 | Configuration, authentication, privacy, and security gaps | [09-security-and-configuration.md](09-security-and-configuration.md) |
 | Contributor workflow and safe modifications | [10-contributor-onboarding.md](10-contributor-onboarding.md) |
+| HTTP endpoint handlers, code paths, and file interactions | [11-endpoint-code-interactions.md](11-endpoint-code-interactions.md) |
 | Definitions | [glossary.md](glossary.md) |
 | Runtime prompt text | `ai-service/app/prompts/templates/*.md` (source assets, not prose documentation) |
 

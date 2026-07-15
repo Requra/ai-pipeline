@@ -50,3 +50,6 @@ studio = "scripts.run_studio:main"
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+    "integration: requires an explicitly configured external service",
+]

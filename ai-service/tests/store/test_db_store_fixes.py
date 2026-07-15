@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 from sqlalchemy import select, delete
 
@@ -17,12 +19,19 @@ from app.store.models import (
     JobStatus,
 )
 
-pytestmark = pytest.mark.asyncio
+pytestmark = (pytest.mark.asyncio, pytest.mark.integration)
 
-import os
-from dotenv import dotenv_values
-config = dotenv_values("c:/ITI_GP/src/ai-pipeline/ai-service/.env")
-DB_URL = config.get("DATABASE_URL") or os.environ.get("DATABASE_URL") or "postgresql+asyncpg://ai:ai@localhost:5432/ai_pipeline"
+# These tests mutate a real PostgreSQL database and require the migration set
+# (including pgvector).  They must never silently pick up a developer's
+# DATABASE_URL from .env: the normal test suite intentionally forces its
+# database configuration off.  Opt in explicitly from CI or a disposable local
+# database with TEST_DATABASE_URL.
+DB_URL = os.getenv("TEST_DATABASE_URL")
+if not DB_URL:
+    pytest.skip(
+        "database integration tests require TEST_DATABASE_URL",
+        allow_module_level=True,
+    )
 
 
 async def test_db_save_result_decomposes_cleanly():
