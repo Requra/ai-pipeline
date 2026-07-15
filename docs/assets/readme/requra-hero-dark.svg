@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 380" role="img" aria-labelledby="title desc">
+  <title id="title">Requra.AI requirements intelligence overview</title>
+  <desc id="desc">Documents, transcripts, and audio flow through a connected Requra.AI graph into traceable requirements, user stories, summaries, and export data.</desc>
+  <defs>
+    <linearGradient id="panel" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0B1020"/><stop offset="1" stop-color="#171A35"/></linearGradient>
+    <linearGradient id="brand" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#8B5CF6"/><stop offset="1" stop-color="#22D3EE"/></linearGradient>
+    <pattern id="grid" width="28" height="28" patternUnits="userSpaceOnUse"><path d="M28 0H0V28" fill="none" stroke="#334155" stroke-width="1" opacity=".45"/></pattern>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#8B5CF6"/></marker>
+  </defs>
+  <rect width="1200" height="380" rx="24" fill="url(#panel)"/><rect width="1200" height="380" rx="24" fill="url(#grid)"/><rect x="1" y="1" width="1198" height="378" rx="23" fill="none" stroke="#334155"/>
+  <g font-family="Inter,Segoe UI,Arial,sans-serif">
+    <text x="64" y="70" fill="#94A3B8" font-size="16" font-weight="700" letter-spacing="2">EVIDENCE-GROUNDED AI REQUIREMENTS ENGINEERING</text>
+    <text x="64" y="128" fill="#F8FAFC" font-size="48" font-weight="800">Requra.AI</text><rect x="64" y="145" width="310" height="5" rx="2.5" fill="url(#brand)"/>
+    <text x="64" y="186" fill="#E2E8F0" font-size="23" font-weight="600">From messy stakeholder conversations</text><text x="64" y="217" fill="#E2E8F0" font-size="23" font-weight="600">to traceable, delivery-ready requirements.</text>
+    <g transform="translate(64 253)">
+      <g fill="#111827" stroke="#334155"><rect width="104" height="42" rx="12"/><rect x="114" width="112" height="42" rx="12"/><rect x="236" width="136" height="42" rx="12"/><rect x="382" width="112" height="42" rx="12"/></g>
+      <path d="M18 10h15l7 7v15H18zM33 10v8h7M132 10h15l7 7v15h-22zM147 10v8h7" fill="none" stroke="#8B5CF6" stroke-width="2"/>
+      <path d="M254 15v12m6-16v20m6-15v10m6-13v16M400 20v4m6-10v16m6-11v6m6-14v22" stroke="#22D3EE" stroke-width="3" stroke-linecap="round"/>
+      <g fill="#E2E8F0" font-size="15" font-weight="700"><text x="49" y="27">PDF</text><text x="162" y="27">DOCX</text><text x="283" y="27">Transcript</text><text x="429" y="27">Audio</text></g>
+    </g>
+    <g transform="translate(650 45)">
+      <rect width="486" height="290" rx="22" fill="#0F172A" stroke="#334155"/><text x="32" y="40" fill="#94A3B8" font-size="14" font-weight="700" letter-spacing="1.4">CONNECTED EXECUTION GRAPH</text>
+      <g fill="none" stroke="#6D5DFB" stroke-width="2" marker-end="url(#arrow)"><path d="M76 92H174"/><path d="M214 92H312"/><path d="M352 92Q408 92 408 145"/><path d="M408 175Q408 224 352 224"/><path d="M312 224H214"/><path d="M174 224H92"/><path d="M194 112V202"/><path d="M332 112V202"/></g>
+      <g stroke-width="2"><circle cx="56" cy="92" r="20" fill="#211D4E" stroke="#8B5CF6"/><circle cx="194" cy="92" r="20" fill="#083344" stroke="#22D3EE"/><circle cx="332" cy="92" r="20" fill="#211D4E" stroke="#8B5CF6"/><circle cx="408" cy="155" r="20" fill="#052E2B" stroke="#10B981"/><circle cx="332" cy="224" r="20" fill="#211D4E" stroke="#8B5CF6"/><circle cx="194" cy="224" r="20" fill="#083344" stroke="#22D3EE"/><circle cx="72" cy="224" r="20" fill="#052E2B" stroke="#10B981"/></g>
+      <g fill="#CBD5E1" font-size="13" font-weight="700" text-anchor="middle"><text x="56" y="127">INGEST</text><text x="194" y="127">EXTRACT</text><text x="332" y="127">GROUND</text><text x="408" y="190">VALIDATE</text><text x="332" y="260">STORIES</text><text x="194" y="260">SUMMARY</text><text x="72" y="260">EXPORT</text></g>
+      <rect x="32" y="272" width="422" height="1" fill="#334155"/><text x="243" y="283" fill="#94A3B8" font-size="13" text-anchor="middle">source evidence remains attached through final delivery</text>
+    </g>
+  </g>
+</svg>
