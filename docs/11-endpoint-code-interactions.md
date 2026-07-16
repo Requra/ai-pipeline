@@ -218,15 +218,19 @@ download URL by the current client. Supply either `file_url`, or a
 
 ### Option C: multipart upload to the AI service
 
-`POST /internal/process` accepts the file bytes directly:
+`POST /internal/process` accepts the file bytes directly. The legacy single-file
+contract remains available as `file` plus optional `document_id`. For a
+multi-document job, repeat `files` and repeat `document_ids` in the same order:
 
 ```text
 multipart/form-data
-  file       = requirements.pdf
+  files      = requirements.pdf
+  files      = api-contract.docx
   job_id     = upload-001
   project_id = project-1
   tenant_id  = tenant-1
-  document_id = document-789 (optional but recommended)
+  document_ids = document-789
+  document_ids = document-790
 ```
 
 The current server-side path is:
@@ -241,8 +245,15 @@ app/api/internal.py → await file.read()
   → ingest
 ```
 
-The endpoint also creates a source-document manifest, but the AI persistence
-layer stores derived chunks/results rather than durable original file bytes.
+For repeated `files`, the same path carries `raw_inputs` (one independently
+identified byte stream per upload) instead of a concatenated `raw_bytes` blob;
+the Redis cache and worker reconstruction preserve that list.
+
+The endpoint rejects mixed document/audio input and multiple audio files; the
+transcription path supports one audio byte stream per job. It creates one
+source-document manifest row per upload, and document extraction/chunking
+retains each document ID for source attribution. The AI persistence layer stores
+derived chunks/results rather than durable original file bytes.
 The submitted bytes are held in process memory or the transient Redis input
 cache, so this option is best for smaller files, controlled deployments, and
 local development.

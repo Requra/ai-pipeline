@@ -31,6 +31,7 @@ def make_initial_state(
     job_id: str,
     *,
     raw_bytes: bytes = b"",
+    raw_inputs: Optional[List[Dict[str, Any]]] = None,
     raw_text: str = "",
     file_type: str = "text",
     metadata: Optional[Dict[str, Any]] = None,
@@ -47,6 +48,7 @@ def make_initial_state(
     return {
         "job_id": job_id,
         "raw_bytes": raw_bytes,
+        "raw_inputs": raw_inputs or [],
         "raw_text": raw_text,
         "file_type": file_type,
         "metadata": metadata or {},
@@ -100,6 +102,7 @@ def stash_input(
     *,
     raw_text: str = "",
     raw_bytes: bytes = b"",
+    raw_inputs: Optional[List[Dict[str, Any]]] = None,
     file_type: str = "text",
     metadata: Optional[Dict[str, Any]] = None,
     source_documents: Optional[List[Dict[str, Any]]] = None,
@@ -115,11 +118,22 @@ def stash_input(
     """
     from app.queue.redis_queue import get_redis_connection
 
+    serialized_raw_inputs = []
+    for raw_input in raw_inputs or []:
+        item = {key: value for key, value in raw_input.items() if key != "raw_bytes"}
+        item["raw_bytes_b64"] = (
+            base64.b64encode(raw_input["raw_bytes"]).decode("ascii")
+            if raw_input.get("raw_bytes")
+            else ""
+        )
+        serialized_raw_inputs.append(item)
+
     payload = {
         "raw_text": raw_text or "",
         "raw_bytes_b64": (
             base64.b64encode(raw_bytes).decode("ascii") if raw_bytes else ""
         ),
+        "raw_inputs": serialized_raw_inputs,
         "file_type": file_type,
         "metadata": metadata or {},
         "source_documents": source_documents or [],
@@ -175,6 +189,7 @@ async def build_worker_initial_state(
     cached = load_input(job.job_id)
     raw_text = ""
     raw_bytes = b""
+    raw_inputs: List[Dict[str, Any]] = []
     file_type = "text"
     metadata: Dict[str, Any] = {}
     source_documents: List[Dict[str, Any]] = []
@@ -186,6 +201,10 @@ async def build_worker_initial_state(
         raw_text = cached.get("raw_text", "") or ""
         b64 = cached.get("raw_bytes_b64", "")
         raw_bytes = base64.b64decode(b64) if b64 else b""
+        for cached_input in cached.get("raw_inputs", []) or []:
+            item = dict(cached_input)
+            item["raw_bytes"] = base64.b64decode(item.pop("raw_bytes_b64", "") or "")
+            raw_inputs.append(item)
         file_type = cached.get("file_type", "text")
         metadata = cached.get("metadata", {}) or {}
         source_documents = cached.get("source_documents", []) or []
@@ -216,7 +235,7 @@ async def build_worker_initial_state(
             logger.warning("Failed to load source documents from PG: %s", e)
 
     # Resolve from references
-    if not raw_text and not raw_bytes and source_documents:
+    if not raw_text and not raw_bytes and not raw_inputs and source_documents:
         if backend_client is None:
             backend_client = BackendDocumentClient()
 
@@ -224,16 +243,22 @@ async def build_worker_initial_state(
             InputType.BACKEND_DOCUMENT.value,
             InputType.BACKEND_AUDIO.value,
         ):
-            bytes_list = []
+            downloaded_inputs: List[Dict[str, Any]] = []
             for ref in source_documents:
                 # Downloader will raise SourceDownloadError subclasses on failure
                 b = await backend_client.fetch_document_bytes(ref)
                 if b:
-                    bytes_list.append(b)
-            if bytes_list:
-                raw_bytes = bytes_list[0]
-                # Re-run file inspection on the downloaded bytes
-                det_type, det_mime, det_subtype = detect_mime_and_type(raw_bytes)
+                    det_type, det_mime, det_subtype = detect_mime_and_type(b, ref.get("filename"))
+                    downloaded_inputs.append({
+                        **ref,
+                        "raw_bytes": b,
+                        "file_type": det_type,
+                        "mime_type": det_mime,
+                        "audio_format": det_subtype,
+                    })
+            if downloaded_inputs:
+                # Re-run file inspection on every downloaded byte stream.
+                detected_types = {item["file_type"] for item in downloaded_inputs}
                 # Confirm type is valid for the job input type
                 expected_type = (
                     "audio"
@@ -241,24 +266,22 @@ async def build_worker_initial_state(
                     else "document"
                 )
 
-                is_type_match = False
-                if expected_type == "audio" and det_type == "audio":
-                    is_type_match = True
-                elif expected_type == "document" and det_type in (
-                    "pdf",
-                    "docx",
-                    "text",
-                ):
-                    is_type_match = True
-
+                is_type_match = (
+                    detected_types == {"audio"}
+                    if expected_type == "audio"
+                    else detected_types.issubset({"pdf", "docx", "text"})
+                )
                 if not is_type_match:
                     raise SourceSecurityError(
                         f"Downloaded content type is invalid for job input type"
                     )
-
-                file_type = det_type
-                if file_type == "audio":
-                    audio_format = det_subtype
+                if len(downloaded_inputs) == 1:
+                    raw_bytes = downloaded_inputs[0]["raw_bytes"]
+                    file_type = downloaded_inputs[0]["file_type"]
+                    audio_format = downloaded_inputs[0].get("audio_format") or audio_format
+                else:
+                    raw_inputs = downloaded_inputs
+                    file_type = "audio" if expected_type == "audio" else "document"
         else:
             # backend_transcript or text
             texts = []
@@ -275,7 +298,7 @@ async def build_worker_initial_state(
                 )
 
     # If still no content and this is NOT a reference type, we can fallback to chunks (only for "text" inputs)
-    if not raw_text and not raw_bytes:
+    if not raw_text and not raw_bytes and not raw_inputs:
         if job.input_type == InputType.TEXT.value:
             try:
                 chunks = await stores.chunks.get_chunks(job.job_id)
@@ -290,12 +313,13 @@ async def build_worker_initial_state(
             )
 
     # If we still have no raw_text and no raw_bytes, it's a recovery failure!
-    if not raw_text and not raw_bytes:
+    if not raw_text and not raw_bytes and not raw_inputs:
         raise SourceUnavailableError("Original source input is unavailable")
 
     return make_initial_state(
         job.job_id,
         raw_bytes=raw_bytes,
+        raw_inputs=raw_inputs,
         raw_text=raw_text,
         file_type=file_type,
         metadata=metadata,

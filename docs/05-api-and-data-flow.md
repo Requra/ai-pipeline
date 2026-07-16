@@ -42,6 +42,12 @@ Every response carries or receives `X-Request-Id` through middleware in `app/mai
 
 The route returns `202` when a new attempt is queued. A same-fingerprint duplicate may return an idempotent status/result response; a different request reusing an active job id is a conflict. `reprocess: true` can create a new attempt only under the rules in `handle_job_creation()`; the retry route explicitly permits failed/cancelled jobs.
 
+## Multipart compatibility upload contract
+
+`POST /internal/process` accepts either the legacy singular `file` part or one or more repeated `files` parts (do not send both). For multi-file uploads, repeat `document_ids` once per `files` part in the same order. If IDs are omitted, the service derives each ID as `doc_<sha256-prefix>`; legacy `document_id` remains valid for a single file. Each file is signature-checked, hashed, and size-limited independently, and one source-document manifest row is persisted per file.
+
+Multiple documents are supported. Mixed document/audio inputs are rejected with `400`, as are multiple audio files, because the transcription path processes one binary audio source per job. The transient input cache stores an ordered list of individual byte streams rather than a concatenated blob; ingest converts each document separately and chunking retains its `document_id` provenance. A multi-file request fingerprint sorts all source identities and hashes, so an identical retry is idempotent and a changed file with the same `job_id` returns `409`.
+
 ## Status and result workflow
 
 1. Caller submits `POST /internal/jobs`.

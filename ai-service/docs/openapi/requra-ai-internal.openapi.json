@@ -642,9 +642,25 @@
     "schemas": {
       "Body_process_compatibility_internal_process_post": {
         "properties": {
+          "files": {
+            "items": {
+              "type": "string",
+              "format": "binary"
+            },
+            "type": "array",
+            "title": "Files",
+            "default": []
+          },
           "file": {
-            "type": "string",
-            "format": "binary",
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "binary"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "File"
           },
           "job_id": {
@@ -688,6 +704,14 @@
             ],
             "title": "Document Id"
           },
+          "document_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Document Ids",
+            "default": []
+          },
           "metadata": {
             "type": "string",
             "title": "Metadata",
@@ -724,7 +748,6 @@
         },
         "type": "object",
         "required": [
-          "file",
           "job_id",
           "project_id"
         ],
@@ -1110,6 +1133,17 @@
           "document_id": {
             "type": "string",
             "title": "Document Id"
+          },
+          "filename": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Filename"
           },
           "file_type": {
             "anyOf": [

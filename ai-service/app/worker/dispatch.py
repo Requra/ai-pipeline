@@ -43,7 +43,11 @@ async def dispatch_job(
             
             is_reference_job = (
                 initial_state is None
-                or (not initial_state.get("raw_bytes") and not initial_state.get("raw_text"))
+                or (
+                    not initial_state.get("raw_bytes")
+                    and not initial_state.get("raw_text")
+                    and not initial_state.get("raw_inputs")
+                )
             )
             
             if is_reference_job:

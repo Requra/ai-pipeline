@@ -166,12 +166,16 @@ async def create_job(
 async def process_compatibility(
     background_tasks: BackgroundTasks,
     request: Request,
-    file: UploadFile = File(...),
+    files: List[UploadFile] = File(default=[]),
+    # Legacy singular field retained for existing clients. New callers should
+    # submit one or more repeated `files` parts.
+    file: Optional[UploadFile] = File(None),
     job_id: str = Form(...),
     project_id: str = Form(...),
     tenant_id: Optional[str] = Form(None),
     requested_by: Optional[str] = Form(None),
     document_id: Optional[str] = Form(None),
+    document_ids: List[str] = Form(default=[]),
     metadata: str = Form("{}"),
     callback_url: Optional[str] = Form(None),
     language: Optional[str] = Form("en"),
@@ -198,47 +202,106 @@ async def process_compatibility(
     if not project_id or not project_id.strip():
         raise HTTPException(status_code=400, detail="project_id is required")
 
-    # 4. Read bytes with a bounded strategy
-    file_bytes = await file.read()
-    file_size = len(file_bytes)
-    if file_size == 0:
-        raise HTTPException(status_code=400, detail="file is empty")
+    uploads = list(files)
+    if file is not None:
+        uploads.append(file)
+    if not uploads:
+        raise HTTPException(status_code=400, detail="at least one file upload is required")
+    if file is not None and files:
+        raise HTTPException(
+            status_code=400,
+            detail="use either the legacy 'file' field or repeated 'files' fields, not both",
+        )
 
-    # 5. Detect type and signatures
+    if document_ids and document_id:
+        raise HTTPException(
+            status_code=400,
+            detail="use either legacy document_id or repeated document_ids, not both",
+        )
+    if document_ids and len(document_ids) != len(uploads):
+        raise HTTPException(
+            status_code=400,
+            detail="document_ids must be repeated once for each uploaded file, in files order",
+        )
+    if document_id and len(uploads) != 1:
+        raise HTTPException(
+            status_code=400,
+            detail="legacy document_id is only valid with a single uploaded file; use document_ids for multiple files",
+        )
+
+    # 4. Validate each stream independently. Client filenames/content types are
+    # metadata only; signature detection decides the accepted type.
     from app.services.file_inspection import detect_mime_and_type, MAX_DOC_SIZE, MAX_AUDIO_SIZE
     import hashlib
+    validated_inputs: List[Dict[str, Any]] = []
+    for index, upload in enumerate(uploads):
+        file_bytes = await upload.read()
+        filename = upload.filename or f"upload-{index + 1}"
+        file_size = len(file_bytes)
+        if file_size == 0:
+            raise HTTPException(status_code=400, detail=f"file '{filename}' is empty")
 
-    file_type, mime_type, subtype = detect_mime_and_type(file_bytes, file.filename)
-    if file_type == "unknown":
-        raise HTTPException(status_code=415, detail="Unsupported media type or signature not recognized")
+        file_type, mime_type, subtype = detect_mime_and_type(file_bytes, filename)
+        if file_type == "unknown":
+            raise HTTPException(
+                status_code=415,
+                detail=f"file '{filename}' has an unsupported media type or unrecognized signature",
+            )
+        limit = MAX_AUDIO_SIZE if file_type == "audio" else MAX_DOC_SIZE
+        if file_size > limit:
+            kind = "Audio" if file_type == "audio" else "Document"
+            raise HTTPException(status_code=413, detail=f"{kind} file '{filename}' is too large ({file_size} > {limit})")
 
-    # Bounded size verification
-    if file_type == "audio":
-        if file_size > MAX_AUDIO_SIZE:
-            raise HTTPException(status_code=413, detail=f"Audio file too large ({file_size} > {MAX_AUDIO_SIZE})")
-    else:
-        if file_size > MAX_DOC_SIZE:
-            raise HTTPException(status_code=413, detail=f"Document too large ({file_size} > {MAX_DOC_SIZE})")
+        file_hash = hashlib.sha256(file_bytes).hexdigest()
+        supplied_id = document_ids[index] if document_ids else document_id
+        if supplied_id is not None and not supplied_id.strip():
+            raise HTTPException(status_code=400, detail="document IDs must be non-empty when supplied")
+        resolved_doc_id = supplied_id or f"doc_{file_hash[:16]}"
+        validated_inputs.append({
+            "document_id": resolved_doc_id,
+            "filename": filename,
+            "file_type": file_type,
+            "mime_type": mime_type,
+            "sha256_hash": file_hash,
+            "audio_format": subtype if file_type == "audio" else None,
+            "raw_bytes": file_bytes,
+        })
 
-    file_hash = hashlib.sha256(file_bytes).hexdigest()
+    resolved_ids = [item["document_id"] for item in validated_inputs]
+    if len(set(resolved_ids)) != len(resolved_ids):
+        raise HTTPException(
+            status_code=400,
+            detail="each uploaded file must have a unique document ID; supply distinct document_ids for duplicate content",
+        )
 
-    # Require a stable retrievable source identity for production retries
-    resolved_doc_id = document_id
-    if not resolved_doc_id:
-        resolved_doc_id = f"doc_{file_hash[:16]}"
+    input_types = {item["file_type"] == "audio" for item in validated_inputs}
+    if len(input_types) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail="mixed document and audio uploads are not supported; submit them as separate jobs",
+        )
+    if validated_inputs[0]["file_type"] == "audio" and len(validated_inputs) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail="multiple audio uploads are not supported; submit one audio file per job",
+        )
 
-    mapped_input_type = "backend_audio" if file_type == "audio" else "backend_document"
+    mapped_input_type = "backend_audio" if validated_inputs[0]["file_type"] == "audio" else "backend_document"
 
     from app.api.schemas import SourceDocumentIn, CreateJobRequest, JobOptionsIn
-    source_doc = SourceDocumentIn(
-        document_id=resolved_doc_id,
-        file_type=file_type,
-        mime_type=mime_type,
-        storage_key=None,
-        file_url=None,
-        sha256_hash=file_hash,
-        page_count=None,
-    )
+    source_docs = [
+        SourceDocumentIn(
+            document_id=item["document_id"],
+            filename=item["filename"],
+            file_type=item["file_type"],
+            mime_type=item["mime_type"],
+            storage_key=None,
+            file_url=None,
+            sha256_hash=item["sha256_hash"],
+            page_count=None,
+        )
+        for item in validated_inputs
+    ]
 
     req = CreateJobRequest(
         job_id=sanitized_job_id,
@@ -246,7 +309,7 @@ async def process_compatibility(
         project_id=project_id,
         requested_by=requested_by,
         input_type=mapped_input_type,
-        source_documents=[source_doc],
+        source_documents=source_docs,
         content=None,
         options=JobOptionsIn(
             generate_user_stories=True,
@@ -265,18 +328,23 @@ async def process_compatibility(
         return JSONResponse(status_code=outcome.http_status, content=outcome.body)
 
     rec = outcome.job
-    # Cache raw bytes locally for content recovery endpoint / mock testing
-    MOCK_DOCUMENT_STORAGE[resolved_doc_id] = file_bytes
+    # Cache raw bytes locally for the compatibility recovery endpoint / tests.
+    for item in validated_inputs:
+        MOCK_DOCUMENT_STORAGE[item["document_id"]] = item["raw_bytes"]
+
+    is_legacy_single = file is not None
+    single_input = validated_inputs[0] if len(validated_inputs) == 1 else None
     await prepare_and_dispatch_job(
         req,
         rec,
         background_tasks=background_tasks,
         request_id=request_id,
-        raw_bytes=file_bytes,
+        raw_bytes=single_input["raw_bytes"] if is_legacy_single and single_input else b"",
+        raw_inputs=[] if is_legacy_single else validated_inputs,
         raw_text="",
-        file_type=file_type,
+        file_type=single_input["file_type"] if single_input else "document",
         metadata=parsed_metadata,
-        audio_format=subtype if file_type == "audio" else None,
+        audio_format=single_input["audio_format"] if single_input else None,
         transcribe_options={},
     )
 
@@ -564,6 +632,11 @@ async def get_document_content(document_id: str):
         from app.worker.state import load_input
         cached = load_input(doc.job_id)
         if cached:
+            for cached_input in cached.get("raw_inputs", []) or []:
+                if cached_input.get("document_id") == document_id:
+                    import base64
+                    content_bytes = base64.b64decode(cached_input.get("raw_bytes_b64", "") or "")
+                    return Response(content=content_bytes, media_type=doc.mime_type or "application/octet-stream")
             b64 = cached.get("raw_bytes_b64", "")
             if b64:
                 import base64

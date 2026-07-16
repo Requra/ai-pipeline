@@ -14,10 +14,11 @@ the format/provider files under `test-fixtures/verification`.
 |---|---|---|
 | `complementary/` | Three related product documents | Requirements from separate documents should be combined into one coherent result. |
 | `conflicts/` | Two contradictory password-policy documents | Requirements should remain visible and produce a semantic conflict warning when conflict detection is enabled. |
+| `multipart_upload/` | A long DOCX and a long PDF, each with unrelated middle text | `/internal/process` must validate, extract, chunk, persist, and return each uploaded binary source separately. |
 
-The documents in a group are bundled with source-name separators by the live
-runner because `POST /internal/process` accepts one multipart file per job. The
-source names remain in the uploaded content so the result can be inspected.
+The historical text fixture runner bundles its `.txt` group files with source-name
+separators. `multipart_upload/` instead uses the production multipart contract:
+one repeated `files` part per binary source and matching repeated `document_ids`.
 True backend-owned multi-document retrieval is a separate path: submit
 `source_documents` to `POST /internal/jobs` and provide either `file_url` or a
 configured `BACKEND_BASE_URL` retrieval endpoint. See
@@ -121,4 +122,3 @@ The runner:
 Real runs are evidence of the configured provider and deployment at that time;
 they are not deterministic snapshots. Keep the job ID and result JSON with the
 review record when investigating a provider regression.
-

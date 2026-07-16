@@ -52,6 +52,47 @@ async def test_ingest_text_masks_pii_and_marks_ready(base_state, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_ingest_multiple_raw_inputs_preserves_document_provenance(base_state, monkeypatch):
+    async def fake_relevance(_: str) -> ingest.RelevanceCheck:
+        return ingest.RelevanceCheck(is_useful=True, relevance_score=0.9, reason="requirements")
+
+    monkeypatch.setattr(ingest, "_run_relevance_check", fake_relevance)
+    state = base_state.copy()
+    state.update({
+        "file_type": "document",
+        "raw_bytes": b"",
+        "raw_inputs": [
+            {
+                "document_id": "doc-a",
+                "filename": "a.txt",
+                "file_type": "text",
+                "mime_type": "text/plain",
+                "sha256_hash": "a" * 64,
+                "raw_bytes": b"The system must allow users to create an account and verify an email address.",
+            },
+            {
+                "document_id": "doc-b",
+                "filename": "b.txt",
+                "file_type": "text",
+                "mime_type": "text/plain",
+                "sha256_hash": "b" * 64,
+                "raw_bytes": b"Administrators must review audit events and export filtered security reports.",
+            },
+        ],
+        "source_documents": [{"document_id": "doc-a"}, {"document_id": "doc-b"}],
+    })
+
+    result = await ingest.ingest_node(state)
+
+    assert result["status"] == "ready_for_chunking"
+    assert [(doc["document_id"], doc["filename"]) for doc in result["source_documents"]] == [
+        ("doc-a", "a.txt"),
+        ("doc-b", "b.txt"),
+    ]
+    assert all(doc["text"] for doc in result["source_documents"])
+
+
+@pytest.mark.asyncio
 async def test_ingest_rejects_short_text(base_state):
     state = base_state.copy()
     state["file_type"] = "text"
