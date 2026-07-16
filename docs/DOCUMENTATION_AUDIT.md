@@ -5,10 +5,10 @@ Purpose: record the Markdown consolidation of the repository. Audience: maintain
 ## Result summary
 
 - Original Markdown files inspected: **88**.
-- Final canonical prose documents: **13** (root README, documentation index, ten numbered guides, and glossary).
+- Final canonical prose documents: **14** (root README, documentation index, eleven numbered guides, and glossary).
 - Runtime prompt Markdown assets retained: **10**.
 - Final audit report: **1**.
-- Expected final Markdown total after cleanup: **24**.
+- Expected final Markdown total after cleanup: **25**.
 - Files archived: **0**.
 - Legacy Markdown paths removed from the final tree: **77**, including the old lowercase root README and temporary reports.
 - Source, application behavior, dependencies, schemas, migrations, infrastructure, and tests were not changed by this documentation work.
@@ -55,6 +55,7 @@ The new documents use source paths and symbols as authority, mark configuration-
 | `/docs/08-deployment-and-operations.md` | Compose topology, migrations, release checks, rollback, and risks. |
 | `/docs/09-security-and-configuration.md` | Auth, source security, secrets, PII masking, flags, and gaps. |
 | `/docs/10-contributor-onboarding.md` | First-day path and safe change checklists. |
+| `/docs/11-endpoint-code-interactions.md` | Production endpoint handlers, file transport options, source recovery, and backend integration. |
 | `/docs/glossary.md` | Requra.AI vocabulary. |
 
 ## Original-file change manifest

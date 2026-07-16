@@ -108,6 +108,196 @@ All endpoints below depend on the `require_internal_auth` dependency.
 
 ---
 
+## Production endpoint and file-transport guide
+
+This section is the canonical explanation of how a backend integration supplies
+text, uploaded bytes, or backend-owned document references. The endpoint schema
+accepts `file_url` as optional, but document and audio jobs still need a
+retrievable source at execution time: either an explicit `file_url`, or a
+`document_id` together with a configured `BACKEND_BASE_URL`.
+
+### Which production endpoint supports which input
+
+| Endpoint | Auth | Accepts binary upload | Accepts inline text | Supports backend document references | Downloads from `file_url` | Typical use |
+|---|---|---:|---:|---:|---:|---|
+| `POST /internal/jobs` | Internal bearer token | No | Yes, for `text` and `backend_transcript` | Yes, for `backend_document` and `backend_audio` | Yes | Canonical production job API. |
+| `POST /internal/process` | Internal bearer token | Yes, multipart | No | Creates a source reference for the uploaded file | Not required for the submitted file | Compatibility upload endpoint. |
+| `POST /internal/process-json` | Internal bearer token | No | Yes | Optional metadata only; content is required | Only used if the worker must recover missing transcript text | Compatibility text/transcript endpoint. |
+| `GET /internal/documents/{document_id}/content` | Internal bearer token | Response only | No | Retrieves content from local/cache/database/backend | Backend-side source recovery | Source recovery and diagnostics. |
+
+The internal routes are mounted in `app/api/internal.py`; request models are in
+`app/api/schemas.py`.
+
+### Option A: backend-owned storage with document references
+
+This is the recommended production integration for documents and audio. The
+backend keeps ownership of the original file and sends metadata rather than
+copying the file through the job-creation request.
+
+```json
+{
+  "job_id": "job-001",
+  "tenant_id": "tenant-1",
+  "project_id": "project-1",
+  "input_type": "backend_document",
+  "source_documents": [
+    {
+      "document_id": "document-123",
+      "file_type": "pdf",
+      "mime_type": "application/pdf",
+      "sha256_hash": "<optional-sha256>"
+    }
+  ]
+}
+```
+
+The `file_url` may be omitted when the AI service has:
+
+```text
+BACKEND_BASE_URL=https://backend.example.com
+BACKEND_SERVICE_TOKEN=<service token>
+```
+
+The worker then requests:
+
+```text
+GET https://backend.example.com/internal/documents/document-123/content
+```
+
+The current implementation is:
+
+```text
+app/worker/state.py → build_worker_initial_state()
+  → app/clients/backend.py → BackendDocumentClient.fetch_document_bytes()
+  → detect_file_type
+  → ingest
+```
+
+For text/transcript references, `fetch_document_text()` uses the supplied
+`file_url` or falls back to:
+
+```text
+GET {BACKEND_BASE_URL}/internal/documents/{document_id}/text
+```
+
+`document_id` alone is not sufficient when `BACKEND_BASE_URL` is unset.
+
+### Option B: explicit presigned `file_url`
+
+The backend may provide a short-lived object-storage URL:
+
+```json
+{
+  "job_id": "job-002",
+  "project_id": "project-1",
+  "input_type": "backend_document",
+  "source_documents": [
+    {
+      "document_id": "document-456",
+      "file_type": "pdf",
+      "mime_type": "application/pdf",
+      "file_url": "https://storage.example.com/signed/document-456.pdf",
+      "sha256_hash": "<sha256>"
+    }
+  ]
+}
+```
+
+`BackendDocumentClient.fetch_document_bytes()` validates the URL, blocks
+unsafe hosts and credentials in URLs, limits size, handles redirects with
+additional checks, and verifies the hash when one is supplied. Custom storage
+domains must be included in `ALLOWED_DOWNLOAD_DOMAINS` unless they match the
+configured backend origin.
+
+Use short-lived URLs only. The source manifest stores `file_url`, so long-lived
+URLs or URLs containing credentials should not be sent.
+
+`storage_key` is stored as source metadata but is not itself converted into a
+download URL by the current client. Supply either `file_url`, or a
+`document_id` resolvable through `BACKEND_BASE_URL`.
+
+### Option C: multipart upload to the AI service
+
+`POST /internal/process` accepts the file bytes directly:
+
+```text
+multipart/form-data
+  file       = requirements.pdf
+  job_id     = upload-001
+  project_id = project-1
+  tenant_id  = tenant-1
+  document_id = document-789 (optional but recommended)
+```
+
+The current server-side path is:
+
+```text
+app/api/internal.py → await file.read()
+  → prepare_and_dispatch_job(raw_bytes=file_bytes)
+  → initial PipelineState.raw_bytes
+  → Redis transient input cache when Redis is enabled
+  → worker
+  → detect_file_type
+  → ingest
+```
+
+The endpoint also creates a source-document manifest, but the AI persistence
+layer stores derived chunks/results rather than durable original file bytes.
+The submitted bytes are held in process memory or the transient Redis input
+cache, so this option is best for smaller files, controlled deployments, and
+local development.
+
+### Option D: inline text or already-transcribed meetings
+
+For text:
+
+```json
+{
+  "job_id": "text-001",
+  "project_id": "project-1",
+  "input_type": "text",
+  "content": "The system shall ..."
+}
+```
+
+For an already-transcribed meeting, use `backend_transcript` with `content`.
+No file URL is required. The content is placed in `raw_text` and passes
+through file detection and ingest as text. Optional `source_documents` can be
+included for provenance, but the original audio is not downloaded by this
+path.
+
+### Where the original file exists during processing
+
+| Integration | Initial location | Worker recovery | Durable original bytes? |
+|---|---|---|---:|
+| `/internal/process` | AI API process memory | Initial state, or Redis cache | No |
+| `/internal/jobs` with `file_url` | Backend/object storage | Direct download by worker | No |
+| `/internal/jobs` with document ID | Backend storage | Backend content endpoint | No |
+| `/internal/jobs` with inline text | Request/Redis cache | Initial state or Redis cache | No |
+| `/internal/process-json` transcript | Request/Redis cache | Initial state or Redis cache | No |
+
+The AI service durably stores the source manifest, chunks, embeddings when
+enabled, generated result, and job metadata. Raw source ownership remains with
+the backend or object-storage system.
+
+### Recommended decision
+
+Use this order for production integrations:
+
+1. `backend_document` or `backend_audio` with `document_id` and a protected
+   backend content endpoint.
+2. Presigned `file_url` for large-file/high-throughput deployments where direct
+   object-storage download is preferred.
+3. `/internal/process` multipart upload for small files or local development.
+4. `text` or `backend_transcript` when the backend already owns the extracted
+   or transcribed text.
+
+Do not send a document job with only `document_id` unless
+`BACKEND_BASE_URL` is configured. It will be accepted by schema validation but
+can fail later during worker source recovery.
+
+---
+
 ## 🔗 2. Core Code Interactions: The End-to-End Flow
 
 To trace how these code files interact during a job's lifecycle:
