@@ -248,6 +248,20 @@ def _extract_from_state(state: PipelineState, file_type: str) -> tuple[str, Opti
     return "", f"INGEST_FAILED: unsupported file_type '{file_type}'"
 
 
+def _extract_from_bytes(raw_bytes: bytes, file_type: str) -> tuple[str, Optional[str]]:
+    """Extract one independently-tracked multipart source."""
+    if file_type == "pdf":
+        return _extract_pdf(raw_bytes)
+    if file_type == "docx":
+        return _extract_docx(raw_bytes)
+    if file_type in ("text", "document"):
+        try:
+            return raw_bytes.decode("utf-8"), None
+        except UnicodeDecodeError:
+            return raw_bytes.decode("latin-1", errors="replace"), None
+    return "", f"INGEST_FAILED: unsupported file_type '{file_type}'"
+
+
 def _heuristic_relevance(snippet: str) -> RelevanceCheck:
     keywords = [
         "requirement",
@@ -330,6 +344,76 @@ async def ingest_node(state: PipelineState) -> IngestOutput:
     # Trust the file_type determined by detect_file_type
 
     file_type = str(state.get("file_type", "")).strip().lower()
+
+    raw_inputs = state.get("raw_inputs") or []
+    if raw_inputs:
+        source_docs_by_id = {
+            doc.get("document_id"): dict(doc)
+            for doc in state.get("source_documents", [])
+            if doc.get("document_id")
+        }
+        extracted_documents = []
+        combined_text_parts = []
+        aggregate_stats = {"emails": 0, "phones": 0, "credit_cards": 0, "api_keys": 0}
+
+        try:
+            for raw_input in raw_inputs:
+                document_id = raw_input.get("document_id")
+                filename = raw_input.get("filename") or document_id or "unknown_file"
+                text, extraction_error = _extract_from_bytes(
+                    raw_input.get("raw_bytes") or b"", raw_input.get("file_type", "")
+                )
+                if extraction_error:
+                    return _build_output(
+                        raw_text=None, is_useful=False, relevance_score=0.0, status="rejected",
+                        error=f"{extraction_error} for '{filename}'",
+                    )
+                normalized_text = text.strip()
+                if len(normalized_text) < MIN_TEXT_LENGTH:
+                    return _build_output(
+                        raw_text=None, is_useful=False, relevance_score=0.0, status="rejected",
+                        error=f"INGEST_EMPTY: text too short for '{filename}' ({len(normalized_text)} chars)",
+                    )
+                if settings.ENABLE_PII_MASKING:
+                    normalized_text, stats = _mask_pii(normalized_text)
+                    for key, value in stats.items():
+                        aggregate_stats[key] += value
+
+                source_doc = source_docs_by_id.setdefault(document_id, {})
+                source_doc.update({
+                    "document_id": document_id,
+                    "filename": filename,
+                    "file_type": raw_input.get("file_type"),
+                    "mime_type": raw_input.get("mime_type"),
+                    "sha256_hash": raw_input.get("sha256_hash"),
+                    "text": normalized_text,
+                })
+                extracted_documents.append(source_doc)
+                combined_text_parts.append(normalized_text)
+
+            combined_text = "\n\n".join(combined_text_parts)
+            relevance = await _run_relevance_check(combined_text[:RELEVANCE_SNIPPET_CHARS])
+            pii_stats = {key: value for key, value in aggregate_stats.items() if value > 0} or None
+            if not relevance.is_useful:
+                return _build_output(
+                    raw_text=combined_text, is_useful=False, relevance_score=relevance.relevance_score,
+                    status="rejected", error=f"DOCUMENT_REJECTED: {relevance.reason}", pii_stats=pii_stats,
+                )
+            return {
+                "raw_text": combined_text,
+                "source_documents": extracted_documents,
+                "is_useful": True,
+                "relevance_score": relevance.relevance_score,
+                "status": "ready_for_chunking",
+                "error": None,
+                "pii_stats": pii_stats,
+            }
+        except Exception as exc:
+            logger.exception("Unhandled multipart ingest failure")
+            return _build_output(
+                raw_text=None, is_useful=False, relevance_score=0.0, status="rejected",
+                error=f"INGEST_FAILED: {exc}",
+            )
 
     if file_type == "audio":
         return _build_output(

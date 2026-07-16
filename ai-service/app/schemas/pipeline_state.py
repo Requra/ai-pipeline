@@ -18,6 +18,9 @@ class PipelineState(TypedDict):
     # --- Inputs ---
     job_id: str
     raw_bytes: bytes
+    # Multipart uploads may contain several binary sources.  Keep each payload
+    # separate so extraction and chunking can retain document provenance.
+    raw_inputs: List[Dict[str, Any]]
     file_type: str                  # e.g., "pdf", "docx", "audio", "text"
     metadata: Dict[str, Any]
     audio_format: Optional[str]

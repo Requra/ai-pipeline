@@ -68,7 +68,17 @@ def _normalize_source_documents(source_documents: Optional[List[Any]]) -> List[D
         }
         for d in docs
     ]
-    normalized.sort(key=lambda x: (x["document_id"] or "", x["storage_key"] or ""))
+    # Include the content hash in the ordering so a request with repeated
+    # caller-supplied IDs still fingerprints independently of multipart order.
+    normalized.sort(
+        key=lambda x: (
+            x["document_id"] or "",
+            x["storage_key"] or "",
+            x["sha256_hash"] or "",
+            x["file_type"] or "",
+            x["mime_type"] or "",
+        )
+    )
     return normalized
 
 

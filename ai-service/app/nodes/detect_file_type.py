@@ -21,6 +21,77 @@ async def detect_file_type_node(state: PipelineState) -> dict:
     print("--- DETECT FILE TYPE NODE ---")
     update_progress(state.get("job_id"), "detect_file_type", 5, "PROCESSING")
     
+    raw_inputs = state.get("raw_inputs") or []
+    if raw_inputs:
+        normalized_inputs = []
+        source_documents_by_id = {
+            doc.get("document_id"): dict(doc)
+            for doc in state.get("source_documents", [])
+            if doc.get("document_id")
+        }
+        detected_kinds = set()
+
+        for raw_input in raw_inputs:
+            file_bytes = raw_input.get("raw_bytes") or b""
+            filename = raw_input.get("filename") or "unknown_file"
+            if not file_bytes:
+                return {"status": "rejected", "error": f"FILE_TYPE_REJECTED: empty file payload for '{filename}'"}
+
+            file_type, mime_type, subtype = detect_mime_and_type(file_bytes, filename)
+            if file_type == "unknown":
+                return {
+                    "status": "rejected",
+                    "error": f"FILE_TYPE_REJECTED: unsupported file format for '{filename}' (signature not recognized)",
+                }
+            max_size = MAX_AUDIO_SIZE if file_type == "audio" else MAX_DOC_SIZE
+            if len(file_bytes) > max_size:
+                return {
+                    "status": "rejected",
+                    "error": f"FILE_TYPE_REJECTED: file too large for '{filename}'",
+                }
+
+            normalized = dict(raw_input)
+            normalized.update({"file_type": file_type, "mime_type": mime_type, "audio_format": subtype})
+            normalized_inputs.append(normalized)
+            detected_kinds.add("audio" if file_type == "audio" else "document")
+
+            document_id = normalized.get("document_id")
+            if document_id:
+                source_doc = source_documents_by_id.setdefault(document_id, {})
+                source_doc.update({
+                    "document_id": document_id,
+                    "filename": filename,
+                    "file_type": file_type,
+                    "mime_type": mime_type,
+                    "sha256_hash": normalized.get("sha256_hash"),
+                })
+
+        if len(detected_kinds) != 1:
+            return {
+                "status": "rejected",
+                "error": "FILE_TYPE_REJECTED: mixed document and audio inputs are not supported",
+            }
+        if detected_kinds == {"audio"} and len(normalized_inputs) > 1:
+            return {
+                "status": "rejected",
+                "error": "FILE_TYPE_REJECTED: multiple audio inputs are not supported",
+            }
+
+        first = normalized_inputs[0]
+        return {
+            "raw_inputs": normalized_inputs,
+            "source_documents": list(source_documents_by_id.values()),
+            "source_metadata": DocumentSource(
+                filename=first.get("filename", "unknown_file"),
+                file_size_bytes=len(first["raw_bytes"]),
+                mime_type=first["mime_type"],
+                sha256_hash=first.get("sha256_hash") or hashlib.sha256(first["raw_bytes"]).hexdigest(),
+            ),
+            "file_type": "audio" if detected_kinds == {"audio"} else "document",
+            "audio_format": first.get("audio_format") if detected_kinds == {"audio"} else None,
+            "status": "type_detected",
+        }
+
     raw_bytes = state.get("raw_bytes")
     metadata = state.get("metadata", {})
     filename = metadata.get("filename", "unknown_file")

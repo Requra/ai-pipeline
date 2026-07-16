@@ -319,6 +319,8 @@ curl -X POST http://localhost:8000/internal/jobs \
 
 All `/internal/*` routes share bearer-token protection. Job creation is idempotent by request fingerprint and job ID. Result reads return `409` until a persisted result is available; cancellation is cooperative between graph updates; callbacks are optional and do not replace polling.
 
+`POST /internal/process` accepts the legacy single `file` field and the new repeated `files` field. For multiple uploads, repeat `files` and, when caller-owned IDs are needed, repeat `document_ids` in matching order. The endpoint supports multiple documents per job, persists one source manifest row per file, and preserves per-document chunk provenance. It rejects mixed document/audio uploads and multiple audio files; filenames and client MIME values are metadata only, while byte inspection and per-file size limits are authoritative.
+
 See [API and data flow](docs/05-api-and-data-flow.md), [endpoint code interactions](docs/11-endpoint-code-interactions.md), and the [OpenAPI artifact](ai-service/docs/openapi/requra-ai-internal.openapi.json).
 
 ## Quick start

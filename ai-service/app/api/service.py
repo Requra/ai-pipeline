@@ -501,6 +501,7 @@ async def prepare_and_dispatch_job(
     background_tasks: Any,  # fastapi.BackgroundTasks
     request_id: Optional[str] = None,
     raw_bytes: bytes = b"",
+    raw_inputs: Optional[list[Dict[str, Any]]] = None,
     raw_text: str = "",
     file_type: str = "text",
     metadata: Optional[Dict[str, Any]] = None,
@@ -520,13 +521,17 @@ async def prepare_and_dispatch_job(
     # We duck-type req.source_documents. Each element may be a Pydantic model or dict.
     req_docs = getattr(req, "source_documents", []) or []
     for idx, d in enumerate(req_docs):
-        d_id = getattr(d, "document_id", None) or d.get("document_id") if isinstance(d, dict) else getattr(d, "document_id", None)
-        f_type = getattr(d, "file_type", None) or d.get("file_type") if isinstance(d, dict) else getattr(d, "file_type", None)
-        mime = getattr(d, "mime_type", None) or d.get("mime_type") if isinstance(d, dict) else getattr(d, "mime_type", None)
-        s_key = getattr(d, "storage_key", None) or d.get("storage_key") if isinstance(d, dict) else getattr(d, "storage_key", None)
-        f_url = getattr(d, "file_url", None) or d.get("file_url") if isinstance(d, dict) else getattr(d, "file_url", None)
-        h = getattr(d, "hash", None) or getattr(d, "sha256_hash", None) or d.get("sha256_hash") or d.get("hash") if isinstance(d, dict) else (getattr(d, "hash", None) or getattr(d, "sha256_hash", None))
-        p_count = getattr(d, "page_count", None) or d.get("page_count") if isinstance(d, dict) else getattr(d, "page_count", None)
+        def value(name: str) -> Any:
+            return d.get(name) if isinstance(d, dict) else getattr(d, name, None)
+
+        d_id = value("document_id")
+        filename = value("filename")
+        f_type = value("file_type")
+        mime = value("mime_type")
+        s_key = value("storage_key")
+        f_url = value("file_url")
+        h = value("hash") or value("sha256_hash")
+        p_count = value("page_count")
         
         doc_rec = SourceDocumentRecord(
             job_id=job.job_id,
@@ -534,7 +539,7 @@ async def prepare_and_dispatch_job(
             project_id=job.project_id,
             backend_document_id=d_id,
             source_type=f_type or ("audio" if file_type == "audio" else "text"),
-            file_name=d_id or "unknown",
+            file_name=filename or d_id or "unknown",
             mime_type=mime or "application/octet-stream",
             storage_key=s_key,
             file_url=f_url,
@@ -545,6 +550,7 @@ async def prepare_and_dispatch_job(
         doc_records.append(doc_rec)
         source_docs_payload.append({
             "document_id": d_id,
+            "filename": filename,
             "file_type": f_type,
             "mime_type": mime,
             "storage_key": s_key,
@@ -584,6 +590,7 @@ async def prepare_and_dispatch_job(
     initial_state = make_initial_state(
         job.job_id,
         raw_bytes=raw_bytes,
+        raw_inputs=raw_inputs,
         raw_text=raw_text,
         file_type=file_type,
         metadata=metadata or {},
@@ -601,6 +608,7 @@ async def prepare_and_dispatch_job(
     cache_input = {
         "raw_text": raw_text,
         "raw_bytes": raw_bytes,
+        "raw_inputs": raw_inputs or [],
         "file_type": file_type,
         "metadata": metadata or {},
         "source_documents": source_docs_payload,

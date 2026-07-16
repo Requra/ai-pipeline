@@ -131,6 +131,24 @@ def test_fingerprint_source_documents_order_independent():
     assert compute_job_request_fingerprint(a) == compute_job_request_fingerprint(b)
 
 
+def test_fingerprint_source_documents_with_repeated_ids_are_order_independent():
+    a = _req(
+        input_type="backend_document", content=None,
+        source_documents=[
+            {"document_id": "D-1", "sha256_hash": "aaa"},
+            {"document_id": "D-1", "sha256_hash": "bbb"},
+        ],
+    )
+    b = _req(
+        input_type="backend_document", content=None,
+        source_documents=[
+            {"document_id": "D-1", "sha256_hash": "bbb"},
+            {"document_id": "D-1", "sha256_hash": "aaa"},
+        ],
+    )
+    assert compute_job_request_fingerprint(a) == compute_job_request_fingerprint(b)
+
+
 def test_fingerprint_changes_with_requested_by():
     a = _req(requested_by="user-1")
     b = _req(requested_by="user-2")

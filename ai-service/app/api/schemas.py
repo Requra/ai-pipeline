@@ -11,6 +11,7 @@ InputTypeLiteral = Literal["text", "backend_document", "backend_transcript", "ba
 
 class SourceDocumentIn(BaseModel):
     document_id: str
+    filename: Optional[str] = None
     file_type: Optional[str] = None
     mime_type: Optional[str] = None
     storage_key: Optional[str] = None
