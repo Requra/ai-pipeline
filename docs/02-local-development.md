@@ -18,7 +18,7 @@ poetry install
 Copy-Item .env.example .env
 ```
 
-Edit `ai-service/.env` with placeholders or real local values. Never commit `.env`, provider keys, or `openai_key.txt`. The exact settings and defaults are listed in [09-security-and-configuration.md](09-security-and-configuration.md).
+Edit `ai-service/.env` with placeholders or real local values. The template is intentionally runnable without PostgreSQL or Redis: blank `DATABASE_URL` and `REDIS_URL` select the in-memory stores and in-process runner. Never commit `.env`, provider keys, or `openai_key.txt`. The exact settings and defaults are listed in [09-security-and-configuration.md](09-security-and-configuration.md).
 
 For a no-infrastructure test run, `ai-service/tests/conftest.py` explicitly sets `DATABASE_URL` and `REDIS_URL` to empty values, forcing memory stores and the in-process runner.
 

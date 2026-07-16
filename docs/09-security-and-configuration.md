@@ -14,7 +14,7 @@ Tenant/project values are carried into jobs, source rows, chunks, embeddings, an
 
 ## Secrets and sensitive data
 
-Provider keys and service tokens are loaded from environment variables. Use `ai-service/.env.example` as the inventory; never commit `.env` or `openai_key.txt`. Logs redact request bodies, query values, headers, raw LLM I/O, and credentials by default. `DEBUG_LLM_IO` is force-disabled in production.
+Provider keys and service tokens are loaded from environment variables. Use `ai-service/.env.example` as the complete template; it includes runtime settings and the test/client-only helpers used by the fixture runner. Never commit `.env` or `openai_key.txt`. Logs redact request bodies, query values, headers, raw LLM I/O, and credentials by default. `DEBUG_LLM_IO` is force-disabled in production.
 
 Ingest can mask detected emails, phones, API-key-like strings, and Luhn-valid credit-card candidates when `ENABLE_PII_MASKING` is enabled (default true). The masking statistics are internal state and are not exposed in the V1 result. This is pattern-based masking, not a complete data-loss-prevention system.
 
@@ -34,16 +34,20 @@ Ingest can mask detected emails, phones, API-key-like strings, and Luhn-valid cr
 | `ALLOWED_ORIGINS` | Comma-separated CORS origins; explicit in production. |
 | `DATABASE_URL` | PostgreSQL async DSN; empty selects memory stores. |
 | `REDIS_URL`, `QUEUE_NAME` | Redis/RQ dispatch and transient input cache. |
-| `LLM_PROVIDER`, `LLM_FALLBACK_CHAIN` | Primary/fallback chat routing. |
+| `LLM_PROVIDER` | Primary chat provider routing. |
 | `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `GROQ_API_KEY` | Chat provider credentials; `OPENROUTER_MODEL`, `OPENAI_MODEL`, `GROQ_MODEL` select models. |
-| `TRANSCRIBE_PROVIDER`, `DEEPGRAM_API_KEY`, `GROQ_WHISPER_MODEL`, `ENABLE_AUDIO` | Audio provider and opt-in behavior. |
+| `LLM_FALLBACK_CHAIN` | Optional JSON fallback provider/model list used after the primary provider fails. |
+| `GOOGLE_API_KEY`, `GPT_OSS_API_KEY`, `BASE_URL_KEY` | Reserved compatibility settings exposed by configuration; not used by the supported provider routing in the current service. |
+| `TRANSCRIBE_PROVIDER`, `DEEPGRAM_API_KEY`, `GROQ_WHISPER_MODEL`, `GROQ_LANGUAGE`, `ENABLE_AUDIO` | Audio provider, optional language hint, and opt-in behavior. |
 | `ENABLE_EMBEDDINGS`, `EMBEDDING_PROVIDER`, `EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS`, `ENABLE_HYBRID_RETRIEVAL` | Chunk vector and hybrid retrieval controls. |
-| `BACKEND_BASE_URL`, `BACKEND_SERVICE_TOKEN`, `CALLBACK_TIMEOUT_SECONDS` | Backend source recovery and callback trust boundary. |
+| `BACKEND_BASE_URL`, `BACKEND_SERVICE_TOKEN`, `ALLOWED_DOWNLOAD_DOMAINS`, `CALLBACK_TIMEOUT_SECONDS` | Backend source recovery, approved public file hosts, and callback trust boundary. The allowlist has safe S3/Cloudinary/GCS/CloudFront defaults when unset. |
 | `ENABLE_PII_MASKING`, `DEBUG_LLM_IO` | Privacy/logging behavior; raw I/O is disabled in production. |
 | `ENABLE_CONFLICT_DETECTION`, `CONFLICT_*` | Optional requirement conflict candidate/classification behavior. |
 | `ENABLE_QUALITY_REPAIR`, `MAX_REPAIR_ATTEMPTS` | Optional bounded story repair loop. |
 | `MAX_JOB_RUNTIME_SECONDS`, `MAX_CONCURRENT_JOBS`, `PROVIDER_TIMEOUT_SECONDS` | Worker/provider execution limits. |
 | `JOB_RESULT_RETENTION_DAYS`, `CHUNK_RETENTION_DAYS` | Intended retention configuration; no cleanup scheduler is implemented here. |
+
+`AI_SERVICE_BASE_URL` and `TEST_DATABASE_URL` are not API runtime settings. They are optional helpers for the fixture upload script and the marked database integration test respectively. `PYTHONUNBUFFERED` is supplied by Docker Compose rather than this application template.
 
 ## Gaps to track
 
