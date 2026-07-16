@@ -41,6 +41,22 @@ The suite does not prove external backend, provider, live callback, deployment, 
 
 Useful diagnostic scripts include `poetry run python scripts/simulate.py`, `scripts/check_models.py`, `scripts/llm_diagnostic.py`, and `scripts/evaluate_pipeline.py`. Some scripts require real provider keys; inspect the script before running it.
 
+## Grouped document fixture tests
+
+The reusable grouped fixtures live in
+[`ai-service/test-fixtures/README.md`](../ai-service/test-fixtures/README.md).
+They cover complementary product documents and intentionally conflicting
+requirements. `tests/test_fixture_document_groups.py` runs the real LangGraph
+with deterministic provider responses. `scripts/run_fixture_uploads.py` uploads
+the same groups to a running service with the configured provider, polls the
+internal job endpoint, retrieves the result, and checks traceability and
+conflict signals.
+
+Use the deterministic test for CI and the live runner when validating provider
+quality, configuration, and deployment behavior. Conflict detection must be
+enabled for the conflict group; otherwise the absence of a semantic warning is
+expected behavior.
+
 ## Logs, traces, and metrics
 
 `app.main.request_tracing_middleware` logs method, path, status, duration, and request id without bodies, query values, or headers. `app.progress` mirrors node progress for the legacy status path. The worker persists job start/finish/failure, node, attempt, and callback events. Provider calls attach provider/model/latency/token usage metadata where the client exposes it.

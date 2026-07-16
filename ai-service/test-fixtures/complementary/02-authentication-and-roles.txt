@@ -1,0 +1,8 @@
+Authentication and authorization requirements for the Requra project workspace.
+
+The system shall allow invited members to sign in with email and password.
+The system shall restrict project settings changes to owners and administrators.
+The system must record an audit event when a member role changes.
+The system shall reject access to a project when the signed-in member is not a project member.
+
+These requirements complete the product scope by defining who can access and change project data.

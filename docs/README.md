@@ -32,6 +32,7 @@ Purpose: provide one maintained entry point to the verified Requra.AI codebase. 
 | Configuration, authentication, privacy, and security gaps | [09-security-and-configuration.md](09-security-and-configuration.md) |
 | Contributor workflow and safe modifications | [10-contributor-onboarding.md](10-contributor-onboarding.md) |
 | HTTP endpoint handlers, code paths, and file interactions | [11-endpoint-code-interactions.md](11-endpoint-code-interactions.md) |
+| Grouped pipeline fixtures and live upload validation | [ai-service/test-fixtures/README.md](../ai-service/test-fixtures/README.md) |
 | Definitions | [glossary.md](glossary.md) |
 | Runtime prompt text | `ai-service/app/prompts/templates/*.md` (source assets, not prose documentation) |
 
