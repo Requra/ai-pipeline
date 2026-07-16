@@ -23,6 +23,23 @@ class SourceChunk(BaseModel):
     speaker: Optional[str] = None
     start_time_sec: Optional[float] = None
     end_time_sec: Optional[float] = None
+    document_id: Optional[str] = None
+
+class RetrievedChunk(BaseModel):
+    """A chunk returned by the lexical retriever, annotated with its score.
+
+    Used internally for evidence retrieval/grounding; never part of the public
+    JobResult contract.
+    """
+    chunk_id: str
+    text: str
+    score: float
+    page_number: Optional[int] = None
+    start_char: int = 0
+    end_char: int = 0
+    speaker: Optional[str] = None
+    timestamp: Optional[str] = None
+
 
 class EvidenceSpan(BaseModel):
     chunk_id: str
@@ -30,6 +47,7 @@ class EvidenceSpan(BaseModel):
     page_number: Optional[int] = None
     speaker: Optional[str] = None
     timestamp: Optional[str] = None
+    document_id: Optional[str] = None
 
 class ExtractedRequirement(BaseModel):
     id: int
@@ -43,8 +61,20 @@ class ExtractedRequirement(BaseModel):
         description="Non-empty list of raw text quotes backing this requirement for grounding."
     )
     priority: str = "Medium"
+    # Whether the requirement is stated directly in the source ("explicit") or
+    # inferred from context ("implied"). Optional; informational for grounding.
+    extraction_type: Optional[Literal["explicit", "implied"]] = None
+    # Retrieval-grounding scores (Phase 5). Internal only; not in the V1 contract.
+    # evidence_match_score: best lexical retrieval score of a supporting chunk.
+    # quote_support_score: fraction of this requirement's quotes found in source.
+    # vector_match_score: best semantic (pgvector) similarity of a supporting
+    #   chunk when hybrid retrieval is enabled. Internal only; not in the V1 contract.
+    evidence_match_score: Optional[float] = None
+    quote_support_score: Optional[float] = None
+    vector_match_score: Optional[float] = None
     needs_review: bool = False
     review_reason: Optional[str] = None
+    embedding: Optional[List[float]] = None
 
 class ClassifiedRequirement(ExtractedRequirement):
     labels: List[RequirementType]
@@ -137,6 +167,7 @@ class JobResult(BaseModel):
     artifacts: "ArtifactsV1" = Field(default_factory=lambda: ArtifactsV1())
     quality_issues: List[QualityIssue] = Field(default_factory=list)
     warnings: List[PipelineWarning] = Field(default_factory=list)
+    quality_report: Optional["QualityReportV1"] = None
     error: Optional["PipelineError"] = None
     processing_time_ms: int
 
@@ -251,6 +282,23 @@ class ExcelFileArtifactV1(BaseModel):
 
 class ArtifactsV1(BaseModel):
     excel_file: ExcelFileArtifactV1 = Field(default_factory=ExcelFileArtifactV1)
+
+
+class QualityReportV1(BaseModel):
+    """Aggregate, derived quality scores for the run (additive contract field).
+
+    All values are computed from real signals; higher is better except
+    `duplicate_risk` (lower is better). Optional — older clients can ignore it.
+    """
+    overall_score: float = 1.0
+    traceability_coverage: float = 1.0
+    groundedness_score: float = 1.0
+    story_completeness: float = 1.0
+    acceptance_criteria_quality: float = 1.0
+    duplicate_risk: float = 0.0
+    requirement_count: int = 0
+    story_count: int = 0
+    high_severity_issue_count: int = 0
 
 
 class PipelineError(BaseModel):

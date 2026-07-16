@@ -1,0 +1,6 @@
+{
+  "job_id": "fixture-json",
+  "project_id": "fixture-project",
+  "source_type": "text",
+  "content": "Requra verification requirements.\nUsers must authenticate.\nProject managers can create projects.\nOnly project members can view project documents.\nThe system must generate user stories from uploaded requirements.\nThe system must notify the backend when processing completes.\n"
+}

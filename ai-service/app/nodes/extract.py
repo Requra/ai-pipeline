@@ -19,6 +19,17 @@ import re
 import asyncio
 import traceback
 import json
+import logging
+
+from app.config import settings
+from app.utils.json_parsing import loads_with_llm_repair
+
+logger = logging.getLogger(__name__)
+
+
+def _raw_io_enabled() -> bool:
+    """Whether raw LLM input/output may be logged. Always False in production."""
+    return bool(settings.DEBUG_LLM_IO) and settings.ENV != "production"
 
 
 class ExtractionResponse(BaseModel):
@@ -132,6 +143,9 @@ def normalize_extraction_payload(parsed: Any, chunk: SourceChunk) -> dict:
                     ev["chunk_id"] = chunk.chunk_id
 
         # 5. Build full object
+        extraction_type = item.get("extraction_type")
+        if extraction_type not in ("explicit", "implied"):
+            extraction_type = None
         normalized_reqs.append({
             "id": req_id,
             "text": text,
@@ -141,6 +155,7 @@ def normalize_extraction_payload(parsed: Any, chunk: SourceChunk) -> dict:
             "confidence": item.get("confidence") or 0.85,
             "evidence": evidence,
             "priority": item.get("priority") or "Medium",
+            "extraction_type": extraction_type,
             "needs_review": item.get("needs_review") or False,
             "review_reason": item.get("review_reason")
         })
@@ -161,31 +176,42 @@ def preprocess_text(text: str) -> str:
     # to avoid damaging technical acronyms like ER diagram or AH header.
     text = re.sub(r"\b(uh|um|er|ah)\b", "", text)
     return text
-def align_quote_to_source(quote: str, original_text: str) -> str:
-    """
-    Ensure the quote exists in the original source text.
-    Try exact match, then normalized match. 
-    Returns the best available substring from original_text.
+def align_quote_with_kind(quote: str, original_text: str) -> tuple[str, str]:
+    """Align ``quote`` to ``original_text`` and report how it matched.
+
+    Returns ``(aligned_quote, kind)`` where ``kind`` is one of:
+      * ``"exact"``    — the quote already appears verbatim in the source.
+      * ``"fuzzy"``    — a case/whitespace-insensitive match was found.
+      * ``"fallback"`` — no real match; a source snippet is substituted.
+
+    The ``kind`` lets callers grade evidence quality (e.g. lower confidence and
+    flag review for ``fallback``) — important because a fallback snippet is, by
+    construction, still a substring of the chunk and would otherwise look like a
+    successful alignment.
     """
     if not quote or not original_text:
-        return original_text[:200] if original_text else ""
-    
+        return (original_text[:200] if original_text else "", "fallback")
+
     # 1. Exact match
     if quote in original_text:
-        return quote
-    
-    # 2. Normalized match (ignoring case and whitespace)
-    # Create a mapping of normalized to original
-    # For simplicity, we search for the sequence of words
+        return (quote, "exact")
+
+    # 2. Normalized match (ignoring case and whitespace).
     words = re.findall(r"\w+", quote.lower())
     if words:
         pattern = r"\s*".join([re.escape(w) for w in words])
         match = re.search(pattern, original_text, re.IGNORECASE)
         if match:
-            return match.group(0)
-            
-    # 3. Fallback: Return a valid substring from original text
-    return original_text[:min(200, len(original_text))]
+            return (match.group(0), "fuzzy")
+
+    # 3. Fallback: a valid substring from the source (weak evidence).
+    return (original_text[:min(200, len(original_text))], "fallback")
+
+
+def align_quote_to_source(quote: str, original_text: str) -> str:
+    """Backward-compatible wrapper returning only the aligned quote string."""
+    aligned, _kind = align_quote_with_kind(quote, original_text)
+    return aligned
 
 async def process_chunk(llm, chunk: SourceChunk) -> List[ExtractedRequirement]:
     """
@@ -198,8 +224,9 @@ async def process_chunk(llm, chunk: SourceChunk) -> List[ExtractedRequirement]:
         return []
 
     try:
-        # Load the strict extraction prompt from centralized registry
-        system_text = load_prompt(PromptId.EXTRACT_REQUIREMENTS_V1)
+        # Load the strict extraction prompt from centralized registry (v2:
+        # verbatim-quote grounding + explicit/implied marker).
+        system_text = load_prompt(PromptId.EXTRACT_REQUIREMENTS_V2)
 
         user_text = f"Extract requirements from this text:\n\n{clean_text}"
         
@@ -211,27 +238,26 @@ async def process_chunk(llm, chunk: SourceChunk) -> List[ExtractedRequirement]:
                 ("user", user_text)
             ])
             content = getattr(raw, "content", None) or str(raw)
-            
-            # Debug preview: log first 500 chars
-            try:
-                preview = content[:500]
-                print(f"[extract][chunk={chunk.chunk_id}] raw model output preview: {preview}")
-            except Exception:
-                pass
 
-            # Strip common code fences
-            content = content.strip()
-            if content.startswith("```"):
-                lines = content.splitlines()
-                if lines[0].startswith("```"): lines = lines[1:]
-                if lines and lines[-1].startswith("```"): lines = lines[:-1]
-                content = "\n".join(lines).strip()
+            # Raw model output is only ever logged at DEBUG, and never in
+            # production (guarded) — it can contain document text.
+            if _raw_io_enabled():
+                logger.debug(
+                    "[extract][chunk=%s] raw model output preview: %s",
+                    chunk.chunk_id, content[:500],
+                )
 
+            # Parse JSON tolerantly, with ONE LLM repair round on malformed
+            # output, so a single bad chunk never crashes the whole pass.
             try:
-                parsed = json.loads(content)
+                parsed = await loads_with_llm_repair(content, llm)
             except Exception as je:
-                print(f"[extract][chunk={chunk.chunk_id}] JSON parse error: {type(je).__name__}: {repr(je)}")
-                print(f"[extract][chunk={chunk.chunk_id}] raw content: {content}")
+                logger.warning(
+                    "[extract][chunk=%s] JSON parse failed after repair: %s",
+                    chunk.chunk_id, type(je).__name__,
+                )
+                if _raw_io_enabled():
+                    logger.debug("[extract][chunk=%s] unparseable content: %s", chunk.chunk_id, content)
                 return []
 
             # NORMALIZE shorthand before validation
@@ -240,11 +266,17 @@ async def process_chunk(llm, chunk: SourceChunk) -> List[ExtractedRequirement]:
             try:
                 response = ExtractionResponse.model_validate(normalized)
             except Exception as ve:
-                print(f"[extract][chunk={chunk.chunk_id}] validation error: {type(ve).__name__}: {repr(ve)}")
-                print(f"[extract][chunk={chunk.chunk_id}] normalized payload: {json.dumps(normalized, indent=2)}")
+                # Do not log the normalized payload — it embeds source text.
+                logger.warning(
+                    "[extract][chunk=%s] validation error: %s",
+                    chunk.chunk_id, type(ve).__name__,
+                )
                 return []
         except Exception as llm_err:
-            print(f"LLM extraction failed for chunk {chunk.chunk_id}: {type(llm_err).__name__}: {repr(llm_err)}")
+            logger.warning(
+                "LLM extraction failed for chunk %s: %s",
+                chunk.chunk_id, type(llm_err).__name__,
+            )
             return []
 
         if not response or not getattr(response, "requirements", None):
@@ -252,36 +284,48 @@ async def process_chunk(llm, chunk: SourceChunk) -> List[ExtractedRequirement]:
 
         reqs = response.requirements
 
-        # Enrich with chunk metadata and enforce evidence
+        # Enrich with chunk metadata and enforce evidence. Confidence is reduced
+        # in proportion to how much we had to repair the evidence:
+        #   * exact quote already present in chunk  -> no penalty
+        #   * quote aligned to a near-match in chunk -> slight penalty (x0.9)
+        #   * quote replaced by a source snippet     -> stronger penalty (x0.7)
+        #   * no evidence at all (snippet fallback)   -> stronger penalty (x0.7)
+        # We never silently drop a requirement for weak evidence — we keep it and
+        # flag needs_review so downstream grounding/quality can act on it.
         for r in reqs:
-            # We ensure each requirement has at least one EvidenceSpan linked to this chunk.
+            penalty = 1.0
             if not r.evidence:
-                # Fallback: link the whole chunk as evidence if LLM failed to be specific
+                # Fallback: link a source snippet so the requirement stays grounded.
                 r.evidence = [EvidenceSpan(
                     chunk_id=chunk.chunk_id,
-                    quote=chunk.text[:min(200, len(chunk.text))], # Snippet from ORIGINAL text
+                    quote=chunk.text[:min(200, len(chunk.text))],  # Snippet from ORIGINAL text
                     page_number=chunk.page_number,
                     speaker=chunk.speaker,
-                    timestamp=str(chunk.start_time_sec) if chunk.start_time_sec is not None else None
+                    timestamp=str(chunk.start_time_sec) if chunk.start_time_sec is not None else None,
+                    document_id=getattr(chunk, "document_id", None)
                 )]
                 r.needs_review = True
                 r.review_reason = (r.review_reason or "") + " [AUTO_FIX: Missing evidence quote fallback to source snippet]"
+                penalty = min(penalty, 0.7)
             else:
-                # Update evidence with chunk metadata and ALIGN quotes to source
+                # Update evidence with chunk metadata and ALIGN quotes to source.
                 for ev in r.evidence:
                     ev.chunk_id = chunk.chunk_id
-                    
-                    # ALIGNMENT CHECK
+
+                    # ALIGNMENT CHECK — grade by match kind.
                     original_quote = ev.quote
-                    aligned_quote = align_quote_to_source(original_quote, chunk.text)
-                    
-                    if aligned_quote != original_quote:
+                    aligned_quote, kind = align_quote_with_kind(original_quote, chunk.text)
+
+                    if kind == "fuzzy":
                         ev.quote = aligned_quote
                         r.needs_review = True
-                        if aligned_quote in chunk.text:
-                            r.review_reason = (r.review_reason or "") + f" [AUTO_FIX: Quote aligned to source. Original: '{original_quote[:50]}...']"
-                        else:
-                            r.review_reason = (r.review_reason or "") + " [AUTO_FIX: Quote replaced with source snippet (no match found)]"
+                        r.review_reason = (r.review_reason or "") + f" [AUTO_FIX: Quote aligned to source. Original: '{original_quote[:50]}...']"
+                        penalty = min(penalty, 0.9)
+                    elif kind == "fallback":
+                        ev.quote = aligned_quote
+                        r.needs_review = True
+                        r.review_reason = (r.review_reason or "") + " [AUTO_FIX: Quote replaced with source snippet (no match found)]"
+                        penalty = min(penalty, 0.7)
 
                     if ev.page_number is None:
                         ev.page_number = chunk.page_number
@@ -289,6 +333,14 @@ async def process_chunk(llm, chunk: SourceChunk) -> List[ExtractedRequirement]:
                         ev.speaker = chunk.speaker
                     if ev.timestamp is None and chunk.start_time_sec is not None:
                         ev.timestamp = str(chunk.start_time_sec)
+                    if ev.document_id is None:
+                        ev.document_id = getattr(chunk, "document_id", None)
+
+            if penalty < 1.0:
+                try:
+                    r.confidence = round(max(0.0, min(1.0, float(r.confidence) * penalty)), 4)
+                except (TypeError, ValueError):
+                    r.confidence = round(0.5 * penalty, 4)
 
         return reqs
     except Exception as e:
@@ -395,11 +447,31 @@ async def extract_node(state: PipelineState) -> dict:
         # 6. Legacy Projection
         legacy_reqs = project_legacy_requirements(extracted_reqs)
 
-        return {
+        # 7. Surface an aggregate warning when evidence had to fall back to a
+        #    source snippet (weak grounding the reviewer should look at).
+        weak = [
+            r for r in extracted_reqs
+            if r.review_reason and (
+                "fallback to source snippet" in r.review_reason
+                or "Quote replaced with source snippet" in r.review_reason
+            )
+        ]
+        result: dict = {
             "extracted_requirements": extracted_reqs,
             "functional_requirements": legacy_reqs,
-            "status": "success"
+            "status": "success",
         }
+        if weak:
+            existing_warnings = state.get("warnings", []) or []
+            result["warnings"] = existing_warnings + [{
+                "node_name": "extract",
+                "code": "EXTRACT_WEAK_EVIDENCE",
+                "message": (
+                    f"{len(weak)} requirement(s) fell back to a source snippet for "
+                    "evidence and need review."
+                ),
+            }]
+        return result
 
     except Exception as e:
         print(f"Extract node fatal failure: {type(e).__name__}: {repr(e)}")

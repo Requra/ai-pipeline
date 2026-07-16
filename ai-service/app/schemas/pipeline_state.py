@@ -20,10 +20,23 @@ class PipelineState(TypedDict):
     raw_bytes: bytes
     file_type: str                  # e.g., "pdf", "docx", "audio", "text"
     metadata: Dict[str, Any]
+    audio_format: Optional[str]
+    language: str
+    transcribe_options: Dict[str, Any]
+
+    # --- Production scoping + retrieval options (Phase: production hardening) ---
+    # Populated from the ai_job for production jobs; None/False for demo runs.
+    # tenant_id/project_id scope persistent (vector) retrieval so semantic recall
+    # never crosses tenants or projects. enable_* gate embeddings + hybrid search.
+    tenant_id: Optional[str]
+    project_id: Optional[str]
+    enable_embeddings: bool
+    enable_hybrid_retrieval: bool
 
     # --- Intermediate State ---
     raw_text: Optional[str]
     source_metadata: Optional[DocumentSource]
+    source_documents: List[Dict[str, Any]]
     
     # NOTE: For MVP we use simple replacement semantics for list fields.
     # Previously these fields used Annotated([...], operator.add) reducers to
@@ -33,6 +46,13 @@ class PipelineState(TypedDict):
     # use real parallel send/fan-out edges, reintroduce reducer annotations
     # (e.g., Annotated[List[T], operator.add]) as appropriate.
     chunks: List[SourceChunk]
+
+    # RAG source index (Phase 2). The retriever itself lives in a per-job
+    # registry (app.rag.source_index) to keep this state JSON-serializable;
+    # only the handle + lightweight stats are stored here.
+    source_index_id: Optional[str]
+    retrieval_stats: Optional[Dict[str, Any]]
+
     extracted_requirements: List[ExtractedRequirement]
     classified_requirements: List[ClassifiedRequirement]
     requirement_coverages: List[RequirementCoverage]
@@ -42,8 +62,11 @@ class PipelineState(TypedDict):
     export_rows: List[ExportRow]
     
     summary: Optional[StructuredSummary]
+    # Aggregate quality scores produced by `quality_gate` (Phase 7).
+    quality_report: Optional[Dict[str, Any]]
     # Final serialized job result produced by `format` node
     job_result: Optional[JobResult]
+    pii_stats: Optional[Dict[str, int]]
     
     # --- Flow Control and Tracking ---
     is_useful: bool
@@ -52,6 +75,10 @@ class PipelineState(TypedDict):
     error: Optional[str]
     started_at: float
     processing_time_ms: int
+
+    # --- Quality Repair (internal only, never in API response) ---
+    repair_attempts: int
+    resolved_quality_issues: List[QualityIssue]
 
     # --- Legacy Fields (Backwards Compatibility) ---
     # Use replacement semantics for legacy lists as well.

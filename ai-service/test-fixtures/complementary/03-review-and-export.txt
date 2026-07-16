@@ -1,0 +1,8 @@
+Requirements review and export behavior for the Requra project workspace.
+
+The system shall let reviewers mark a requirement as accepted, rejected, or needing clarification.
+The system shall preserve the source document and source quote when a requirement is reviewed.
+Users should be able to export approved requirements and user stories to a CSV file.
+The export must include the requirement identifier, story identifier, acceptance criteria, and source reference.
+
+These requirements complete the scope and authorization documents by defining the review outcome and downstream export.

@@ -4,6 +4,7 @@ from app.llm import get_llm
 from langchain_core.prompts import ChatPromptTemplate
 from app.prompts.loader import load_prompt
 from app.prompts.registry import PromptId
+from app.validators.story_validator import find_duplicate_story_ids, validate_stories
 from pydantic import BaseModel, Field
 from typing import List, Any, Optional
 import json
@@ -118,6 +119,53 @@ def _normalize_labels(labels):
     return labels or []
 
 
+def _primary_label(req) -> str:
+    """Pick the dominant label for AC shaping (FR > BR > NFR by default)."""
+    labels = set(_normalize_labels(getattr(req, "labels", None))) | set(getattr(req, "candidate_labels", []) or [])
+    if "FR" in labels:
+        return "FR"
+    if "BR" in labels:
+        return "BR"
+    if "NFR" in labels or "Constraint" in labels:
+        return "NFR"
+    return "FR"
+
+
+def build_specific_acceptance_criteria(req, story_id: str, agile_actor: str) -> List[AcceptanceCriterion]:
+    """Deterministic, requirement-specific acceptance criteria for fallbacks.
+
+    Embeds the requirement text so the criteria are concrete and testable rather
+    than generic boilerplate. Always returns at least two Given-When-Then items.
+    """
+    text = (getattr(req, "text", "") or "").strip().rstrip(".")
+    primary = _primary_label(req)
+
+    if primary == "NFR":
+        criteria = [
+            f"Given the system in normal operation, when the related capability is exercised, then it measurably satisfies: {text}.",
+            f"Given the target metric is monitored, when it is evaluated, then the result stays within the limit implied by: {text}.",
+        ]
+    elif primary == "BR":
+        criteria = [
+            f"Given an applicable case, when the rule is evaluated, then the system enforces: {text}.",
+            "Given an attempt that violates the rule, when it is processed, then the system rejects or flags it as non-compliant.",
+        ]
+    else:  # FR
+        criteria = [
+            f"Given {agile_actor} using the system, when they perform the action, then the system fulfils: {text}.",
+            f"Given invalid or incomplete input, when {agile_actor} performs the action, then the system shows a clear error and does not complete it.",
+        ]
+
+    return [
+        AcceptanceCriterion(
+            id=f"{story_id}_ac_{i + 1}",
+            text=criterion,
+            criterion_type="Given-When-Then",
+        )
+        for i, criterion in enumerate(criteria)
+    ]
+
+
 from app.progress import update_progress
 
 # ---------------- NODE ----------------
@@ -177,7 +225,7 @@ async def generate_node(state: PipelineState) -> dict:
         if llm is None:
             raise RuntimeError("LLM not initialized")
 
-        system_prompt = load_prompt(PromptId.GENERATE_USER_STORIES_V1)
+        system_prompt = load_prompt(PromptId.GENERATE_USER_STORIES_V2)
         items_text = "\n\n".join(_format_requirement(req) for req in to_generate)
 
         raw = await llm.ainvoke([
@@ -364,13 +412,7 @@ async def generate_node(state: PipelineState) -> dict:
                     id=story_id,
                     title=f"Story for requirement {req.id}",
                     description=f"As {agile_actor}, I want {goal}, so that: {req.text}",
-                    acceptance_criteria=[
-                        AcceptanceCriterion(
-                            id=f"{story_id}_ac_1",
-                            text="Requirement is implemented as specified",
-                            criterion_type="plain"
-                        )
-                    ],
+                    acceptance_criteria=build_specific_acceptance_criteria(req, story_id, agile_actor),
                     source_requirement_ids=[req.id],
                     labels=_normalize_labels(getattr(req, "labels", None)),
                     priority=getattr(req, "priority", "Medium"),
@@ -387,7 +429,30 @@ async def generate_node(state: PipelineState) -> dict:
                 )
                 requirement_coverages.append(coverage)
             
-        return {"user_stories": final_stories, "requirement_coverages": requirement_coverages}
+        # Validate generated stories and surface an aggregate quality warning.
+        # We flag (not mutate) LLM stories so coverage stays consistent; the
+        # fallback path already emits >=2 specific criteria.
+        result_payload: dict = {
+            "user_stories": final_stories,
+            "requirement_coverages": requirement_coverages,
+        }
+        reqs_by_id = {r.id: r for r in classified}
+        issues_by_story = validate_stories(final_stories, reqs_by_id)
+        duplicate_ids = find_duplicate_story_ids(final_stories)
+        if issues_by_story or duplicate_ids:
+            codes = sorted({code for codes in issues_by_story.values() for code in codes})
+            parts = []
+            if issues_by_story:
+                parts.append(f"{len(issues_by_story)} story(ies) with issues ({', '.join(codes)})")
+            if duplicate_ids:
+                parts.append(f"{len(duplicate_ids)} duplicate story(ies)")
+            existing_warnings = state.get("warnings", []) or []
+            result_payload["warnings"] = existing_warnings + [{
+                "node_name": "generate",
+                "code": "GENERATE_STORY_QUALITY",
+                "message": "Generated story quality issues: " + "; ".join(parts) + ".",
+            }]
+        return result_payload
 
     except Exception as e:
         print(f"Generate node LLM failure or parse error: {e}")
@@ -418,13 +483,7 @@ async def generate_node(state: PipelineState) -> dict:
                 id=story_id,
                 title=f"Story for requirement {req.id}",
                 description=f"As {agile_actor}, I want {goal}, so that: {req.text}",
-                acceptance_criteria=[
-                    AcceptanceCriterion(
-                        id=f"{story_id}_ac_1",
-                        text="Requirement is implemented as specified",
-                        criterion_type="plain"
-                    )
-                ],
+                acceptance_criteria=build_specific_acceptance_criteria(req, story_id, agile_actor),
                 source_requirement_ids=[req.id],
                 labels=_normalize_labels(getattr(req, "labels", None)),
                 priority=getattr(req, "priority", "Medium"),

@@ -1,0 +1,9 @@
+Requirements Notes: Notifications Service
+
+The system shall send an email notification when a new order is placed.
+The system must allow users to reset their password by email.
+The system shall send an email notification when a new order is placed.
+Users should be able to export their data to a CSV file.
+The system shall send an email notification whenever a new order is placed.
+The system must allow users to reset their password via email.
+Users should be able to export all of their data to a CSV file.

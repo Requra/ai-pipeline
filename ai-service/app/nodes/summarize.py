@@ -80,6 +80,39 @@ def _truncate_for_context(text: str, max_chars: int = MAX_INPUT_CHARS) -> str:
     )
 
 
+def _build_artifact_digest(state) -> str:
+    """Compact digest of the structured analysis so the summary reflects the
+    extracted requirements/stories/open-questions, not just raw text."""
+    reqs = state.get("classified_requirements") or state.get("extracted_requirements") or []
+    stories = state.get("user_stories") or []
+
+    req_lines: list[str] = []
+    open_questions: list[str] = []
+    for r in reqs[:40]:
+        text = (getattr(r, "text", "") or "").strip()
+        if not text:
+            continue
+        labels = getattr(r, "labels", None) or getattr(r, "candidate_labels", None) or []
+        if "Open Question" in labels:
+            open_questions.append(text)
+        req_lines.append(f"- ({'/'.join(labels) or 'FR'}) {text[:200]}")
+
+    story_lines = [
+        f"- {(getattr(s, 'title', '') or '').strip()[:160]}"
+        for s in stories[:40]
+        if (getattr(s, "title", "") or "").strip()
+    ]
+
+    parts: list[str] = []
+    if req_lines:
+        parts.append("Extracted requirements:\n" + "\n".join(req_lines))
+    if story_lines:
+        parts.append("Generated user stories:\n" + "\n".join(story_lines))
+    if open_questions:
+        parts.append("Open questions:\n" + "\n".join(f"- {q[:200]}" for q in open_questions[:20]))
+    return "\n\n".join(parts)
+
+
 from app.progress import update_progress
 
 async def summarize_node(state: PipelineState) -> dict:
@@ -89,21 +122,30 @@ async def summarize_node(state: PipelineState) -> dict:
     """
     print("--- SUMMARIZE NODE ---")
     update_progress(state.get("job_id"), "summarize", 95, "PROCESSING")
-    raw_text = state.get("raw_text", "")
+    raw_text = state.get("raw_text", "") or ""
+    digest = _build_artifact_digest(state)
 
-    if not raw_text:
+    # Nothing to summarize at all.
+    if not raw_text and not digest:
         return {"summary": _EMPTY_SUMMARY}
 
     try:
         llm = get_llm()
         system_prompt = load_prompt(PromptId.SUMMARIZE_STRUCTURED_V1)
 
-        # Truncate input to fit within model context window
+        # Truncate the raw document, then append the structured digest so the
+        # summary reflects requirements/stories/open-questions as well.
         input_text = _truncate_for_context(raw_text)
+        user_sections = []
+        if input_text:
+            user_sections.append(f"Source document:\n{input_text}")
+        if digest:
+            user_sections.append(f"Structured analysis extracted so far:\n{digest}")
+        user_message = "Analyze and summarize this software project.\n\n" + "\n\n".join(user_sections)
 
         raw = await llm.ainvoke([
             ("system", system_prompt),
-            ("user", f"Analyze and summarize this document:\n\n{input_text}"),
+            ("user", user_message),
         ])
 
         content = getattr(raw, "content", None) or str(raw)

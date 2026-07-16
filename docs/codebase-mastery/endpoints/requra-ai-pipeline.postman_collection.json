@@ -1,0 +1,420 @@
+{
+  "info": {
+    "_postman_id": "7f8e8b09-cf86-4029-9b7d-3c2edf0687dd",
+    "name": "Requra AI Pipeline API",
+    "description": "Postman / Apidog Collection for testing all operational, public demo, internal S2S production, and compatibility endpoints of the Requra.AI Pipeline microservice.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "1. Operational & Diagnostics",
+      "item": [
+        {
+          "name": "Liveness Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "health"
+              ]
+            },
+            "description": "Verifies that the FastAPI web server is running and healthy."
+          },
+          "response": []
+        },
+        {
+          "name": "Readiness Diagnostic",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/ready",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "ready"
+              ]
+            },
+            "description": "Checks the PostgreSQL database connection, Redis connection, and active LLM/transcription/embedding providers."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "2. Public / Demo Endpoints",
+      "item": [
+        {
+          "name": "Submit Plain Text",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"job_id\": \"{{job_id}}\",\n  \"content\": \"The system shall allow users to reset their passwords via SMS or Email verification codes. Password resets must expire after 10 minutes.\",\n  \"metadata\": {\n    \"source\": \"postman_demo_test\",\n    \"version\": \"1.0\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/process-json",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "process-json"
+              ]
+            },
+            "description": "Submits raw requirement text directly to the pipeline for in-memory processing."
+          },
+          "response": []
+        },
+        {
+          "name": "Upload Document / Audio",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "description": "Binary specification file (PDF/DOCX) or meeting recording (MP3/WAV)"
+                },
+                {
+                  "key": "file_type",
+                  "value": "document",
+                  "type": "text",
+                  "description": "\"document\" or \"audio\""
+                },
+                {
+                  "key": "metadata",
+                  "value": "{\"project_name\": \"Postman Upload Demo\", \"author\": \"Tester\"}",
+                  "type": "text"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/process",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "process"
+              ]
+            },
+            "description": "Uploads a specification document or audio file directly to the pipeline via multipart/form-data."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Demo Job Status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/status/{{job_id}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "status",
+                "{{job_id}}"
+              ]
+            },
+            "description": "Retrieve status, progress, and results of a demo job."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "3. Internal S2S Production Endpoints",
+      "item": [
+        {
+          "name": "Create/Enqueue Job",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{authToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"job_id\": \"{{job_id}}\",\n  \"tenant_id\": \"tenant-12\",\n  \"project_id\": \"project-34\",\n  \"requested_by\": \"user-99\",\n  \"input_type\": \"backend_document\",\n  \"source_documents\": [\n    {\n      \"document_id\": \"{{document_id}}\",\n      \"file_type\": \"pdf\",\n      \"mime_type\": \"application/pdf\",\n      \"file_url\": \"https://storage.googleapis.com/requra-files/spec-555.pdf\",\n      \"sha256_hash\": \"2a9fbc7468ea9c8112345678abcdef01\"\n    }\n  ],\n  \"options\": {\n    \"generate_user_stories\": true,\n    \"generate_summary\": true,\n    \"enable_embeddings\": true,\n    \"enable_hybrid_retrieval\": true,\n    \"language\": \"en\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/internal/jobs",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "internal",
+                "jobs"
+              ]
+            },
+            "description": "Registers and enqueues a production pipeline job with reference document URLs. Enforces idempotency via request payload fingerprinting."
+          },
+          "response": []
+        },
+        {
+          "name": "Get S2S Job Status",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{authToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/internal/jobs/{{job_id}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "internal",
+                "jobs",
+                "{{job_id}}"
+              ]
+            },
+            "description": "Polls detailed status, execution node progress, and warning parameters for a S2S job."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Final Result",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{authToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/internal/jobs/{{job_id}}/result",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "internal",
+                "jobs",
+                "{{job_id}}",
+                "result"
+              ]
+            },
+            "description": "Retrieves the completed, structured requirements engineering results payload from the database."
+          },
+          "response": []
+        },
+        {
+          "name": "Cancel Running Job",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{authToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/internal/jobs/{{job_id}}/cancel",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "internal",
+                "jobs",
+                "{{job_id}}",
+                "cancel"
+              ]
+            },
+            "description": "Triggers cancellation of a running background worker job."
+          },
+          "response": []
+        },
+        {
+          "name": "Retry Failed / Cancelled Job",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{authToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/internal/jobs/{{job_id}}/retry",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "internal",
+                "jobs",
+                "{{job_id}}",
+                "retry"
+              ]
+            },
+            "description": "Resets, increments attempt counts, and re-queues a failed or cancelled S2S job."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "4. S2S Compatibility Endpoints",
+      "item": [
+        {
+          "name": "Compatibility File Upload",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{authToken}}"
+              }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "description": "Binary specification file or audio file"
+                },
+                {
+                  "key": "job_id",
+                  "value": "job-audio-101",
+                  "type": "text"
+                },
+                {
+                  "key": "project_id",
+                  "value": "project-abc",
+                  "type": "text"
+                },
+                {
+                  "key": "tenant_id",
+                  "value": "tenant-xyz",
+                  "type": "text"
+                },
+                {
+                  "key": "metadata",
+                  "value": "{\"context\":\"Postman Compatibility Upload\"}",
+                  "type": "text"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/internal/process",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "internal",
+                "process"
+              ]
+            },
+            "description": "Direct file uploads with S2S secure token authorization."
+          },
+          "response": []
+        },
+        {
+          "name": "Compatibility JSON Submit",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{authToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"job_id\": \"job-text-202\",\n  \"project_id\": \"project-abc\",\n  \"tenant_id\": \"tenant-xyz\",\n  \"source_type\": \"text\",\n  \"content\": \"The system must support two-factor authentication via SMS.\",\n  \"options\": {\n    \"generate_user_stories\": true,\n    \"language\": \"en\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/internal/process-json",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "internal",
+                "process-json"
+              ]
+            },
+            "description": "Direct plain text enqueuing matching legacy payload shapes."
+          },
+          "response": []
+        },
+        {
+          "name": "Document Content Recovery",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{authToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/internal/documents/{{document_id}}/content",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "internal",
+                "documents",
+                "{{document_id}}",
+                "content"
+              ]
+            },
+            "description": "Retrieves the cached binary or text content of a processed document."
+          },
+          "response": []
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8000",
+      "type": "string"
+    },
+    {
+      "key": "authToken",
+      "value": "test-internal-token",
+      "type": "string"
+    },
+    {
+      "key": "job_id",
+      "value": "job-postman-999",
+      "type": "string"
+    },
+    {
+      "key": "document_id",
+      "value": "doc-555",
+      "type": "string"
+    }
+  ]
+}

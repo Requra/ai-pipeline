@@ -7,6 +7,30 @@ from app.schemas.items import (
     QualityIssue,
 )
 from app.progress import update_progress
+from app.services.quality_scoring import compute_quality_scores
+from app.validators.story_validator import find_duplicate_story_ids, is_generic_ac
+
+# Below this classification confidence a requirement is flagged for review.
+LOW_CONFIDENCE_THRESHOLD = 0.4
+SPECIAL_NON_STORY_LABELS = {"Open Question", "Out-of-Scope", "Assumption"}
+
+
+def _dedupe_issues(issues: List[QualityIssue]) -> List[QualityIssue]:
+    """Drop exact-duplicate issues (same item, rule, and details)."""
+    seen = set()
+    out: List[QualityIssue] = []
+    for q in issues:
+        key = (
+            getattr(q, "item_id", None),
+            getattr(q, "item_type", None),
+            getattr(q, "rule_violated", None),
+            getattr(q, "details", None),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(q)
+    return out
 
 
 async def quality_gate_node(state: PipelineState) -> dict:
@@ -213,10 +237,56 @@ async def quality_gate_node(state: PipelineState) -> dict:
                     ))
 
 
-    # Determine overall status
-    has_high = any(q.severity == "high" for q in (existing_q + new_issues))
+    # --- Additional meaningful issues (Phase 7) -------------------------------
+
+    # Low-confidence classification (skip special non-story labels).
+    for r in reqs:
+        labels = set(getattr(r, "labels", []) or []) | set(getattr(r, "candidate_labels", []) or [])
+        if labels & SPECIAL_NON_STORY_LABELS:
+            continue
+        conf = getattr(r, "classification_confidence", None)
+        if conf is not None and conf < LOW_CONFIDENCE_THRESHOLD:
+            new_issues.append(QualityIssue(
+                item_id=r.id,
+                item_type="requirement",
+                severity="medium",
+                rule_violated="low_confidence_classification",
+                details=f"Requirement {r.id} classified with low confidence ({conf:.2f}); review recommended.",
+            ))
+
+    # Stories whose acceptance criteria are all generic / boilerplate.
+    for s in stories:
+        acs = getattr(s, "acceptance_criteria", []) or []
+        if acs and all(is_generic_ac(getattr(ac, "text", "")) for ac in acs):
+            new_issues.append(QualityIssue(
+                item_id=0,
+                item_type="story",
+                severity="medium",
+                rule_violated="generic_acceptance_criteria",
+                details=f"Story {s.id} has only generic acceptance criteria; they should be specific and testable.",
+            ))
+
+    # Duplicate stories.
+    for dup_id in find_duplicate_story_ids(stories):
+        new_issues.append(QualityIssue(
+            item_id=0,
+            item_type="story",
+            severity="medium",
+            rule_violated="duplicate_story",
+            details=f"Story {dup_id} duplicates another generated story.",
+        ))
+
+    # --- Combine, dedupe, score ----------------------------------------------
+    all_issues = _dedupe_issues(existing_q + new_issues)
+
+    has_high = any(q.severity == "high" for q in all_issues)
     status = "needs_review" if has_high else state.get("status", "partial")
 
-    # Return all issues (existing + new)
-    return {"quality_issues": existing_q + new_issues, "status": status}
+    scores = compute_quality_scores(reqs, stories, all_issues)
+
+    return {
+        "quality_issues": all_issues,
+        "status": status,
+        "quality_report": scores.as_dict(),
+    }
 

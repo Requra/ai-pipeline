@@ -1,0 +1,7 @@
+Product scope: Requra project workspace.
+
+The system shall allow project owners to create a project and invite members by role.
+The project dashboard shall show requirements, user stories, source documents, and unresolved review items.
+The workspace shall keep project data isolated from other projects.
+
+This document defines the product scope. Authentication and review behavior are described in the companion documents in this fixture group.

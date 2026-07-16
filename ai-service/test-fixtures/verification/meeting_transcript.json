@@ -1,0 +1,10 @@
+{
+  "source_type": "meeting_transcript",
+  "content": "[00:00] PM: Users must authenticate. [00:10] Client: Only project members can view project documents.",
+  "metadata": {
+    "speakers": [
+      "PM",
+      "Client"
+    ]
+  }
+}

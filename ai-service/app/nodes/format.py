@@ -26,6 +26,7 @@ from app.schemas.items import (
     StructuredSummary,
     QualityIssue,
     PipelineWarning,
+    QualityReportV1,
     ExportRow
 )
 
@@ -35,6 +36,20 @@ def generate_dedup_key(title_or_text: str) -> str:
         return ""
     slug = re.sub(r'[^a-z0-9]+', '-', title_or_text.lower()).strip('-')
     return slug[:100]
+
+
+def v1_type_from_labels(labels) -> str:
+    """Map requirement/story labels to a V1 type. Shared by requirements and
+    stories so a story's type reflects its source labels (not a hard-coded
+    'Functional')."""
+    labs = set(labels or [])
+    if "FR" in labs:
+        return "Functional"
+    if "NFR" in labs or "Constraint" in labs or "Assumption" in labs:
+        return "Non-Functional"
+    if "BR" in labs:
+        return "Business"
+    return "Functional"
 
 
 def parse_pipeline_error(err_str: str, status: str) -> Optional[PipelineError]:
@@ -140,12 +155,14 @@ async def format_node(state: PipelineState) -> dict:
             data.setdefault("classification_confidence", 0.0)
             coerced_reqs.append(ClassifiedRequirement(**data))
 
-    # Map status
+    # Map status. Rejection (input judged not useful) takes precedence over
+    # "failed": ingest sets a DOCUMENT_REJECTED reason in `error` when it rejects,
+    # which must not be misreported as a system failure.
     status = "partial"
-    if error and not coerced_stories and not coerced_reqs:
-        status = "failed"
-    elif state.get("is_useful") is False:
+    if state.get("is_useful") is False:
         status = "rejected"
+    elif error and not coerced_stories and not coerced_reqs:
+        status = "failed"
     else:
         if state.get("is_useful") and (not coerced_reqs or not coerced_stories):
             status = "partial"
@@ -203,7 +220,36 @@ async def format_node(state: PipelineState) -> dict:
         elif meta.get("file_name"):
             file_name = meta.get("file_name")
             
-    if file_name != "unknown" or file_type != "unknown" or source_metadata:
+    state_source_docs = state.get("source_documents") or []
+    if state_source_docs:
+        for idx, doc in enumerate(state_source_docs, start=1):
+            doc_id = doc.get("document_id") or f"SRC-{str(idx).zfill(3)}"
+            doc_file_type = doc.get("file_type") or "text"
+            doc_name = doc.get("filename") or doc.get("file_name") or doc_id
+            doc_mime_type = doc.get("mime_type") or "application/octet-stream"
+
+            s_type = "unknown"
+            if doc_file_type:
+                dft_lower = doc_file_type.lower()
+                if dft_lower in ("text", "txt"):
+                    s_type = "text"
+                elif dft_lower == "pdf":
+                    s_type = "pdf"
+                elif dft_lower in ("docx", "doc"):
+                    s_type = "docx"
+                elif dft_lower in ("audio", "mp3", "wav", "m4a"):
+                    s_type = "audio"
+                elif dft_lower == "transcript":
+                    s_type = "transcript"
+
+            source_docs.append(SourceDocumentV1(
+                source_id=doc_id,
+                source_type=s_type,
+                file_name=doc_name,
+                mime_type=doc_mime_type,
+                language="en"
+            ))
+    elif file_name != "unknown" or file_type != "unknown" or source_metadata:
         source_docs.append(SourceDocumentV1(
             source_id="SRC-001",
             source_type=source_type,
@@ -220,14 +266,8 @@ async def format_node(state: PipelineState) -> dict:
         req_id_map[r.id] = req_str_id
         
         # Determine requirement type
-        req_type = "Unknown"
         labels = getattr(r, "labels", []) or []
-        if "FR" in labels:
-            req_type = "Functional"
-        elif "NFR" in labels or "Constraint" in labels or "Assumption" in labels:
-            req_type = "Non-Functional"
-        elif "BR" in labels:
-            req_type = "Business"
+        req_type = v1_type_from_labels(labels) if labels else "Unknown"
             
         # Determine priority
         priority = getattr(r, "priority", "Medium") or "Medium"
@@ -237,10 +277,33 @@ async def format_node(state: PipelineState) -> dict:
         # Source refs mapping
         source_refs = []
         for ev in getattr(r, "evidence", []) or []:
+            ref_doc_id = getattr(ev, "document_id", None)
+            
+            # Robust fallback: if ref_doc_id is not set, parse it from chunk_id
+            if not ref_doc_id and getattr(ev, "chunk_id", None) and state_source_docs:
+                for doc in state_source_docs:
+                    d_id = doc.get("document_id")
+                    if d_id and f"_{d_id}_" in ev.chunk_id:
+                        ref_doc_id = d_id
+                        break
+
+            ref_doc_name = file_name
+            ref_source_id = "SRC-001"
+            ref_source_type = "document" if source_type != "audio" else "audio"
+
+            if ref_doc_id and state_source_docs:
+                for doc in state_source_docs:
+                    if doc.get("document_id") == ref_doc_id:
+                        ref_source_id = ref_doc_id
+                        ref_doc_name = doc.get("filename") or doc.get("file_name") or ref_doc_id
+                        dft_lower = (doc.get("file_type") or "text").lower()
+                        ref_source_type = "audio" if dft_lower in ("audio", "mp3", "wav", "m4a") else "document"
+                        break
+
             source_refs.append(SourceRefV1(
-                source_id="SRC-001",
-                source_type="document" if source_type != "audio" else "audio",
-                document_name=file_name,
+                source_id=ref_source_id,
+                source_type=ref_source_type,
+                document_name=ref_doc_name,
                 page=ev.page_number,
                 chunk_id=ev.chunk_id,
                 quote=ev.quote,
@@ -291,10 +354,33 @@ async def format_node(state: PipelineState) -> dict:
         # Source refs mapping
         source_refs = []
         for ev in getattr(s, "evidence_reference", []) or []:
+            ref_doc_id = getattr(ev, "document_id", None)
+            
+            # Robust fallback: if ref_doc_id is not set, parse it from chunk_id
+            if not ref_doc_id and getattr(ev, "chunk_id", None) and state_source_docs:
+                for doc in state_source_docs:
+                    d_id = doc.get("document_id")
+                    if d_id and f"_{d_id}_" in ev.chunk_id:
+                        ref_doc_id = d_id
+                        break
+
+            ref_doc_name = file_name
+            ref_source_id = "SRC-001"
+            ref_source_type = "document" if source_type != "audio" else "audio"
+
+            if ref_doc_id and state_source_docs:
+                for doc in state_source_docs:
+                    if doc.get("document_id") == ref_doc_id:
+                        ref_source_id = ref_doc_id
+                        ref_doc_name = doc.get("filename") or doc.get("file_name") or ref_doc_id
+                        dft_lower = (doc.get("file_type") or "text").lower()
+                        ref_source_type = "audio" if dft_lower in ("audio", "mp3", "wav", "m4a") else "document"
+                        break
+
             source_refs.append(SourceRefV1(
-                source_id="SRC-001",
-                source_type="document" if source_type != "audio" else "audio",
-                document_name=file_name,
+                source_id=ref_source_id,
+                source_type=ref_source_type,
+                document_name=ref_doc_name,
                 page=ev.page_number,
                 chunk_id=ev.chunk_id,
                 quote=ev.quote,
@@ -340,6 +426,14 @@ async def format_node(state: PipelineState) -> dict:
             story_points=0
         )
         
+        # Story type derived from its labels (falls back to the linked
+        # requirement's type), not hard-coded Functional.
+        story_type = v1_type_from_labels(getattr(s, "labels", []) or [])
+        if not (getattr(s, "labels", []) or []):
+            linked_req = next((r for r in mapped_reqs if r.id == linked_req_id), None)
+            if linked_req is not None:
+                story_type = linked_req.type if linked_req.type != "Unknown" else "Functional"
+
         mapped_stories.append(UserStoryV1(
             id=story_str_id,
             requirement_id=linked_req_id,
@@ -347,7 +441,7 @@ async def format_node(state: PipelineState) -> dict:
             user_story=s.description,
             acceptance_criteria=ac_v1_list,
             priority=priority,
-            type="Functional",
+            type=story_type,
             deduplication_key=generate_dedup_key(s.title),
             source_refs=source_refs,
             quality=quality,
@@ -396,19 +490,29 @@ async def format_node(state: PipelineState) -> dict:
             out_of_scope=[]
         )
 
-    # 5. Exports mapping
+    # 5. Exports mapping — flat, Excel/Jira-friendly rows enriched with
+    #    traceability (source quotes), confidence and quality signals.
+    req_by_str_id = {r.id: r for r in mapped_reqs}
     excel_rows = []
     jira_rows = []
     for s in mapped_stories:
+        linked = req_by_str_id.get(s.requirement_id)
+        source_quotes = " | ".join(ref.quote for ref in s.source_refs if ref.quote)
         excel_rows.append({
             "id": s.id,
+            "requirement_id": s.requirement_id,
             "title": s.title,
             "user_story": s.user_story,
             "acceptance_criteria": "; ".join([ac.text for ac in s.acceptance_criteria]),
             "type": s.type,
             "priority": s.priority,
-            "actor": next((r.actor for r in mapped_reqs if r.id == s.requirement_id), "System"),
+            "actor": linked.actor if linked else "System",
+            "confidence": linked.confidence_score if linked else 0.0,
+            "labels": ", ".join(s.jira_fields.labels),
             "source_requirement_id": s.requirement_id,
+            "source_quotes": source_quotes,
+            "quality_score": s.quality.score,
+            "quality_issues": "; ".join(s.quality.issues),
             "source_refs": [ref.model_dump() for ref in s.source_refs]
         })
         jira_rows.append({
@@ -421,13 +525,19 @@ async def format_node(state: PipelineState) -> dict:
             "components": s.jira_fields.components,
             "epic_name": s.jira_fields.epic_name,
             "story_points": s.jira_fields.story_points,
-            "source_requirement_id": s.requirement_id
+            "source_requirement_id": s.requirement_id,
+            "source_quotes": source_quotes,
         })
-        
+
     exports = ExportsV1(
         excel=ExcelExportV1(
             available=len(excel_rows) > 0,
-            columns=["id", "title", "user_story", "acceptance_criteria", "type", "priority", "actor", "source_requirement_id", "source_refs"],
+            columns=[
+                "id", "requirement_id", "title", "user_story", "acceptance_criteria",
+                "type", "priority", "actor", "confidence", "labels",
+                "source_requirement_id", "source_quotes", "quality_score",
+                "quality_issues", "source_refs",
+            ],
             rows=excel_rows
         ),
         jira=JiraExportV1(
@@ -445,6 +555,15 @@ async def format_node(state: PipelineState) -> dict:
             mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
     )
+
+    # Quality report (Phase 7) — derived scores from quality_gate, if present.
+    quality_report_data = state.get("quality_report")
+    quality_report = None
+    if isinstance(quality_report_data, dict):
+        try:
+            quality_report = QualityReportV1(**quality_report_data)
+        except Exception:
+            quality_report = None
 
     # Structured error parsing
     structured_error = parse_pipeline_error(error, status)
@@ -467,6 +586,7 @@ async def format_node(state: PipelineState) -> dict:
         artifacts=artifacts,
         quality_issues=q_issues,
         warnings=warnings,
+        quality_report=quality_report,
         error=structured_error,
         processing_time_ms=processing_time_ms,
         
