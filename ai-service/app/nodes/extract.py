@@ -146,6 +146,16 @@ def normalize_extraction_payload(parsed: Any, chunk: SourceChunk) -> dict:
         extraction_type = item.get("extraction_type")
         if extraction_type not in ("explicit", "implied"):
             extraction_type = None
+
+        priority = item.get("priority") or "Medium"
+        if priority not in ("Low", "Medium", "High", "Critical"):
+            priority = "Medium"
+
+        if priority == "Medium" and text:
+            text_lower = text.lower()
+            if any(k in text_lower for k in ("shall", "must", "mandatory", "critical", "essential", "has to", "immediately")):
+                priority = "High"
+
         normalized_reqs.append({
             "id": req_id,
             "text": text,
@@ -154,7 +164,7 @@ def normalize_extraction_payload(parsed: Any, chunk: SourceChunk) -> dict:
             "candidate_labels": norm_labels,
             "confidence": item.get("confidence") or 0.85,
             "evidence": evidence,
-            "priority": item.get("priority") or "Medium",
+            "priority": priority,
             "extraction_type": extraction_type,
             "needs_review": item.get("needs_review") or False,
             "review_reason": item.get("review_reason")
