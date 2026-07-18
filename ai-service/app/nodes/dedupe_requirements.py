@@ -402,6 +402,7 @@ async def dedupe_requirements_node(state: PipelineState) -> dict:
                         
                     reason = conflict.get("reason", "")
                     question = conflict.get("clarification_question", "")
+                    resolution_options = conflict.get("resolution_options") or []
                     
                     if not req_a_id or not req_b_id:
                         continue
@@ -412,12 +413,17 @@ async def dedupe_requirements_node(state: PipelineState) -> dict:
                     
                     req_a_int = _parse_req_int_id(req_a_id)
                     
+                    options_str = ""
+                    if resolution_options:
+                        options_str = "\n  - Proposed Resolutions:\n" + "\n".join(f"    {idx}. {opt}" for idx, opt in enumerate(resolution_options, start=1))
+
                     # Formatting warning and issues text cleanly
                     details = (
                         f"Conflict detected between {req_a_id} and {req_b_id}:\n"
                         f"  - Category: {classification}\n"
                         f"  - Reason: {reason}\n"
                         f"  - Clarification Question: {question}"
+                        f"{options_str}"
                     )
                     
                     conflict_warnings.append(PipelineWarning(
