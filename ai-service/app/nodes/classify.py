@@ -150,6 +150,7 @@ async def classify_node(state: PipelineState) -> dict:
                 "evidence": getattr(fr, "evidence", []),
                 "needs_review": getattr(fr, "needs_review", False),
                 "review_reason": getattr(fr, "review_reason", None),
+                "priority": getattr(fr, "priority", "Medium"),
             }
 
             candidate_labels = set(base_kwargs["candidate_labels"] or [])
@@ -213,7 +214,8 @@ async def classify_node(state: PipelineState) -> dict:
                     needs_review=getattr(fr, "needs_review", True),
                     review_reason=(getattr(fr, "review_reason", "") or "LLM failure fallback"),
                     labels=labels,
-                    classification_confidence=confidence
+                    classification_confidence=confidence,
+                    priority=getattr(fr, "priority", "Medium")
                 )
             )
 
