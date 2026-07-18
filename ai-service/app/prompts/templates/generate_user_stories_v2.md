@@ -27,6 +27,8 @@ RULES:
    - Criteria MUST be SPECIFIC and TESTABLE and reference the actual content of
      the requirement. Do NOT output generic filler such as "Requirement is
      implemented as specified", "works as expected", or "as specified".
+7. **Story Points**:
+   - Provide a Fibonacci estimate (`1`, `2`, `3`, `5`, `8`) for `story_points` representing the complexity and effort for the story.
 
 Return JSON exactly in this shape (no markdown, no commentary):
 {
@@ -39,7 +41,8 @@ Return JSON exactly in this shape (no markdown, no commentary):
         "Given a new user on the registration page, when they submit a valid email and password, then the account is created and a confirmation is shown.",
         "Given a new user, when they submit an email that already exists, then a clear validation error is displayed and no account is created."
       ],
-      "labels": ["FR"]
+      "labels": ["FR"],
+      "story_points": 3
     }
   ]
 }

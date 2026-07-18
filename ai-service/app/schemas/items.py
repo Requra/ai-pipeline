@@ -112,6 +112,7 @@ class UserStory(BaseModel):
     labels: List[RequirementType]
     priority: str = "Medium"
     evidence_reference: List[EvidenceSpan] = Field(default_factory=list)
+    story_points: int = 0
 
     # Legacy Fields (Backwards Compatibility)
     source_fr_id: Optional[int] = None

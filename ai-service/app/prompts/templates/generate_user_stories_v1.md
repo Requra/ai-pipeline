@@ -22,6 +22,8 @@ RULES:
    - Enforce **Given-When-Then** format explicitly for all criteria.
    - Provide **at least 2** acceptance criteria per story.
    - Criteria must be specific, testable, and directly related to the story.
+7. **Story Points**:
+   - Provide a Fibonacci estimate (`1`, `2`, `3`, `5`, `8`) for `story_points` representing the complexity and effort for the story.
 
 
 Return JSON exactly in this shape:
@@ -35,7 +37,8 @@ Return JSON exactly in this shape:
         "Given a new user on the registration page, when they submit a valid email and password, then the account is created successfully.",
         "Given a new user registering, when they submit an email that already exists, then they receive a validation error message."
       ],
-      "labels": ["FR"]
+      "labels": ["FR"],
+      "story_points": 3
     }
   ]
 }

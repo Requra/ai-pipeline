@@ -30,6 +30,7 @@ class StoryResponse(BaseModel):
     description: str
     acceptance_criteria: List[str]
     labels: List[str]
+    story_points: Optional[int] = Field(default=0, description="Fibonacci estimate (1, 2, 3, 5, 8) based on complexity.")
 
 
 class GenerationResponse(BaseModel):
@@ -374,7 +375,8 @@ async def generate_node(state: PipelineState) -> dict:
                     source_requirement_ids=story_req_ids,
                     labels=_normalize_labels(getattr(llm_s, "labels", ["FR"])),
                     priority=story_priority,
-                    evidence_reference=getattr(req, "evidence", [])
+                    evidence_reference=getattr(req, "evidence", []),
+                    story_points=getattr(llm_s, "story_points", 0) or 0
                 )
                 created_stories[llm_s_id] = user_story
                 final_stories.append(user_story)

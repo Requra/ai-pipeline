@@ -423,7 +423,7 @@ async def format_node(state: PipelineState) -> dict:
             labels=s.labels,
             components=[],
             epic_name="",
-            story_points=0
+            story_points=getattr(s, "story_points", 0) or 0
         )
         
         # Story type derived from its labels (falls back to the linked
