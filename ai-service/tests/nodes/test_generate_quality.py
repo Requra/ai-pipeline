@@ -84,11 +84,11 @@ async def test_total_fallback_produces_specific_criteria(base_state):
 
 
 @pytest.mark.asyncio
-async def test_short_llm_acceptance_criteria_emit_quality_warning(base_state):
+async def test_short_llm_acceptance_criteria_are_replaced_before_quality_gate(base_state):
     state = base_state.copy()
     state["job_id"] = "q-job3"
     state["classified_requirements"] = [_req(1, "The system shall send emails.", ["FR"])]
-    # LLM returns a story with only ONE acceptance criterion -> validation flags it.
+    # LLM returns one criterion; source-bound sanitization replaces it.
     mock_llm = MagicMock()
     mock_llm.ainvoke = AsyncMock(return_value=MagicMock(content=json.dumps({"stories": [
         {"source_requirement_id": 1, "title": "Send emails",
@@ -99,6 +99,6 @@ async def test_short_llm_acceptance_criteria_emit_quality_warning(base_state):
     with patch("app.nodes.generate.get_llm", return_value=mock_llm):
         result = await generate_node(state)
 
-    assert any(w["code"] == "GENERATE_STORY_QUALITY" for w in result.get("warnings", []))
-    # The story itself is not mutated (count stays as the LLM produced).
-    assert len(result["user_stories"][0].acceptance_criteria) == 1
+    assert not any(w["code"] == "GENERATE_STORY_QUALITY" for w in result.get("warnings", []))
+    assert len(result["user_stories"][0].acceptance_criteria) >= 2
+    assert all("send emails" in ac.text.lower() for ac in result["user_stories"][0].acceptance_criteria)

@@ -1,10 +1,23 @@
 from app.schemas.pipeline_state import PipelineState
 from app.schemas.items import UserStory, AcceptanceCriterion, RequirementCoverage
 from app.llm import get_llm
-from langchain_core.prompts import ChatPromptTemplate
 from app.prompts.loader import load_prompt
 from app.prompts.registry import PromptId
+from app.progress import update_progress
 from app.validators.story_validator import find_duplicate_story_ids, validate_stories
+from app.services.semantic_quality import (
+    clause_coverage,
+    fact_tokens,
+    has_polarity_conflict,
+    is_substantive,
+    lexical_support,
+    normalize_story_points,
+    source_fact_texts,
+    split_requirement_clauses,
+    story_alignment,
+    unsupported_fact_terms,
+    unsupported_numeric_claims,
+)
 from pydantic import BaseModel, Field
 from typing import List, Any, Optional
 import json
@@ -44,6 +57,12 @@ def normalize_actor_to_agile_role(actor: Optional[str]) -> str:
         return "a user"
     
     actor_lower = str(actor).lower().strip()
+
+    if actor_lower in {
+        "system", "service", "application", "portal", "workspace",
+        "notification service", "export service", "reporting service",
+    }:
+        return "a system operator"
     
     # 1. Handle common group/plural patterns
     mapping = {
@@ -138,36 +157,146 @@ def build_specific_acceptance_criteria(req, story_id: str, agile_actor: str) -> 
     Embeds the requirement text so the criteria are concrete and testable rather
     than generic boilerplate. Always returns at least two Given-When-Then items.
     """
-    text = (getattr(req, "text", "") or "").strip().rstrip(".")
-    primary = _primary_label(req)
+    return build_source_bound_acceptance_criteria([req], story_id)
 
-    if primary == "NFR":
-        criteria = [
-            f"Given the system in normal operation, when the related capability is exercised, then it measurably satisfies: {text}.",
-            f"Given the target metric is monitored, when it is evaluated, then the result stays within the limit implied by: {text}.",
-        ]
-    elif primary == "BR":
-        criteria = [
-            f"Given an applicable case, when the rule is evaluated, then the system enforces: {text}.",
-            "Given an attempt that violates the rule, when it is processed, then the system rejects or flags it as non-compliant.",
-        ]
-    else:  # FR
-        criteria = [
-            f"Given {agile_actor} using the system, when they perform the action, then the system fulfils: {text}.",
-            f"Given invalid or incomplete input, when {agile_actor} performs the action, then the system shows a clear error and does not complete it.",
-        ]
 
+def build_source_bound_acceptance_criteria(requirements, story_id: str) -> List[AcceptanceCriterion]:
+    """Create criteria that restate only facts present in canonical requirements."""
+    clauses = [
+        clause
+        for req in requirements
+        for clause in split_requirement_clauses(getattr(req, "text", "") or "")
+    ]
+    if not clauses:
+        clauses = ["the linked source requirement"]
+
+    criteria = [
+        f"Given the documented preconditions apply, when the capability is exercised, then {clause.rstrip('.')} ."
+        for clause in clauses
+    ]
+    if len(criteria) == 1:
+        clause = clauses[0].rstrip(".")
+        criteria.append(
+            f"Given the capability has been exercised, when its result is evaluated, then the observed outcome conforms to: {clause}."
+        )
     return [
         AcceptanceCriterion(
-            id=f"{story_id}_ac_{i + 1}",
-            text=criterion,
+            id=f"{story_id}_ac_{index + 1}",
+            text=text.replace(" .", "."),
             criterion_type="Given-When-Then",
         )
-        for i, criterion in enumerate(criteria)
+        for index, text in enumerate(criteria)
     ]
 
 
-from app.progress import update_progress
+def _criterion_supported(text: str, requirements) -> bool:
+    sources = source_fact_texts(requirements)
+    if not sources:
+        return False
+    if unsupported_numeric_claims(text, sources):
+        return False
+    if unsupported_fact_terms(text, sources):
+        return False
+    if has_polarity_conflict(text, sources):
+        return False
+    return max((lexical_support(source, text) for source in sources), default=0.0) >= 0.15
+
+
+def _mapping_supported(requirement, story_text: str) -> bool:
+    req_text = getattr(requirement, "text", "") or ""
+    if not is_substantive(req_text) or story_alignment([req_text], story_text) >= 0.25:
+        return True
+    req_tokens = fact_tokens(req_text)
+    story_tokens = fact_tokens(story_text)
+    return bool(req_tokens) and len(req_tokens & story_tokens) / len(req_tokens) >= 0.25
+
+
+def _sanitize_generated_story(story: UserStory, req_map: dict[int, Any]) -> UserStory:
+    """Remove unsupported mappings/facts and constrain estimates before output."""
+    story_text = f"{story.title} {story.description}"
+    valid_ids = []
+    for req_id in dict.fromkeys(story.source_requirement_ids):
+        req = req_map.get(req_id)
+        if req is None:
+            continue
+        if _mapping_supported(req, story_text):
+            valid_ids.append(req_id)
+    if not valid_ids:
+        valid_ids = [req_id for req_id in story.source_requirement_ids if req_id in req_map][:1]
+    story.source_requirement_ids = valid_ids
+
+    linked = [req_map[req_id] for req_id in valid_ids if req_id in req_map]
+    linked_labels = [
+        label
+        for req in linked
+        for label in _normalize_labels(getattr(req, "labels", None))
+    ]
+    if linked_labels:
+        story.labels = list(dict.fromkeys(linked_labels))
+    linked_priorities = [getattr(req, "priority", "Medium") for req in linked]
+    story.priority = max(
+        linked_priorities or ["Medium"],
+        key=lambda value: {"Low": 0, "Medium": 1, "High": 2, "Critical": 3}.get(value, 1),
+    )
+    supported_criteria = [
+        criterion for criterion in story.acceptance_criteria
+        if _criterion_supported(criterion.text, linked)
+    ]
+    criterion_texts = [criterion.text for criterion in supported_criteria]
+    if len(supported_criteria) < 2 or clause_coverage(linked, criterion_texts) < 1.0:
+        story.acceptance_criteria = build_source_bound_acceptance_criteria(linked, story.id)
+    else:
+        for index, criterion in enumerate(supported_criteria, start=1):
+            criterion.id = f"{story.id}_ac_{index}"
+            criterion.criterion_type = "Given-When-Then"
+        story.acceptance_criteria = supported_criteria
+
+    story.story_points = normalize_story_points(
+        story.story_points,
+        [getattr(req, "text", "") or "" for req in linked],
+    )
+    story.evidence_reference = [
+        evidence for req in linked for evidence in (getattr(req, "evidence", []) or [])
+    ]
+    return story
+
+
+def _dedupe_generated_stories(stories: List[UserStory]) -> List[UserStory]:
+    """Merge duplicate generated propositions while preserving coverage."""
+    canonical: List[UserStory] = []
+    for story in stories:
+        duplicate = None
+        story_tokens = set(re.findall(r"[a-z0-9]+", story.description.lower()))
+        for existing in canonical:
+            existing_tokens = set(re.findall(r"[a-z0-9]+", existing.description.lower()))
+            union = story_tokens | existing_tokens
+            similarity = len(story_tokens & existing_tokens) / len(union) if union else 0.0
+            if (
+                story.title.strip().lower() == existing.title.strip().lower()
+                or similarity >= 0.90
+            ):
+                duplicate = existing
+                break
+        if duplicate is None:
+            canonical.append(story)
+            continue
+        duplicate.source_requirement_ids = list(dict.fromkeys(
+            duplicate.source_requirement_ids + story.source_requirement_ids
+        ))
+        duplicate.labels = list(dict.fromkeys(duplicate.labels + story.labels))
+        duplicate.evidence_reference.extend(
+            evidence for evidence in story.evidence_reference
+            if (evidence.chunk_id, evidence.quote) not in {
+                (current.chunk_id, current.quote) for current in duplicate.evidence_reference
+            }
+        )
+        duplicate.priority = max(
+            (duplicate.priority, story.priority),
+            key=lambda value: {"Low": 0, "Medium": 1, "High": 2, "Critical": 3}.get(value, 1),
+        )
+        duplicate.story_points = max(duplicate.story_points, story.story_points)
+    return canonical
+
 
 # ---------------- NODE ----------------
 
@@ -256,7 +385,10 @@ async def generate_node(state: PipelineState) -> dict:
 
         llm_stories = response.stories if response else []
 
-        # Create lookup map for LLM output, mapping requirement ID -> StoryResponse
+        req_map = {r.id: r for r in to_generate}
+
+        # Create a lookup only for source IDs whose proposition actually aligns
+        # with the generated story. Declared IDs are not trusted by themselves.
         llm_story_map = {}
         for s in llm_stories:
             req_ids = []
@@ -264,13 +396,17 @@ async def generate_node(state: PipelineState) -> dict:
                 req_ids.extend(s.source_requirement_ids)
             if s.source_requirement_id is not None:
                 req_ids.append(s.source_requirement_id)
-            for r_id in set(req_ids):
-                if r_id not in llm_story_map:
+            story_text = f"{s.title} {s.description}"
+            for r_id in dict.fromkeys(req_ids):
+                req = req_map.get(r_id)
+                if req is None:
+                    continue
+                aligned = _mapping_supported(req, story_text)
+                if aligned and r_id not in llm_story_map:
                     llm_story_map[r_id] = s
 
         final_stories = []
         job_id = state.get("job_id") or "job"
-        req_map = {r.id: r for r in to_generate}
         
         # Track created UserStory instances by their corresponding LLM StoryResponse object ID
         created_stories = {} # id(StoryResponse) -> UserStory
@@ -376,7 +512,10 @@ async def generate_node(state: PipelineState) -> dict:
                     labels=_normalize_labels(getattr(llm_s, "labels", ["FR"])),
                     priority=story_priority,
                     evidence_reference=getattr(req, "evidence", []),
-                    story_points=getattr(llm_s, "story_points", 0) or 0
+                    story_points=normalize_story_points(
+                        getattr(llm_s, "story_points", 0),
+                        [getattr(req_map[r_id], "text", "") for r_id in story_req_ids if r_id in req_map],
+                    )
                 )
                 created_stories[llm_s_id] = user_story
                 final_stories.append(user_story)
@@ -418,7 +557,8 @@ async def generate_node(state: PipelineState) -> dict:
                     source_requirement_ids=[req.id],
                     labels=_normalize_labels(getattr(req, "labels", None)),
                     priority=getattr(req, "priority", "Medium"),
-                    evidence_reference=getattr(req, "evidence", [])
+                    evidence_reference=getattr(req, "evidence", []),
+                    story_points=normalize_story_points(0, [getattr(req, "text", "") or ""]),
                 )
                 final_stories.append(user_story)
                 
@@ -431,6 +571,39 @@ async def generate_node(state: PipelineState) -> dict:
                 )
                 requirement_coverages.append(coverage)
             
+        final_stories = [
+            _sanitize_generated_story(story, req_map) for story in final_stories
+        ]
+        final_stories = _dedupe_generated_stories(final_stories)
+
+        # Rebuild actionable coverage after mapping validation and story
+        # deduplication so it can never point to a removed or unrelated story.
+        requirement_coverages = [coverage for coverage in requirement_coverages if coverage.coverage_type == "non_story"]
+        for req in to_generate:
+            linked_story = next(
+                (story for story in final_stories if req.id in story.source_requirement_ids),
+                None,
+            )
+            if linked_story is None:
+                requirement_coverages.append(RequirementCoverage(
+                    requirement_id=req.id,
+                    coverage_type="needs_review",
+                    story_ids=[],
+                    acceptance_criteria_ids=[],
+                    reason="No semantically aligned generated story remained after validation.",
+                ))
+            else:
+                requirement_coverages.append(RequirementCoverage(
+                    requirement_id=req.id,
+                    coverage_type=(
+                        "merged_into_story" if len(linked_story.source_requirement_ids) > 1
+                        else "covered_by_story"
+                    ),
+                    story_ids=[linked_story.id],
+                    acceptance_criteria_ids=[criterion.id for criterion in linked_story.acceptance_criteria],
+                    reason=None,
+                ))
+
         # Validate generated stories and surface an aggregate quality warning.
         # We flag (not mutate) LLM stories so coverage stays consistent; the
         # fallback path already emits >=2 specific criteria.
@@ -489,7 +662,8 @@ async def generate_node(state: PipelineState) -> dict:
                 source_requirement_ids=[req.id],
                 labels=_normalize_labels(getattr(req, "labels", None)),
                 priority=getattr(req, "priority", "Medium"),
-                evidence_reference=getattr(req, "evidence", [])
+                evidence_reference=getattr(req, "evidence", []),
+                story_points=normalize_story_points(0, [getattr(req, "text", "") or ""]),
             )
             fallback_stories.append(user_story)
 

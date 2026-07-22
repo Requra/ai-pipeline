@@ -22,6 +22,7 @@ import json
 import logging
 
 from app.config import settings
+from app.services.semantic_quality import infer_requirement_priority
 from app.utils.json_parsing import loads_with_llm_repair
 
 logger = logging.getLogger(__name__)
@@ -147,14 +148,7 @@ def normalize_extraction_payload(parsed: Any, chunk: SourceChunk) -> dict:
         if extraction_type not in ("explicit", "implied"):
             extraction_type = None
 
-        priority = item.get("priority") or "Medium"
-        if priority not in ("Low", "Medium", "High", "Critical"):
-            priority = "Medium"
-
-        if priority == "Medium" and text:
-            text_lower = text.lower()
-            if any(k in text_lower for k in ("shall", "must", "mandatory", "critical", "essential", "has to", "immediately")):
-                priority = "High"
+        priority = infer_requirement_priority(text, item.get("priority"))
 
         normalized_reqs.append({
             "id": req_id,
