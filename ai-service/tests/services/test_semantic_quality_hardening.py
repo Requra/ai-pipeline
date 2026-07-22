@@ -18,6 +18,13 @@ from app.schemas.items import (
     UserStory,
 )
 from app.services.quality_scoring import compute_quality_scores
+from app.services.semantic_quality import (
+    infer_requirement_category,
+    infer_requirement_priority,
+    normalize_story_points,
+    split_requirement_clauses,
+    unsupported_fact_terms,
+)
 
 
 def _chunk(chunk_id: str, text: str, document_id: str = "doc-1") -> SourceChunk:
@@ -211,3 +218,36 @@ def test_medium_issue_prevents_perfect_overall_score():
     )
     scores = compute_quality_scores([req], [story], [issue])
     assert scores.overall_score <= 0.79
+
+
+def test_normative_words_do_not_inflate_backlog_priority():
+    assert infer_requirement_priority("The service shall export reports.", "High") == "Medium"
+    assert infer_requirement_priority("This is a business-critical requirement.", "Medium") == "Critical"
+
+
+def test_non_numeric_fact_ledger_rejects_invented_validation_behavior():
+    sources = ["The owner shall invite named collaborators to a project."]
+    unsupported = unsupported_fact_terms(
+        "Given an invalid email, when an invitation is submitted, then an error is displayed.",
+        sources,
+    )
+    assert {"invalid", "error"}.issubset(unsupported)
+
+
+def test_story_points_are_always_fibonacci():
+    assert normalize_story_points(5, ["A simple requirement."]) == 5
+    assert normalize_story_points(13, ["The system shall export reports."]) in {1, 2, 3, 5, 8}
+
+
+def test_requirement_category_is_not_hard_coded_general():
+    assert infer_requirement_category("The system shall record immutable audit events.", ["FR"]) == "Audit & Compliance"
+    assert infer_requirement_category("Analysts shall update a support case status.", ["FR"]) == "Case Management"
+
+
+def test_enumerated_source_facts_become_distinct_coverage_clauses():
+    clauses = split_requirement_clauses(
+        "The system shall record immutable audit events for invitation creation, role changes, sign-in failures, and export requests."
+    )
+    assert len(clauses) == 4
+    assert any("sign-in failures" in clause for clause in clauses)
+    assert any("export requests" in clause for clause in clauses)
