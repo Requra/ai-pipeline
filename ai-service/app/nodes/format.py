@@ -1,14 +1,13 @@
 import time
-from app.schemas.pipeline_state import PipelineState
-from app.schemas.items import JobResult, UserStory, ClassifiedRequirement, StructuredSummary
-
-
-import time
 import re
-from typing import Optional, List
+from typing import Optional
 from app.schemas.pipeline_state import PipelineState
+from app.services.semantic_quality import infer_requirement_category, normalize_story_points
+from app.progress import update_progress
 from app.schemas.items import (
     JobResult,
+    UserStory,
+    ClassifiedRequirement,
     SourceDocumentV1,
     SourceRefV1,
     QualityV1,
@@ -25,9 +24,7 @@ from app.schemas.items import (
     PipelineError,
     StructuredSummary,
     QualityIssue,
-    PipelineWarning,
     QualityReportV1,
-    ExportRow
 )
 
 
@@ -105,8 +102,6 @@ def parse_pipeline_error(err_str: str, status: str) -> Optional[PipelineError]:
     )
 
 
-from app.progress import update_progress
-
 async def format_node(state: PipelineState) -> dict:
     """
     Assemble all outputs into final JobResult contract and attach to state.
@@ -172,7 +167,17 @@ async def format_node(state: PipelineState) -> dict:
                 or (isinstance(q, dict) and q.get("severity") == "high") 
                 for q in q_issues
             )
-            if error or has_high or warnings:
+            # Successful canonicalization is informational; it should not turn
+            # an otherwise clean result into a partial response.
+            informational_warning_codes = {"DUPLICATE_REQUIREMENT_MERGED"}
+            actionable_warnings = [
+                warning for warning in warnings
+                if (
+                    warning.get("code") if isinstance(warning, dict)
+                    else getattr(warning, "code", None)
+                ) not in informational_warning_codes
+            ]
+            if error or has_high or actionable_warnings:
                 status = "partial"
             else:
                 status = "completed"
@@ -335,7 +340,7 @@ async def format_node(state: PipelineState) -> dict:
             title=title,
             description=r.text,
             type=req_type,
-            category="General",
+            category=infer_requirement_category(r.text, labels),
             priority=priority,
             actor=r.actor or "System",
             confidence_score=r.confidence,
@@ -429,7 +434,14 @@ async def format_node(state: PipelineState) -> dict:
             labels=s.labels,
             components=[],
             epic_name="",
-            story_points=getattr(s, "story_points", 0) or 0
+            story_points=normalize_story_points(
+                getattr(s, "story_points", 0),
+                [
+                    getattr(req, "text", "") or ""
+                    for req in coerced_reqs
+                    if req.id in (getattr(s, "source_requirement_ids", []) or [])
+                ],
+            )
         )
         
         # Story type derived from its labels (falls back to the linked
