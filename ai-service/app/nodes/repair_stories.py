@@ -1,11 +1,11 @@
 import json
 import logging
 import asyncio
-from typing import List, Dict, Any, Tuple
-from pydantic import BaseModel, Field, ValidationError
+from typing import List, Dict, Any
+from pydantic import BaseModel, Field
 
 from app.schemas.pipeline_state import PipelineState
-from app.schemas.items import UserStory, AcceptanceCriterion, QualityIssue, PipelineWarning
+from app.schemas.items import UserStory, AcceptanceCriterion, QualityIssue
 from app.config import settings
 from app.llm import get_llm
 from app.prompts.loader import load_prompt
@@ -23,6 +23,11 @@ REPAIRABLE_RULES = {
     "all_generic_acceptance_criteria",
     "weak_description",
     "missing_title",
+    "story_unsupported_fact",
+    "acceptance_criterion_unsupported_fact",
+    "acceptance_criterion_not_source_aligned",
+    "acceptance_criteria_missing_source_clause",
+    "non_human_story_persona",
 }
 
 
@@ -179,6 +184,7 @@ async def repair_stories_node(state: PipelineState) -> dict:
                     labels=repaired_item.labels or s.labels,
                     priority=s.priority,
                     evidence_reference=s.evidence_reference,
+                    story_points=s.story_points,
                     source_fr_id=s.source_fr_id
                 )
                 updated_stories.append(updated_story)
