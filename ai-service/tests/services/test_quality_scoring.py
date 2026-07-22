@@ -64,7 +64,7 @@ def test_quote_support_score_drives_groundedness():
 def test_missing_source_ids_lowers_traceability():
     stories = [_story("US1", source_ids=(1,)), _story("US2", source_ids=())]
     s = compute_quality_scores([_req(1)], stories, [])
-    assert s.traceability_coverage == 0.5
+    assert s.traceability_coverage == 0.75
 
 
 def test_generic_criteria_lower_ac_quality():
@@ -91,3 +91,25 @@ def test_high_severity_issue_counted():
     issues = [QualityIssue(item_id=1, item_type="requirement", severity="high", rule_violated="x", details="d")]
     s = compute_quality_scores([_req(1)], [], issues)
     assert s.high_severity_issue_count == 1
+
+
+def test_invented_non_numeric_behavior_lowers_acceptance_quality():
+    req = ClassifiedRequirement(
+        id=1,
+        text="The owner shall invite named collaborators to a project.",
+        candidate_labels=["FR"], labels=["FR"], confidence=0.9,
+        classification_confidence=0.9,
+        evidence=[EvidenceSpan(chunk_id="c", quote="invite named collaborators")],
+        quote_support_score=1.0,
+    )
+    story = UserStory(
+        id="US1", title="Invite collaborators",
+        description="As an owner, I want to invite collaborators, so that they can join the project.",
+        acceptance_criteria=[
+            _ac("Given an invalid email, when an invitation is submitted, then an error is displayed.", 1),
+            _ac("Given an owner, when they invite named collaborators, then the collaborators are invited.", 2),
+        ],
+        source_requirement_ids=[1], labels=["FR"], story_points=3,
+    )
+    scores = compute_quality_scores([req], [story], [])
+    assert scores.acceptance_criteria_quality < 1.0

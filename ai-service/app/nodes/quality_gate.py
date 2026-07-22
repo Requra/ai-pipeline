@@ -1,4 +1,4 @@
-from typing import List, Dict
+from typing import List
 from app.schemas.pipeline_state import PipelineState
 from app.schemas.items import (
     ClassifiedRequirement,
@@ -10,9 +10,15 @@ from app.progress import update_progress
 from app.services.quality_scoring import compute_quality_scores
 from app.validators.story_validator import find_duplicate_story_ids, is_generic_ac
 from app.services.semantic_quality import (
+    clause_coverage,
+    has_polarity_conflict,
+    infer_requirement_priority,
     is_substantive,
     lexical_support,
+    meaningful_tokens,
+    source_fact_texts,
     story_alignment,
+    unsupported_fact_terms,
     unsupported_numeric_claims,
 )
 
@@ -87,6 +93,7 @@ async def quality_gate_node(state: PipelineState) -> dict:
                     details="Requirement has no labels assigned (none predicted, none extracted)"
                 ))
                 r.needs_review = True
+
             elif candidate_labels & special_non_story_labels:
                 # This should have been fixed by classify_node, so it's a bug if it reaches here
                 new_issues.append(QualityIssue(
@@ -96,6 +103,19 @@ async def quality_gate_node(state: PipelineState) -> dict:
                     rule_violated="requirement_missing_labels",
                     details=f"Requirement missing final labels despite special candidates: {candidate_labels & special_non_story_labels}"
                 ))
+
+        expected_priority = infer_requirement_priority(getattr(r, "text", "") or "", getattr(r, "priority", None))
+        if getattr(r, "priority", "Medium") != expected_priority:
+            new_issues.append(QualityIssue(
+                item_id=r.id,
+                item_type="requirement",
+                severity="medium",
+                rule_violated="priority_not_source_supported",
+                details=(
+                    f"Requirement {r.id} priority {getattr(r, 'priority', None)} is not explicitly "
+                    f"supported by its source language; expected {expected_priority}."
+                ),
+            ))
 
         conf = getattr(r, "classification_confidence", None)
         if conf is None:
@@ -122,6 +142,29 @@ async def quality_gate_node(state: PipelineState) -> dict:
                     details="Requirement missing evidence"
                 ))
                 r.needs_review = True
+
+    for index, requirement in enumerate(reqs):
+        current_tokens = meaningful_tokens(getattr(requirement, "text", "") or "")
+        for previous in reqs[:index]:
+            previous_tokens = meaningful_tokens(getattr(previous, "text", "") or "")
+            if min(len(current_tokens), len(previous_tokens)) < 4:
+                continue
+            intersection = current_tokens & previous_tokens
+            union = current_tokens | previous_tokens
+            jaccard = len(intersection) / len(union) if union else 0.0
+            containment = len(intersection) / min(len(current_tokens), len(previous_tokens))
+            if jaccard >= 0.90 or containment >= 0.82:
+                new_issues.append(QualityIssue(
+                    item_id=requirement.id,
+                    item_type="requirement",
+                    severity="high",
+                    rule_violated="duplicate_requirement",
+                    details=(
+                        f"Requirement {requirement.id} duplicates or overlaps canonical requirement "
+                        f"{previous.id}; canonicalization must retain only one representation."
+                    ),
+                ))
+                break
 
     # Validate stories
     for s in stories:
@@ -151,6 +194,19 @@ async def quality_gate_node(state: PipelineState) -> dict:
                 rule_violated="story_description_shape",
                 details=f"Story {s.id} description does not follow a valid Agile pattern ('As a/an/the ..., I want/must ..., so that ...')"
             ))
+        else:
+            role = agile_pattern.match(desc.strip()).group(0).split(",", 1)[0].lower()
+            if "system operator" not in role and any(
+                re.search(rf"\b{term}\b", role)
+                for term in ("system", "service", "application", "portal", "workspace", "database", "api")
+            ):
+                new_issues.append(QualityIssue(
+                    item_id=0,
+                    item_type="story",
+                    severity="medium",
+                    rule_violated="non_human_story_persona",
+                    details=f"Story {s.id} uses a technical component as its persona.",
+                ))
 
 
         ac = getattr(s, "acceptance_criteria", []) or []
@@ -196,6 +252,30 @@ async def quality_gate_node(state: PipelineState) -> dict:
                         rule_violated="story_missing_evidence_reference",
                         details=f"Story {s.id} is missing evidence_reference despite source requirement {source_req.id} having evidence"
                     ))
+
+        linked_requirements = [req_map[req_id] for req_id in src_ids if req_id in req_map]
+        linked_facts = source_fact_texts(linked_requirements)
+        unsupported_story_terms = unsupported_fact_terms(desc, linked_facts)
+        if unsupported_story_terms or has_polarity_conflict(desc, linked_facts):
+            new_issues.append(QualityIssue(
+                item_id=0,
+                item_type="story",
+                severity="high",
+                rule_violated="story_unsupported_fact",
+                details=(
+                    f"Story {s.id} introduces unsupported behavior: "
+                    f"{', '.join(sorted(unsupported_story_terms)) or 'polarity reversal'}."
+                ),
+            ))
+
+        if getattr(s, "story_points", 0) not in {1, 2, 3, 5, 8}:
+            new_issues.append(QualityIssue(
+                item_id=0,
+                item_type="story",
+                severity="medium",
+                rule_violated="invalid_story_points",
+                details=f"Story {s.id} has a non-Fibonacci story point estimate.",
+            ))
 
     # Validate coverage mapping
     for c in coverages:
@@ -323,6 +403,20 @@ async def quality_gate_node(state: PipelineState) -> dict:
                     ),
                 ))
                 continue
+            unsupported_terms = unsupported_fact_terms(criterion_text, source_facts)
+            polarity_conflict = has_polarity_conflict(criterion_text, source_facts)
+            if unsupported_terms or polarity_conflict:
+                new_issues.append(QualityIssue(
+                    item_id=0,
+                    item_type="story",
+                    severity="high",
+                    rule_violated="acceptance_criterion_unsupported_fact",
+                    details=(
+                        f"Story {s.id} acceptance criterion introduces unsupported behavior: "
+                        f"{', '.join(sorted(unsupported_terms)) or 'polarity reversal'}."
+                    ),
+                ))
+                continue
             if substantive_facts and max(
                 (lexical_support(fact, criterion_text) for fact in substantive_facts),
                 default=0.0,
@@ -334,6 +428,19 @@ async def quality_gate_node(state: PipelineState) -> dict:
                     rule_violated="acceptance_criterion_not_source_aligned",
                     details=f"Story {s.id} has an acceptance criterion not supported by its linked source facts.",
                 ))
+
+        coverage_score = clause_coverage(
+            linked,
+            [getattr(criterion, "text", "") or "" for criterion in (getattr(s, "acceptance_criteria", []) or [])],
+        )
+        if linked and coverage_score < 1.0:
+            new_issues.append(QualityIssue(
+                item_id=0,
+                item_type="story",
+                severity="medium",
+                rule_violated="acceptance_criteria_missing_source_clause",
+                details=f"Story {s.id} acceptance criteria cover only {coverage_score:.0%} of linked source clauses.",
+            ))
 
     # --- Combine, dedupe, score ----------------------------------------------
     all_issues = _dedupe_issues(existing_q + new_issues)

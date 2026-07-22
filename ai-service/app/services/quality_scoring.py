@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import Dict, List, Sequence
+from typing import Dict, Sequence
 
 from app.services.semantic_quality import (
+    clause_coverage,
+    has_polarity_conflict,
     is_substantive,
     lexical_support,
+    meaningful_tokens,
+    source_fact_texts,
     story_alignment,
+    unsupported_fact_terms,
     unsupported_numeric_claims,
 )
 from app.validators.story_validator import find_duplicate_story_ids, is_generic_ac
@@ -82,17 +87,39 @@ def _criterion_supported(criterion, linked_requirements: Sequence) -> bool:
     text = getattr(criterion, "text", "") or ""
     if is_generic_ac(text):
         return False
-    sources: List[str] = []
-    for req in linked_requirements:
-        req_text = getattr(req, "text", "") or ""
-        sources.append(req_text)
-        sources.extend(getattr(ev, "quote", "") or "" for ev in (getattr(req, "evidence", []) or []))
+    sources = source_fact_texts(linked_requirements)
     substantive = [source for source in sources if is_substantive(source)]
     if not substantive:
         return True
     if unsupported_numeric_claims(text, sources):
         return False
+    if unsupported_fact_terms(text, sources) or has_polarity_conflict(text, sources):
+        return False
     return max((lexical_support(source, text) for source in substantive), default=0.0) >= 0.15
+
+
+def _duplicate_requirement_count(requirements: Sequence) -> int:
+    prior: list[set[str]] = []
+    duplicates = 0
+    for req in requirements:
+        tokens = meaningful_tokens(getattr(req, "text", "") or "")
+        if not tokens:
+            prior.append(tokens)
+            continue
+        duplicate = False
+        for existing in prior:
+            union = tokens | existing
+            similarity = len(tokens & existing) / len(union) if union else 0.0
+            containment = (
+                min(len(tokens), len(existing)) >= 4
+                and len(tokens & existing) / min(len(tokens), len(existing)) >= 0.82
+            )
+            if similarity >= 0.90 or containment:
+                duplicate = True
+                break
+        duplicates += int(duplicate)
+        prior.append(tokens)
+    return duplicates
 
 
 def compute_quality_scores(requirements: Sequence, stories: Sequence, quality_issues: Sequence) -> QualityScores:
@@ -102,10 +129,28 @@ def compute_quality_scores(requirements: Sequence, stories: Sequence, quality_is
     groundedness = (
         sum(_req_groundedness(req) for req in requirements) / req_count if req_count else 1.0
     )
-    traceability = (
-        sum(1 for story in stories if _story_traceable(story, requirements_by_id)) / story_count
-        if story_count else 1.0
-    )
+    if stories:
+        traceable_stories = [story for story in stories if _story_traceable(story, requirements_by_id)]
+        mapping_precision = len(traceable_stories) / story_count
+        aligned_requirement_ids = {
+            req_id
+            for story in traceable_stories
+            for req_id in (getattr(story, "source_requirement_ids", []) or [])
+            if req_id in requirements_by_id
+        }
+        actionable_ids = {
+            req_id for req_id, req in requirements_by_id.items()
+            if not set(getattr(req, "labels", []) or []).intersection(
+                {"Open Question", "Out-of-Scope", "Assumption"}
+            )
+        }
+        requirement_coverage = (
+            len(aligned_requirement_ids & actionable_ids) / len(actionable_ids)
+            if actionable_ids else 1.0
+        )
+        traceability = (mapping_precision + requirement_coverage) / 2
+    else:
+        traceability = 1.0 if not requirements else 0.0
     completeness = (
         sum(1 for story in stories if _story_is_complete(story)) / story_count
         if story_count else 1.0
@@ -128,9 +173,24 @@ def compute_quality_scores(requirements: Sequence, stories: Sequence, quality_is
                 1 for criterion in (getattr(story, "acceptance_criteria", []) or [])
                 if _criterion_supported(criterion, linked)
             )
-        ac_quality = supported / len(criteria)
+        criterion_precision = supported / len(criteria)
+        coverage_scores = []
+        for story in stories:
+            linked = [
+                requirements_by_id[rid]
+                for rid in (getattr(story, "source_requirement_ids", []) or [])
+                if rid in requirements_by_id
+            ]
+            coverage_scores.append(clause_coverage(
+                linked,
+                [getattr(ac, "text", "") or "" for ac in (getattr(story, "acceptance_criteria", []) or [])],
+            ))
+        fact_coverage = sum(coverage_scores) / len(coverage_scores) if coverage_scores else 0.0
+        ac_quality = min(criterion_precision, fact_coverage)
 
-    duplicate_risk = len(find_duplicate_story_ids(stories)) / story_count if story_count else 0.0
+    story_duplicate_risk = len(find_duplicate_story_ids(stories)) / story_count if story_count else 0.0
+    requirement_duplicate_risk = _duplicate_requirement_count(requirements) / req_count if req_count else 0.0
+    duplicate_risk = max(story_duplicate_risk, requirement_duplicate_risk)
     high_count = sum(1 for issue in quality_issues if _severity(issue) == "high")
     medium_count = sum(1 for issue in quality_issues if _severity(issue) == "medium")
     low_count = sum(1 for issue in quality_issues if _severity(issue) == "low")
