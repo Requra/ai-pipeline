@@ -11,7 +11,16 @@ from __future__ import annotations
 import re
 from typing import Dict, List, Sequence
 
-from app.services.semantic_quality import meaningful_tokens
+from app.services.semantic_quality import (
+    clause_coverage,
+    has_polarity_conflict,
+    is_substantive,
+    meaningful_tokens,
+    source_fact_texts,
+    story_alignment,
+    unsupported_fact_terms,
+    unsupported_numeric_claims,
+)
 
 # Phrases that signal a non-specific, boilerplate acceptance criterion.
 _GENERIC_AC_PATTERNS = (
@@ -72,6 +81,29 @@ def validate_story(story, reqs_by_id: Dict[int, object]) -> List[str]:
         if primary is not None and getattr(primary, "evidence", None):
             if not (getattr(story, "evidence_reference", None) or []):
                 issues.append("missing_evidence_reference")
+
+        linked = [reqs_by_id[req_id] for req_id in src_ids if req_id in reqs_by_id]
+        req_texts = [getattr(req, "text", "") or "" for req in linked]
+        story_text = f"{title} {description}"
+        if linked and any(is_substantive(text) for text in req_texts):
+            if story_alignment(req_texts, story_text) < 0.25:
+                issues.append("incorrect_story_requirement_mapping")
+
+        facts = source_fact_texts(linked)
+        criterion_texts = [getattr(ac, "text", "") or "" for ac in acs]
+        if any(is_substantive(fact) for fact in facts):
+            if any(
+                unsupported_numeric_claims(text, facts)
+                or unsupported_fact_terms(text, facts)
+                or has_polarity_conflict(text, facts)
+                for text in criterion_texts
+            ):
+                issues.append("unsupported_acceptance_fact")
+            if linked and clause_coverage(linked, criterion_texts) < 1.0:
+                issues.append("missing_source_clause")
+
+    if getattr(story, "story_points", 0) not in {1, 2, 3, 5, 8}:
+        issues.append("invalid_story_points")
 
     return issues
 

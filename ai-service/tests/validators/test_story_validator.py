@@ -23,6 +23,7 @@ def _story(**over):
                              _ac("Given D, when E, then F is rejected with an error.", 2)],
         source_requirement_ids=[1],
         labels=["FR"],
+        story_points=3,
         evidence_reference=[EvidenceSpan(chunk_id="c1", quote="q")],
     )
     base.update(over)
