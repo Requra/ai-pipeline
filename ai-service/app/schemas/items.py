@@ -48,6 +48,12 @@ class EvidenceSpan(BaseModel):
     speaker: Optional[str] = None
     timestamp: Optional[str] = None
     document_id: Optional[str] = None
+    # Internal provenance and support signals.  format_node maps them into the
+    # existing SourceRefV1.confidence_score; they never add public fields.
+    origin: Literal["extracted", "retrieved", "fallback"] = "extracted"
+    lexical_score: float = 0.0
+    entailment_score: float = 0.0
+    support_score: float = 0.0
 
 class ExtractedRequirement(BaseModel):
     id: int

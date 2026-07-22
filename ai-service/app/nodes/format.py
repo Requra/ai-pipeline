@@ -307,7 +307,10 @@ async def format_node(state: PipelineState) -> dict:
                 page=ev.page_number,
                 chunk_id=ev.chunk_id,
                 quote=ev.quote,
-                confidence_score=r.confidence
+                confidence_score=round(
+                    getattr(ev, "support_score", 0.0) or min(float(r.confidence), 0.5),
+                    4,
+                )
             ))
             
         # Quality mapping
@@ -384,7 +387,10 @@ async def format_node(state: PipelineState) -> dict:
                 page=ev.page_number,
                 chunk_id=ev.chunk_id,
                 quote=ev.quote,
-                confidence_score=0.9
+                confidence_score=round(
+                    getattr(ev, "support_score", 0.0) or 0.5,
+                    4,
+                )
             ))
             
         # Quality mapping

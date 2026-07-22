@@ -11,6 +11,8 @@ from __future__ import annotations
 import re
 from typing import Dict, List, Sequence
 
+from app.services.semantic_quality import meaningful_tokens
+
 # Phrases that signal a non-specific, boilerplate acceptance criterion.
 _GENERIC_AC_PATTERNS = (
     "requirement is implemented as specified",
@@ -75,15 +77,31 @@ def validate_story(story, reqs_by_id: Dict[int, object]) -> List[str]:
 
 
 def find_duplicate_story_ids(stories: Sequence) -> List[str]:
-    """Return story ids that duplicate an earlier story (same title+description)."""
+    """Return exact or near-semantic duplicates.
+
+    Titles are presentation text and often differ even when two generated
+    stories express the same proposition, so description-token similarity is
+    checked independently.
+    """
     seen: Dict[str, str] = {}
+    prior_descriptions: List[tuple[str, set[str]]] = []
     dupes: List[str] = []
     for s in stories:
         key = _norm(getattr(s, "title", "")) + "||" + _norm(getattr(s, "description", ""))
-        if key in seen:
+        tokens = meaningful_tokens(getattr(s, "description", ""))
+        near_duplicate = False
+        if tokens:
+            for _prior_id, prior_tokens in prior_descriptions:
+                union = tokens | prior_tokens
+                similarity = len(tokens & prior_tokens) / len(union) if union else 0.0
+                if similarity >= 0.90:
+                    near_duplicate = True
+                    break
+        if key in seen or near_duplicate:
             dupes.append(getattr(s, "id", ""))
         else:
             seen[key] = getattr(s, "id", "")
+            prior_descriptions.append((getattr(s, "id", ""), tokens))
     return dupes
 
 

@@ -9,6 +9,12 @@ from app.schemas.items import (
 from app.progress import update_progress
 from app.services.quality_scoring import compute_quality_scores
 from app.validators.story_validator import find_duplicate_story_ids, is_generic_ac
+from app.services.semantic_quality import (
+    is_substantive,
+    lexical_support,
+    story_alignment,
+    unsupported_numeric_claims,
+)
 
 # Below this classification confidence a requirement is flagged for review.
 LOW_CONFIDENCE_THRESHOLD = 0.4
@@ -275,6 +281,59 @@ async def quality_gate_node(state: PipelineState) -> dict:
             rule_violated="duplicate_story",
             details=f"Story {dup_id} duplicates another generated story.",
         ))
+
+    # Semantic story-to-requirement mapping.  An ID alone is not traceability.
+    for s in stories:
+        linked = [req_map[rid] for rid in (getattr(s, "source_requirement_ids", []) or []) if rid in req_map]
+        req_texts = [(getattr(req, "text", "") or "") for req in linked]
+        story_text = f"{getattr(s, 'title', '')} {getattr(s, 'description', '')}"
+        if linked and any(is_substantive(text) for text in req_texts):
+            alignment = story_alignment(req_texts, story_text)
+            if alignment < 0.25:
+                new_issues.append(QualityIssue(
+                    item_id=0,
+                    item_type="story",
+                    severity="high",
+                    rule_violated="incorrect_story_requirement_mapping",
+                    details=(
+                        f"Story {s.id} does not semantically match its linked requirement(s) "
+                        f"{getattr(s, 'source_requirement_ids', [])} (alignment={alignment:.2f})."
+                    ),
+                ))
+
+        source_facts = list(req_texts)
+        for req in linked:
+            source_facts.extend(
+                (getattr(ev, "quote", "") or "")
+                for ev in (getattr(req, "evidence", []) or [])
+            )
+        substantive_facts = [fact for fact in source_facts if is_substantive(fact)]
+        for criterion in (getattr(s, "acceptance_criteria", []) or []):
+            criterion_text = getattr(criterion, "text", "") or ""
+            unsupported = unsupported_numeric_claims(criterion_text, source_facts)
+            if unsupported:
+                new_issues.append(QualityIssue(
+                    item_id=0,
+                    item_type="story",
+                    severity="high",
+                    rule_violated="acceptance_criterion_unsupported_fact",
+                    details=(
+                        f"Story {s.id} acceptance criterion introduces unsupported numeric claim(s): "
+                        f"{', '.join(sorted(unsupported))}."
+                    ),
+                ))
+                continue
+            if substantive_facts and max(
+                (lexical_support(fact, criterion_text) for fact in substantive_facts),
+                default=0.0,
+            ) < 0.15:
+                new_issues.append(QualityIssue(
+                    item_id=0,
+                    item_type="story",
+                    severity="medium",
+                    rule_violated="acceptance_criterion_not_source_aligned",
+                    details=f"Story {s.id} has an acceptance criterion not supported by its linked source facts.",
+                ))
 
     # --- Combine, dedupe, score ----------------------------------------------
     all_issues = _dedupe_issues(existing_q + new_issues)

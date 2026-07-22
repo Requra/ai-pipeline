@@ -1,16 +1,16 @@
-"""
-Derived quality scoring for a pipeline run.
-
-All scores are computed from real signals already present on the requirements,
-stories, and quality issues — nothing here is faked or hard-coded. Scores are in
-[0, 1] where higher is better (except ``duplicate_risk`` where lower is better).
-"""
+"""Honest, source-aware quality scoring for the unchanged V1 contract."""
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from typing import Dict, List, Sequence
 
+from app.services.semantic_quality import (
+    is_substantive,
+    lexical_support,
+    story_alignment,
+    unsupported_numeric_claims,
+)
 from app.validators.story_validator import find_duplicate_story_ids, is_generic_ac
 
 
@@ -31,93 +31,123 @@ class QualityScores:
 
 
 def _req_groundedness(req) -> float:
-    """Per-requirement groundedness in [0, 1].
+    evidence = getattr(req, "evidence", None) or []
+    evidence_scores = [
+        max(0.0, min(1.0, float(getattr(ev, "support_score", 0.0) or 0.0)))
+        for ev in evidence
+    ]
+    strongest = max(evidence_scores, default=0.0)
 
-    Prefers the retrieval-derived quote_support_score; otherwise falls back to
-    "has evidence?" so the score is still meaningful without retrieval.
-    """
     qss = getattr(req, "quote_support_score", None)
     if qss is not None:
         try:
-            return max(0.0, min(1.0, float(qss)))
+            strongest = max(strongest, max(0.0, min(1.0, float(qss))))
         except (TypeError, ValueError):
             pass
-    evidence = getattr(req, "evidence", None) or []
-    return 1.0 if evidence else 0.0
+
+    # Backward compatibility for callers that predate internal support scores.
+    if strongest == 0.0 and evidence and qss is None:
+        strongest = 0.5
+    if getattr(req, "needs_review", False):
+        strongest *= 0.8
+    return strongest
 
 
 def _story_is_complete(story) -> bool:
-    title = (getattr(story, "title", "") or "").strip()
-    acs = getattr(story, "acceptance_criteria", []) or []
-    src = getattr(story, "source_requirement_ids", []) or []
-    return bool(title) and len(acs) >= 2 and bool(src)
+    return bool((getattr(story, "title", "") or "").strip()) and len(
+        getattr(story, "acceptance_criteria", []) or []
+    ) >= 2 and bool(getattr(story, "source_requirement_ids", []) or [])
 
 
 def _severity(issue) -> str:
-    if isinstance(issue, dict):
-        return issue.get("severity", "")
-    return getattr(issue, "severity", "")
+    return issue.get("severity", "") if isinstance(issue, dict) else getattr(issue, "severity", "")
 
 
-def compute_quality_scores(
-    requirements: Sequence,
-    stories: Sequence,
-    quality_issues: Sequence,
-) -> QualityScores:
-    req_count = len(requirements)
-    story_count = len(stories)
+def _story_traceable(story, requirements_by_id: dict) -> bool:
+    linked = [
+        requirements_by_id[rid]
+        for rid in (getattr(story, "source_requirement_ids", []) or [])
+        if rid in requirements_by_id
+    ]
+    if not linked:
+        return False
+    req_texts = [(getattr(req, "text", "") or "") for req in linked]
+    if not any(is_substantive(text) for text in req_texts):
+        return True
+    story_text = f"{getattr(story, 'title', '')} {getattr(story, 'description', '')}"
+    return story_alignment(req_texts, story_text) >= 0.25
 
-    # Groundedness: average per-requirement grounding.
-    if req_count:
-        groundedness = sum(_req_groundedness(r) for r in requirements) / req_count
-    else:
-        groundedness = 1.0
 
-    # Traceability: fraction of stories that cite a source requirement.
-    if story_count:
-        traced = sum(1 for s in stories if (getattr(s, "source_requirement_ids", []) or []))
-        traceability = traced / story_count
-    else:
-        traceability = 1.0
+def _criterion_supported(criterion, linked_requirements: Sequence) -> bool:
+    text = getattr(criterion, "text", "") or ""
+    if is_generic_ac(text):
+        return False
+    sources: List[str] = []
+    for req in linked_requirements:
+        req_text = getattr(req, "text", "") or ""
+        sources.append(req_text)
+        sources.extend(getattr(ev, "quote", "") or "" for ev in (getattr(req, "evidence", []) or []))
+    substantive = [source for source in sources if is_substantive(source)]
+    if not substantive:
+        return True
+    if unsupported_numeric_claims(text, sources):
+        return False
+    return max((lexical_support(source, text) for source in substantive), default=0.0) >= 0.15
 
-    # Story completeness: fraction of stories that are well-formed.
-    if story_count:
-        complete = sum(1 for s in stories if _story_is_complete(s))
-        completeness = complete / story_count
-    else:
-        completeness = 1.0
 
-    # Acceptance-criteria quality: fraction of non-generic criteria.
-    total_acs = sum(len(getattr(s, "acceptance_criteria", []) or []) for s in stories)
+def compute_quality_scores(requirements: Sequence, stories: Sequence, quality_issues: Sequence) -> QualityScores:
+    req_count, story_count = len(requirements), len(stories)
+    requirements_by_id = {getattr(req, "id", None): req for req in requirements}
+
+    groundedness = (
+        sum(_req_groundedness(req) for req in requirements) / req_count if req_count else 1.0
+    )
+    traceability = (
+        sum(1 for story in stories if _story_traceable(story, requirements_by_id)) / story_count
+        if story_count else 1.0
+    )
+    completeness = (
+        sum(1 for story in stories if _story_is_complete(story)) / story_count
+        if story_count else 1.0
+    )
+
+    criteria = [ac for story in stories for ac in (getattr(story, "acceptance_criteria", []) or [])]
     if not story_count:
         ac_quality = 1.0
-    elif total_acs == 0:
+    elif not criteria:
         ac_quality = 0.0
     else:
-        non_generic = sum(
-            1
-            for s in stories
-            for ac in (getattr(s, "acceptance_criteria", []) or [])
-            if not is_generic_ac(getattr(ac, "text", ""))
-        )
-        ac_quality = non_generic / total_acs
+        supported = 0
+        for story in stories:
+            linked = [
+                requirements_by_id[rid]
+                for rid in (getattr(story, "source_requirement_ids", []) or [])
+                if rid in requirements_by_id
+            ]
+            supported += sum(
+                1 for criterion in (getattr(story, "acceptance_criteria", []) or [])
+                if _criterion_supported(criterion, linked)
+            )
+        ac_quality = supported / len(criteria)
 
-    # Duplicate risk: fraction of stories that duplicate an earlier story.
-    if story_count:
-        duplicate_risk = len(find_duplicate_story_ids(stories)) / story_count
-    else:
-        duplicate_risk = 0.0
+    duplicate_risk = len(find_duplicate_story_ids(stories)) / story_count if story_count else 0.0
+    high_count = sum(1 for issue in quality_issues if _severity(issue) == "high")
+    medium_count = sum(1 for issue in quality_issues if _severity(issue) == "medium")
+    low_count = sum(1 for issue in quality_issues if _severity(issue) == "low")
 
-    high_count = sum(1 for q in quality_issues if _severity(q) == "high")
-
-    components: List[float] = [
-        traceability,
-        groundedness,
-        completeness,
-        ac_quality,
-        1.0 - duplicate_risk,
-    ]
-    overall = sum(components) / len(components)
+    overall = (
+        groundedness * 0.30
+        + traceability * 0.25
+        + completeness * 0.15
+        + ac_quality * 0.20
+        + (1.0 - duplicate_risk) * 0.10
+    )
+    penalty = min(0.70, high_count * 0.15 + medium_count * 0.05 + low_count * 0.01)
+    overall = max(0.0, overall - penalty)
+    if high_count:
+        overall = min(overall, 0.59)
+    elif medium_count:
+        overall = min(overall, 0.79)
 
     return QualityScores(
         overall_score=round(overall, 4),

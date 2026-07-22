@@ -29,6 +29,7 @@ from app.rag.scoring import tokenize
 from app.rag.source_index import get_source_index
 from app.schemas.items import EvidenceSpan, ExtractedRequirement, PipelineWarning, SourceChunk
 from app.schemas.pipeline_state import PipelineState
+from app.services.semantic_quality import lexical_support
 
 logger = logging.getLogger("app.nodes.retrieve_evidence")
 
@@ -36,6 +37,7 @@ RETRIEVE_TOP_K = 3
 MAX_EVIDENCE_PER_REQ = 4
 SNIPPET_MAX_CHARS = 240
 WEAK_CONFIDENCE_FACTOR = 0.85
+MIN_RETRIEVAL_SUPPORT = 0.35
 
 
 def _build_query(req: ExtractedRequirement) -> str:
@@ -56,13 +58,29 @@ def _best_snippet(text: str, query_tokens: set, max_len: int = SNIPPET_MAX_CHARS
     return best[:max_len].strip()
 
 
-def _quote_support_score(req: ExtractedRequirement, chunk_texts: List[str]) -> float:
-    """Fraction of the requirement's evidence quotes found verbatim in source."""
-    quotes = [e.quote for e in req.evidence if (e.quote or "").strip()]
-    if not quotes:
-        return 0.0
-    found = sum(1 for q in quotes if any(q in ct for ct in chunk_texts))
-    return round(found / len(quotes), 4)
+def _quote_support_score(req: ExtractedRequirement, chunks_by_id: dict[str, SourceChunk]) -> float:
+    """Score the strongest quote grounded in its declared chunk and document."""
+    scores: List[float] = []
+    for evidence in req.evidence:
+        quote = (evidence.quote or "").strip()
+        chunk = chunks_by_id.get(evidence.chunk_id)
+        if not quote or chunk is None or quote not in chunk.text:
+            evidence.support_score = 0.0
+            continue
+        if evidence.document_id and evidence.document_id != chunk.document_id:
+            evidence.support_score = 0.0
+            continue
+        score = lexical_support(req.text, quote)
+        if evidence.origin == "fallback":
+            # A source snippet can still strongly support the claim even when
+            # verbatim alignment failed because punctuation/layout changed.
+            # It is capped so it can never look as strong as an exact quote.
+            score = min(score, 0.70)
+        evidence.lexical_score = score
+        evidence.entailment_score = score
+        evidence.support_score = score
+        scores.append(score)
+    return round(max(scores, default=0.0), 4)
 
 
 async def retrieve_evidence_node(state: PipelineState) -> dict:
@@ -76,12 +94,12 @@ async def retrieve_evidence_node(state: PipelineState) -> dict:
 
     retriever = get_source_index(state.get("source_index_id") or job_id)
     chunks: List[SourceChunk] = state.get("chunks", []) or []
-    chunk_texts = [c.text for c in chunks]
+    chunks_by_id = {c.chunk_id: c for c in chunks}
 
     if retriever is None or retriever.size == 0:
         # No index to retrieve from — still record quote support so quality can act.
         for req in reqs:
-            req.quote_support_score = _quote_support_score(req, chunk_texts)
+            req.quote_support_score = _quote_support_score(req, chunks_by_id)
         warning = PipelineWarning(
             node_name="retrieve_evidence",
             code="NO_RETRIEVED_EVIDENCE",
@@ -100,7 +118,6 @@ async def retrieve_evidence_node(state: PipelineState) -> dict:
     hybrid = bool(state.get("enable_hybrid_retrieval"))
     embedder = None
     embedding_store = None
-    chunks_by_id = {c.chunk_id: c for c in chunks}
     if hybrid:
         try:
             from app.rag.embeddings import get_embedder
@@ -123,8 +140,8 @@ async def retrieve_evidence_node(state: PipelineState) -> dict:
         query_tokens = set(tokenize(query))
         bm25_hits = retriever.retrieve(query, top_k=RETRIEVE_TOP_K)
 
-        req.evidence_match_score = round(bm25_hits[0].score, 4) if bm25_hits else 0.0
-        req.quote_support_score = _quote_support_score(req, chunk_texts)
+        req.evidence_match_score = 0.0
+        req.quote_support_score = _quote_support_score(req, chunks_by_id)
 
         hits = bm25_hits
         if hybrid:
@@ -150,11 +167,10 @@ async def retrieve_evidence_node(state: PipelineState) -> dict:
             except Exception as exc:  # pragma: no cover - defensive
                 logger.warning("hybrid retrieval failed for req %s: %s", req.id, type(exc).__name__)
 
-        if not hits:
-            no_hits += 1
-
-        # Attach supporting evidence from NEW chunks only, capped.
+        # Retrieval results are candidates, not citations.  Only candidates
+        # that support the requirement proposition become evidence.
         cited = {e.chunk_id for e in req.evidence}
+        qualified_hits = 0
         for hit in hits:
             if len(req.evidence) >= MAX_EVIDENCE_PER_REQ:
                 limit_applied += 1
@@ -163,6 +179,10 @@ async def retrieve_evidence_node(state: PipelineState) -> dict:
                 continue
             snippet = _best_snippet(hit.text, query_tokens)
             if not snippet:
+                continue
+
+            support = lexical_support(req.text, snippet)
+            if support < MIN_RETRIEVAL_SUPPORT:
                 continue
             
             orig_chunk = chunks_by_id.get(hit.chunk_id)
@@ -175,13 +195,27 @@ async def retrieve_evidence_node(state: PipelineState) -> dict:
                 speaker=hit.speaker,
                 timestamp=hit.timestamp,
                 document_id=orig_doc_id,
+                origin="retrieved",
+                lexical_score=support,
+                entailment_score=support,
+                support_score=support,
             ))
             cited.add(hit.chunk_id)
+            qualified_hits += 1
+            req.evidence_match_score = max(req.evidence_match_score or 0.0, support)
+
+        if not qualified_hits and req.quote_support_score < MIN_RETRIEVAL_SUPPORT:
+            no_hits += 1
+
+        req.quote_support_score = max(
+            req.quote_support_score,
+            max((e.support_score for e in req.evidence), default=0.0),
+        )
 
         # Weak support: no grounded quote AND no relevant lexical/semantic match.
         if (
-            req.quote_support_score == 0.0
-            and req.evidence_match_score == 0.0
+            req.quote_support_score < MIN_RETRIEVAL_SUPPORT
+            and (req.evidence_match_score or 0.0) < MIN_RETRIEVAL_SUPPORT
             and (req.vector_match_score or 0.0) == 0.0
         ):
             weak_support += 1

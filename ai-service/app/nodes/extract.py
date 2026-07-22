@@ -312,7 +312,8 @@ async def process_chunk(llm, chunk: SourceChunk) -> List[ExtractedRequirement]:
                     page_number=chunk.page_number,
                     speaker=chunk.speaker,
                     timestamp=str(chunk.start_time_sec) if chunk.start_time_sec is not None else None,
-                    document_id=getattr(chunk, "document_id", None)
+                    document_id=getattr(chunk, "document_id", None),
+                    origin="fallback",
                 )]
                 r.needs_review = True
                 r.review_reason = (r.review_reason or "") + " [AUTO_FIX: Missing evidence quote fallback to source snippet]"
@@ -333,6 +334,7 @@ async def process_chunk(llm, chunk: SourceChunk) -> List[ExtractedRequirement]:
                         penalty = min(penalty, 0.9)
                     elif kind == "fallback":
                         ev.quote = aligned_quote
+                        ev.origin = "fallback"
                         r.needs_review = True
                         r.review_reason = (r.review_reason or "") + " [AUTO_FIX: Quote replaced with source snippet (no match found)]"
                         penalty = min(penalty, 0.7)
