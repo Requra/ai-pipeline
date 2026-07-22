@@ -273,3 +273,76 @@ async def test_generate_story_priority_mapping(base_state):
     # Priority should resolve to "Critical" (highest of "Critical" and "Low")
     assert stories[0].priority == "Critical"
 
+
+@pytest.mark.asyncio
+async def test_generate_removes_unsupported_acceptance_facts(base_state):
+    state = base_state.copy()
+    state["job_id"] = "fact-ledger"
+    state["classified_requirements"] = [
+        ClassifiedRequirement(
+            id=1,
+            text="The owner shall invite named collaborators to a project.",
+            actor="owner", goal="invite named collaborators",
+            candidate_labels=["FR"], labels=["FR"], confidence=1.0,
+            classification_confidence=1.0, evidence=[], priority="Medium",
+        )
+    ]
+    mock_llm = MagicMock()
+    mock_llm.ainvoke = AsyncMock(return_value=MagicMock(content=json.dumps({
+        "stories": [{
+            "source_requirement_ids": [1],
+            "title": "Invite collaborators",
+            "description": "As an owner, I want to invite named collaborators, so that they can join the project.",
+            "acceptance_criteria": [
+                "Given an invalid email, when an invitation is submitted, then an error is displayed.",
+                "Given an owner, when collaborators are invited, then they join the project.",
+            ],
+            "labels": ["FR"],
+            "story_points": 13,
+        }]
+    })))
+
+    with patch("app.nodes.generate.get_llm", return_value=mock_llm):
+        result = await generate_node(state)
+
+    story = result["user_stories"][0]
+    combined = " ".join(criterion.text.lower() for criterion in story.acceptance_criteria)
+    assert "invalid" not in combined
+    assert "error" not in combined
+    assert story.story_points in {1, 2, 3, 5, 8}
+    assert len(story.acceptance_criteria) >= 2
+
+
+@pytest.mark.asyncio
+async def test_generate_rejects_unrelated_declared_mapping(base_state):
+    state = base_state.copy()
+    state["job_id"] = "mapping-ledger"
+    state["classified_requirements"] = [
+        ClassifiedRequirement(
+            id=1,
+            text="The application shall retain exported reports for thirty days.",
+            actor="administrator", goal="retrieve retained reports",
+            candidate_labels=["FR"], labels=["FR"], confidence=1.0,
+            classification_confidence=1.0, evidence=[], priority="Medium",
+        )
+    ]
+    mock_llm = MagicMock()
+    mock_llm.ainvoke = AsyncMock(return_value=MagicMock(content=json.dumps({
+        "stories": [{
+            "source_requirement_ids": [1],
+            "title": "Notify owners",
+            "description": "As an owner, I want administrator role notifications, so that I stay informed.",
+            "acceptance_criteria": ["Given a role change, when it happens, then an owner is notified."],
+            "labels": ["FR"], "story_points": 3,
+        }]
+    })))
+
+    with patch("app.nodes.generate.get_llm", return_value=mock_llm):
+        result = await generate_node(state)
+
+    story = result["user_stories"][0]
+    assert story.source_requirement_ids == [1]
+    assert "retain exported reports" in " ".join(
+        criterion.text.lower() for criterion in story.acceptance_criteria
+    )
+
