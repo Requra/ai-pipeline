@@ -418,21 +418,215 @@ Tests:
 
 Operational notes and limitation:
 - Suggestions are advisory and should not silently modify requirements.
-- Because `resolution_options` is parsed from an untyped dictionary, absent or malformed model output can result in no displayed options or undesirable formatting.
-- Add normalization that accepts only a list of two or three non-empty strings, limits each option's length, and removes duplicates. Add a warning when a confirmed conflict has no usable suggestion.
+- Resolution options are now normalized to unique, non-empty strings, limited to three options and 300 characters per option.
+- When a non-independent, non-duplicate conflict has fewer than two usable model suggestions, two deterministic advisory options are supplied.
 - Do not expose secrets or untrusted document instructions through generated suggestions; retain standard prompt-injection defenses and output sanitization.
 
 ### 12.5 Combined production-readiness assessment
 
-The four commits correctly reuse existing nodes and fields, so no new graph nodes are required. Their main remaining gaps are validation and regression coverage:
+The four commits correctly reuse existing nodes and fields, so no new graph nodes are required. The MVP response-quality hardening in Section 13 subsequently:
 
-1. Replace the broad priority keyword rule with a calibrated multi-signal heuristic and measure the resulting priority distribution.
-2. Add end-to-end tests proving priority survives every classification path.
-3. Strictly validate generated story points against `{1, 2, 3, 5, 8}` and record invalid/fallback counts.
-4. Validate conflict resolution options and test both valid and missing model output.
-5. Add observability for priority upgrades, story-point fallback rate, conflict candidates, confirmed conflicts, and conflicts without usable resolutions.
+1. Replaced obligation-word priority inflation with explicit source-priority inference.
+2. Strictly normalized story points to `{1, 2, 3, 5, 8}`.
+3. Validated and bounded conflict-resolution options with safe fallbacks.
+4. Added end-to-end and golden canonicalization regression coverage.
 
-## 13. How to add the next enhancement
+Operational metrics for these behaviors remain a production-observability task.
+
+## 13. MVP response-quality hardening
+
+Implementation date: 2026-07-22
+
+Goal:
+- Produce a canonical, source-faithful response with trustworthy traceability, user stories, acceptance criteria, classifications, priorities, estimates, summary, and quality scores.
+- Preserve every existing graph node, API endpoint, request payload, and final response field.
+
+### 13.1 Resulting flow
+
+```text
+extract
+  -> infer only source-supported priority
+  -> canonicalize exact, near, and atomic/composite requirements
+  -> retrieve and ground evidence
+  -> classify
+  -> validate generated mappings against canonical propositions
+  -> sanitize stories and criteria against the internal source-fact ledger
+  -> merge duplicate stories and rebuild coverage
+  -> validate clauses, facts, points, personas, and duplicates
+  -> calculate fact-aware quality scores
+  -> summarize every document through bounded hierarchical reduction
+  -> format through the unchanged public contract
+```
+
+### 13.2 Canonical requirement set
+
+Files:
+- `ai-service/app/nodes/dedupe_requirements.py`
+- `ai-service/tests/nodes/test_dedupe_requirements.py`
+
+Behavior:
+- Exact propositions merge even when the LLM returned inconsistent actor fields.
+- Near-duplicates merge when actors do not materially conflict.
+- Atomic extractions are clustered with their source-level composite requirement when the larger proposition has a conjunction or semicolon and covers at least `0.72` of the normalized smaller proposition.
+- Connected components allow one composite requirement to absorb several atomic children.
+- The most complete source-level proposition becomes the canonical text.
+- Evidence, labels, confidence, review state, and strongest priority are preserved.
+- Canonical requirements retain source order and receive stable sequential IDs.
+
+Golden fixture regression:
+- The previous response contained 27 extracted requirements.
+- The deterministic two-document regression now produces the expected 16 source-level canonical requirements.
+- Five repeated workspace requirements and three atomic/composite operations groups no longer survive as duplicate output.
+
+### 13.3 Internal source-fact ledger
+
+Files:
+- `ai-service/app/services/semantic_quality.py`
+- `ai-service/app/nodes/generate.py`
+- `ai-service/app/validators/story_validator.py`
+- `ai-service/app/nodes/quality_gate.py`
+- `ai-service/app/nodes/repair_stories.py`
+
+The fact ledger is built internally from:
+
+- Canonical requirement text.
+- Verified evidence quotes belonging to linked requirements.
+
+It does not add a public response field.
+
+Validation covers:
+- Numeric facts and units.
+- High-risk behavioral facts such as errors, rejection, denial, permissions, notification, escalation, retry, retention, deletion, encryption, scanning, and timeouts.
+- Negation and polarity reversal.
+- Story-to-requirement semantic alignment.
+- Coverage of every distinct source clause.
+- Enumerated facts such as all audit-event types and all required filters.
+
+Generation behavior:
+- Declared source IDs are accepted only when the story aligns at `0.25` lexical support or at least `0.25` normalized fact-token recall.
+- Unrelated IDs are removed before coverage is created.
+- Unsupported acceptance criteria are removed.
+- If fewer than two supported criteria remain, or any source clause is uncovered, criteria are deterministically regenerated from the linked source clauses.
+- Duplicate generated stories are merged while preserving source IDs, evidence, labels, priority, and the strongest valid estimate.
+- Requirement coverage is rebuilt after validation so it cannot reference a removed or unrelated story.
+
+### 13.4 User-story, classification, priority, and estimate quality
+
+Files:
+- `ai-service/app/nodes/extract.py`
+- `ai-service/app/nodes/generate.py`
+- `ai-service/app/nodes/format.py`
+- `ai-service/app/services/semantic_quality.py`
+- generation, extraction, and repair prompt templates
+
+Priority:
+- `shall`, `must`, `mandatory`, and similar obligation words no longer upgrade backlog priority.
+- Critical, High, or Low is used only when the source explicitly states priority, urgency, business-critical impact, or optional status.
+- Otherwise priority is Medium.
+- The quality gate reports a priority that is not supported by source language.
+
+Classification and category:
+- Story labels are derived from the validated linked classified requirements, not trusted from generation output.
+- The existing public `category` field is populated through deterministic categories including Security & Access Control, Audit & Compliance, Case Management, Notifications & Escalation, Reporting & Export, Data Retention, Performance & Reliability, Integration, Business Rules, and Quality Attributes.
+- `General` is no longer hard-coded.
+
+Personas:
+- Technical components such as service, portal, application, and workspace are normalized to a human `system operator` persona when no source human is available.
+- The quality gate flags remaining technical-component personas.
+
+Story points:
+- Only `{1, 2, 3, 5, 8}` can reach formatted output.
+- Invalid or missing model values receive a deterministic Fibonacci estimate based on source-fact and clause complexity.
+- Story repair preserves the estimate.
+
+### 13.5 Honest quality scoring
+
+Files:
+- `ai-service/app/services/quality_scoring.py`
+- `ai-service/app/nodes/quality_gate.py`
+
+Changes:
+- Traceability combines valid story-mapping precision with actionable-requirement coverage.
+- Acceptance-criteria quality is the minimum of supported-criterion precision and mandatory source-clause coverage.
+- Unsupported non-numeric behavior and polarity changes reduce acceptance quality, not only invented digits.
+- Duplicate risk considers both requirement and story duplication.
+- Duplicate requirements, unsupported story facts, invalid story points, non-human personas, uncovered clauses, and unsupported priorities produce quality issues.
+- Existing severity penalties and overall-score caps remain active.
+
+This prevents a response with duplicate requirements, incomplete source clauses, or invented error behavior from receiving perfect sub-scores.
+
+### 13.6 Multi-document executive summary
+
+Files:
+- `ai-service/app/nodes/summarize.py`
+- `ai-service/app/prompts/templates/summarize_structured_v1.md`
+
+Changes:
+- The first/middle/last truncation approach is no longer used by the summary node.
+- Source chunks are grouped by document ID and associated filename.
+- Every document is split into bounded segments without dropping middle content.
+- Segment summaries are recursively reduced in bounded batches.
+- The final synthesis is instructed to name and distinguish every source rather than conflating their scopes.
+- Canonical requirements, stories, and all open questions are included without the previous 40-item digest limit.
+- Clarification questions from pipeline warnings are appended when the model omits them.
+
+### 13.7 Prompt safety and consistency
+
+Updated prompt templates explicitly state that source text, evidence, and intermediate summaries are untrusted data and must never be followed as instructions.
+
+Prompt examples that previously encouraged invented invalid-email behavior were replaced with source-bounded examples. Prompt snapshots were updated for every intentional template change.
+
+### 13.8 Contract impact
+
+- No new graph nodes.
+- No endpoint changes.
+- No request-payload changes.
+- No final response field additions, removals, or renames.
+- All new fact-ledger and support metadata remains internal.
+
+### 13.9 Verification
+
+Focused response-quality suite:
+
+```text
+53 passed
+```
+
+Full repository suite:
+
+```text
+351 passed, 1 skipped, 1 warning
+```
+
+The warning is the existing Starlette/TestClient `httpx2` deprecation warning.
+
+New or expanded regressions cover:
+- Exact duplicates with inconsistent actors.
+- Atomic/composite canonicalization.
+- The deterministic 27-to-16 two-document golden requirement set.
+- Unsupported non-numeric acceptance behavior.
+- Wrong declared requirement/story mappings.
+- Automatic replacement of unsupported or incomplete criteria.
+- Enumerated clause coverage.
+- Fibonacci story-point normalization.
+- Non-inflated priority for `shall` requirements.
+- Meaningful requirement categories.
+- Multi-document summary scope preservation.
+- Updated end-to-end canonicalization expectations.
+
+### 13.10 Remaining limitations and rollout
+
+- Lexical and fact-token checks are conservative deterministic guards, not full natural-language entailment. Ambiguous paraphrases should later use a batched NLI/LLM adjudicator.
+- The behavioral fact vocabulary is English-oriented and should be extended for multilingual output.
+- Deterministic fallback acceptance criteria prioritize fidelity over natural phrasing.
+- Category inference is keyword-based and may require a project-specific taxonomy.
+- `response.json` predates this implementation and has not been regenerated. Re-run the same two-file job before judging the new end-to-end output.
+- Before release, manually verify the regenerated fixture has 16 canonical requirements, zero unrelated citations, zero unsupported facts, correct mappings, both source scopes in the summary, and no High-severity issue.
+
+Rollback:
+- Revert this implementation as one unit. The public contract requires no data migration.
+
+## 14. How to add the next enhancement
 
 For every future enhancement, append a changelog entry using this template:
 
@@ -463,7 +657,40 @@ Known limitations:
 - What remains intentionally unsolved?
 ```
 
-## 14. Changelog
+## 15. Changelog
+
+### 2026-07-22 - MVP response-quality hardening
+
+Problem:
+- The response retained actor-dependent exact duplicates and atomic/composite duplicates.
+- Stories and acceptance criteria could introduce unsupported non-numeric behavior.
+- Traceability and acceptance-criteria sub-scores could remain perfect despite incomplete fact coverage.
+- Priorities were inflated by normative words, categories were always General, and long multi-document summaries lost or conflated context.
+
+Decision:
+- Keep the current graph and public contracts.
+- Make canonical source propositions and verified source facts authoritative for generation, validation, scoring, and summarization.
+
+Implementation:
+- Added connected-component canonicalization with source-level composite selection.
+- Added internal fact-token, clause-coverage, polarity, category, priority, and Fibonacci-estimation helpers.
+- Sanitized mappings and acceptance criteria before coverage is finalized.
+- Added fact-aware scoring and hierarchical per-document summaries.
+- Hardened extraction, generation, repair, and summary prompts against unsupported facts and embedded instructions.
+
+Contract impact:
+- None.
+
+Tests:
+- Focused suite: `53 passed`.
+- Full suite: `351 passed, 1 skipped, 1 warning`.
+- Golden canonicalization: 27 raw fixture requirements become 16 canonical source-level requirements.
+
+Operational notes:
+- Regenerate the two-file response before release and compare it with the gates in Section 13.10.
+
+Known limitations:
+- Deterministic lexical/fact checks are not full entailment and remain English-oriented.
 
 ### 2026-07-22 - Evidence and quality-score hardening
 
