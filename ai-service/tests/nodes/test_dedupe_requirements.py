@@ -51,16 +51,14 @@ async def test_near_duplicates_merge():
 
 
 @pytest.mark.asyncio
-async def test_different_actor_same_feature_not_merged():
+async def test_identical_proposition_merges_despite_inconsistent_actor_fields():
     reqs = [
         _req(1, "The user can export invoices to PDF.", actor="customer"),
         _req(2, "The user can export invoices to PDF.", actor="administrator"),
     ]
     out = await dedupe_requirements_node(_state(reqs))
-    # Different actors → kept separate and flagged.
-    assert len(out["extracted_requirements"]) == 2
-    assert any(w.code == "POSSIBLE_DUPLICATE_REVIEW" for w in out["warnings"])
-    assert any(r.needs_review for r in out["extracted_requirements"])
+    assert len(out["extracted_requirements"]) == 1
+    assert any(w.code == "DUPLICATE_REQUIREMENT_MERGED" for w in out["warnings"])
 
 
 @pytest.mark.asyncio
@@ -135,3 +133,60 @@ async def test_distinct_requirements_not_merged():
     assert len(out["extracted_requirements"]) == 3
     # No merge warning when nothing merged.
     assert not any(w.code == "DUPLICATE_REQUIREMENT_MERGED" for w in out.get("warnings", []))
+
+
+@pytest.mark.asyncio
+async def test_atomic_children_collapse_into_source_level_composite():
+    composite = _req(
+        1,
+        "The system shall send escalation notifications to the primary on-call group and retain delivery outcomes for troubleshooting purposes.",
+    )
+    notify = _req(2, "The system shall send escalation notifications to the primary on-call group.")
+    retain = _req(3, "The system shall retain delivery outcomes for troubleshooting purposes.")
+
+    out = await dedupe_requirements_node(_state([notify, retain, composite]))
+
+    assert len(out["extracted_requirements"]) == 1
+    assert out["extracted_requirements"][0].text == composite.text
+    assert len(out["extracted_requirements"][0].evidence) == 3
+
+
+@pytest.mark.asyncio
+async def test_two_document_golden_canonical_count_is_sixteen():
+    """Regression for the uploaded DOCX/PDF fixture's 27 raw extractions."""
+    workspace = [
+        "The customer workspace shall allow an account owner to create a project and invite named collaborators with a project-scoped role.",
+        "The service shall issue a single-use email invitation link that expires after twenty-four hours and records its redemption time.",
+        "The workspace shall require multi-factor authentication for administrators before they can change organization settings or billing contacts.",
+        "The system shall record immutable audit events for invitation creation, role changes, sign-in failures, and export requests.",
+        "The audit search screen shall filter by actor, action, target project, and a caller-selected date range.",
+        "The export service shall produce CSV and PDF audit reports and include the applied filters in each generated artifact.",
+        "The application shall retain exported reports for thirty days and allow only administrators to retrieve a retained report.",
+        "The notification service shall alert account owners when a new administrator role is granted or when an export is downloaded.",
+    ]
+    operations = [
+        "The operations portal shall display a queue of pending support cases and allow an assigned analyst to change case status with a reason.",
+        "Each status transition shall preserve the prior value, the acting user, the timestamp, and a human-readable rationale in case history.",
+        "The portal shall enforce a four-hour response target for high-priority cases and display a warning when less than one hour remains.",
+        "Supervisors shall configure escalation rules by customer tier, business hours calendar, and unresolved case age.",
+        "The reporting view shall summarize response-time compliance by team, priority, and calendar month without exposing customer credentials.",
+        "Administrators shall export a monthly operations report and the report shall identify its source period and generation timestamp.",
+        "The system shall send escalation notifications to the primary on-call group and retain delivery outcomes for troubleshooting.",
+        "Analysts shall attach sanitized diagnostic files to a case; attachments shall be virus-scanned before they become available to other users.",
+    ]
+    repeated_workspace = [workspace[2], workspace[4], workspace[5], workspace[6], workspace[7]]
+    atomic_operations = [
+        "The system shall enforce a four-hour response target for high-priority cases.",
+        "The system shall display a warning when less than one hour remains to meet the response target for high-priority cases.",
+        "The system shall send escalation notifications to the primary on-call group.",
+        "The system shall retain delivery outcomes for troubleshooting purposes.",
+        "Analysts shall be able to attach sanitized diagnostic files to a case.",
+        "The system shall virus-scan attachments before making them available to other users.",
+    ]
+    raw = workspace + repeated_workspace + operations[:4] + atomic_operations + operations[4:]
+    reqs = [_req(index, text, actor="System") for index, text in enumerate(raw, start=1)]
+
+    out = await dedupe_requirements_node(_state(reqs))
+
+    assert len(raw) == 27
+    assert len(out["extracted_requirements"]) == 16

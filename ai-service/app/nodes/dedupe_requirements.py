@@ -27,6 +27,7 @@ from typing import List, Optional, Tuple
 from app.nodes.extract import project_legacy_requirements
 from app.progress import update_progress
 from app.rag.scoring import tokenize
+from app.services.semantic_quality import fact_tokens, meaningful_tokens
 from app.schemas.items import ExtractedRequirement, PipelineWarning, QualityIssue
 from app.schemas.pipeline_state import PipelineState
 from app.config import settings
@@ -116,6 +117,68 @@ def _merge_into(base: ExtractedRequirement, other: ExtractedRequirement) -> None
         base.review_reason = " ".join(dict.fromkeys(reasons))
 
 
+def _containment_duplicate(a: ExtractedRequirement, b: ExtractedRequirement) -> bool:
+    """Return whether one extraction is an atomic subset of the other."""
+    tokens_a, tokens_b = fact_tokens(a.text), fact_tokens(b.text)
+    if min(len(tokens_a), len(tokens_b)) < 4 or len(tokens_a) == len(tokens_b):
+        return False
+    smaller, larger, larger_text = (
+        (tokens_a, tokens_b, b.text)
+        if len(tokens_a) < len(tokens_b)
+        else (tokens_b, tokens_a, a.text)
+    )
+    # A source-level composite normally joins clauses with a conjunction or
+    # semicolon. Requiring that marker avoids collapsing merely related peers.
+    is_composite = ";" in (larger_text or "") or bool(re.search(r"\band\b", larger_text or "", re.I))
+    return is_composite and len(smaller & larger) / len(smaller) >= 0.72
+
+
+def _canonical_components(
+    reqs: List[ExtractedRequirement],
+) -> tuple[List[List[int]], List[int]]:
+    """Cluster exact, near, and atomic/composite duplicate extractions."""
+    parent = list(range(len(reqs)))
+    actor_review_ids: List[int] = []
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    norms = [_normalize_text(req.text) for req in reqs]
+    token_sets = [set(tokenize(req.text)) for req in reqs]
+    for left in range(len(reqs)):
+        for right in range(left + 1, len(reqs)):
+            exact = bool(norms[left]) and norms[left] == norms[right]
+            near = _jaccard(token_sets[left], token_sets[right]) >= NEAR_DUPLICATE_THRESHOLD
+            contained = _containment_duplicate(reqs[left], reqs[right])
+            if exact or contained:
+                # Exact text with different actor fields is an extraction
+                # inconsistency, not a second source proposition.
+                union(left, right)
+            elif near:
+                if _actors_conflict(reqs[left], reqs[right]):
+                    reqs[right].needs_review = True
+                    note = "[POSSIBLE_DUPLICATE: similar proposition has a materially different actor]"
+                    reqs[right].review_reason = " ".join(
+                        part for part in (reqs[right].review_reason, note) if part
+                    )
+                    actor_review_ids.append(reqs[right].id)
+                else:
+                    union(left, right)
+
+    grouped: dict[int, List[int]] = {}
+    for index in range(len(reqs)):
+        grouped.setdefault(find(index), []).append(index)
+    return list(grouped.values()), actor_review_ids
+
+
 # --- Conflict Detection Helpers ---
 
 
@@ -202,6 +265,28 @@ def _normalize_classification(raw_class: str) -> str:
     # Lowercase, clean punctuation/spaces, convert to upper
     cleaned = s2.replace(" ", "_").replace("-", "_").upper()
     return re.sub(r"_+", "_", cleaned).strip("_")
+
+
+def _normalize_resolution_options(value, classification: str, req_a_id: str, req_b_id: str) -> List[str]:
+    """Validate advisory options and provide safe deterministic fallbacks."""
+    options: List[str] = []
+    if isinstance(value, list):
+        for item in value:
+            if not isinstance(item, str):
+                continue
+            cleaned = re.sub(r"\s+", " ", item).strip()
+            if cleaned and cleaned not in options:
+                options.append(cleaned[:300])
+            if len(options) == 3:
+                break
+    if classification in {"INDEPENDENT", "DUPLICATE"}:
+        return options
+    if len(options) >= 2:
+        return options
+    return [
+        f"Clarify the intended scope and precedence between {req_a_id} and {req_b_id} with the requirement owner.",
+        f"Revise {req_a_id} and {req_b_id} into an explicit, testable rule that removes the ambiguity.",
+    ]
 
 
 def _batch_candidates_by_tokens(
@@ -311,40 +396,31 @@ async def dedupe_requirements_node(state: PipelineState) -> dict:
     if len(reqs) <= 1:
         return {}  # nothing to dedupe
 
-    groups: List[dict] = []  # {"base": req, "norm": str, "tokens": set}
+    components, possible_dup_ids = _canonical_components(reqs)
+    deduped: List[ExtractedRequirement] = []
     merged_count = 0
-    possible_dup_ids: List[int] = []
-
-    for req in reqs:
-        norm = _normalize_text(req.text)
-        tokens = set(tokenize(req.text))
-
-        best = None
-        for group in groups:
-            exact = bool(norm) and norm == group["norm"]
-            near = _jaccard(tokens, group["tokens"]) >= NEAR_DUPLICATE_THRESHOLD
-            if not (exact or near):
+    for component in components:
+        # Prefer the most complete source-level proposition. Confidence breaks
+        # ties between repeated equivalent extractions.
+        representative_index = max(
+            component,
+            key=lambda index: (
+                len(meaningful_tokens(reqs[index].text)),
+                len(reqs[index].text or ""),
+                reqs[index].confidence,
+                -index,
+            ),
+        )
+        representative = reqs[representative_index]
+        for index in component:
+            if index == representative_index:
                 continue
-            if _actors_conflict(group["base"], req):
-                # Similar text, different actor → keep separate, flag for review.
-                req.needs_review = True
-                req.review_reason = (req.review_reason or "") + " [POSSIBLE_DUPLICATE: similar to another requirement but with a different actor]"
-                possible_dup_ids.append(req.id)
-                best = "conflict"
-                break
-            best = group
-            break
+            _merge_into(representative, reqs[index])
+            merged_count += 1
+        deduped.append(representative)
 
-        if best is None or best == "conflict":
-            groups.append({"base": req, "norm": norm, "tokens": tokens})
-            continue
-
-        _merge_into(best["base"], req)
-        # Widen the group's token set so transitive duplicates still match.
-        best["tokens"] |= tokens
-        merged_count += 1
-
-    deduped = [g["base"] for g in groups]
+    source_position = {id(req): index for index, req in enumerate(reqs)}
+    deduped.sort(key=lambda req: source_position[id(req)])
     for new_id, req in enumerate(deduped, start=1):
         req.id = new_id
 
@@ -402,7 +478,12 @@ async def dedupe_requirements_node(state: PipelineState) -> dict:
                         
                     reason = conflict.get("reason", "")
                     question = conflict.get("clarification_question", "")
-                    resolution_options = conflict.get("resolution_options") or []
+                    resolution_options = _normalize_resolution_options(
+                        conflict.get("resolution_options"),
+                        classification,
+                        req_a_id,
+                        req_b_id,
+                    )
                     
                     if not req_a_id or not req_b_id:
                         continue
