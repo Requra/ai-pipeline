@@ -251,3 +251,64 @@ def test_enumerated_source_facts_become_distinct_coverage_clauses():
     assert len(clauses) == 4
     assert any("sign-in failures" in clause for clause in clauses)
     assert any("export requests" in clause for clause in clauses)
+
+
+def test_three_state_polarity():
+    from app.services.semantic_quality import evaluate_polarity
+    sources = ["The system shall send notifications upon failure."]
+    # Entailed
+    assert evaluate_polarity("The system sends notifications.", sources) == "ENTAILED"
+    # Contradicted
+    assert evaluate_polarity("The system shall not send notifications.", sources) == "CONTRADICTED"
+    # Not Covered (Omission/Unrelated)
+    assert evaluate_polarity("The user can invite collaborators.", sources) == "NOT_COVERED"
+
+
+def test_clause_coverage_with_contradiction():
+    from app.services.semantic_quality import clause_coverage
+    class Req:
+        def __init__(self, text):
+            self.text = text
+            
+    req = Req("The system shall send notifications and record audit logs.")
+    # Both clauses covered
+    assert clause_coverage([req], ["send notifications", "record audit logs"]) == 1.0
+    # One clause covered, one contradicted (so not covered)
+    assert clause_coverage([req], ["send notifications", "do not record audit logs"]) == 0.5
+    # One clause covered, one omitted (NOT_COVERED)
+    assert clause_coverage([req], ["send notifications"]) == 0.5
+
+
+def test_quality_scoring_deduplication_and_exclusions():
+    from app.schemas.items import QualityIssue, ClassifiedRequirement, UserStory, AcceptanceCriterion
+    
+    req = ClassifiedRequirement(
+        id=1, text="The system shall do X.", candidate_labels=["FR"], labels=["FR"],
+        confidence=0.9, classification_confidence=0.9,
+        evidence=[EvidenceSpan(chunk_id="c", quote="q")],
+        quote_support_score=0.9,
+    )
+    story = UserStory(
+        id="US-1", title="Test story", description="As a user, I want X, so that Y.",
+        source_requirement_ids=[1], labels=["FR"],
+        acceptance_criteria=[
+            AcceptanceCriterion(id="AC-1", text="Given X, when Y, then Z.", criterion_type="Given-When-Then"),
+            AcceptanceCriterion(id="AC-2", text="Given A, when B, then C.", criterion_type="Given-When-Then")
+        ]
+    )
+    
+    # Evidence issues (represented by groundedness_score < 1.0) and COMPLEMENTARY conflicts
+    issues = [
+        QualityIssue(item_id=1, item_type="requirement", severity="high", rule_violated="missing_verified_evidence", details=""),
+        QualityIssue(item_id=1, item_type="requirement", severity="high", rule_violated="missing_evidence", details=""),
+        # Complementary conflict (informational)
+        QualityIssue(item_id=1, item_type="requirement", severity="high", rule_violated="semantic_conflict_complementary", details=""),
+        # Diagnostic issue
+        QualityIssue(item_id=1, item_type="requirement", severity="medium", rule_violated="priority_not_source_supported", details=""),
+    ]
+    
+    scores = compute_quality_scores([req], [story], issues)
+    # The score should NOT be capped at 0.59 or penalized by the above issues
+    # because they are either represented, diagnostic, or complementary!
+    assert scores.overall_score > 0.79
+

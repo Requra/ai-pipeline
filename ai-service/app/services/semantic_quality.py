@@ -129,20 +129,45 @@ def unsupported_fact_terms(text: str, sources: Iterable[str]) -> set[str]:
     return unsupported & assertive_stems
 
 
+def evaluate_polarity(text: str, sources: Iterable[str]) -> str:
+    """Evaluate candidate text polarity against sources.
+
+    Returns one of:
+    - "ENTAILED": Polarity matches the closest related source clause.
+    - "CONTRADICTED": Polarity contradicts the closest related source clause.
+    - "NOT_COVERED": Omission or no related source clause found.
+    """
+    all_clauses = []
+    for source in sources:
+        if source:
+            all_clauses.extend(split_requirement_clauses(source))
+    
+    if not all_clauses:
+        return "NOT_COVERED"
+        
+    best_clause = None
+    best_score = -1.0
+    for clause in all_clauses:
+        score = lexical_support(clause, text)
+        if score > best_score:
+            best_score = score
+            best_clause = clause
+            
+    if best_score < 0.15 or best_clause is None:
+        return "NOT_COVERED"
+        
+    negation_pattern = r"\b(?:not|never|no|cannot|can't|mustn't|without)\b"
+    candidate_negative = bool(re.search(negation_pattern, text or "", re.I))
+    clause_negative = bool(re.search(negation_pattern, best_clause or "", re.I))
+    
+    if candidate_negative != clause_negative:
+        return "CONTRADICTED"
+    return "ENTAILED"
+
+
 def has_polarity_conflict(text: str, sources: Iterable[str]) -> bool:
     """Detect an introduced or removed negation on an otherwise related fact."""
-    candidate_negative = bool(re.search(r"\b(?:not|never|no|cannot|can't|mustn't|without)\b", text or "", re.I))
-    related_sources = [
-        source for source in sources
-        if lexical_support(source, text) >= 0.15
-    ]
-    if not related_sources:
-        return False
-    source_negative = any(
-        re.search(r"\b(?:not|never|no|cannot|can't|mustn't|without)\b", source or "", re.I)
-        for source in related_sources
-    )
-    return candidate_negative != source_negative
+    return evaluate_polarity(text, sources) == "CONTRADICTED"
 
 
 def split_requirement_clauses(text: str) -> list[str]:
@@ -171,7 +196,11 @@ def split_requirement_clauses(text: str) -> list[str]:
 
 
 def clause_coverage(requirements: Sequence, criteria: Sequence[str]) -> float:
-    """Measure how many source clauses are represented by acceptance criteria."""
+    """Measure how many source clauses are represented by acceptance criteria.
+
+    A clause is represented (covered) only if there is a criterion with at least
+    0.15 lexical support and no polarity contradiction.
+    """
     clauses = [
         clause
         for req in requirements
@@ -179,10 +208,21 @@ def clause_coverage(requirements: Sequence, criteria: Sequence[str]) -> float:
     ]
     if not clauses:
         return 1.0
-    covered = sum(
-        1 for clause in clauses
-        if max((lexical_support(clause, criterion) for criterion in criteria), default=0.0) >= 0.15
-    )
+        
+    covered = 0
+    negation_pattern = r"\b(?:not|never|no|cannot|can't|mustn't|without)\b"
+    for clause in clauses:
+        is_covered = False
+        for criterion in criteria:
+            if lexical_support(clause, criterion) >= 0.15:
+                criterion_negative = bool(re.search(negation_pattern, criterion or "", re.I))
+                clause_negative = bool(re.search(negation_pattern, clause or "", re.I))
+                if criterion_negative == clause_negative:
+                    is_covered = True
+                    break
+        if is_covered:
+            covered += 1
+            
     return covered / len(clauses)
 
 

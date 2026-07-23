@@ -191,9 +191,84 @@ def compute_quality_scores(requirements: Sequence, stories: Sequence, quality_is
     story_duplicate_risk = len(find_duplicate_story_ids(stories)) / story_count if story_count else 0.0
     requirement_duplicate_risk = _duplicate_requirement_count(requirements) / req_count if req_count else 0.0
     duplicate_risk = max(story_duplicate_risk, requirement_duplicate_risk)
-    high_count = sum(1 for issue in quality_issues if _severity(issue) == "high")
-    medium_count = sum(1 for issue in quality_issues if _severity(issue) == "medium")
-    low_count = sum(1 for issue in quality_issues if _severity(issue) == "low")
+    # 1. Group issues by (item_id, root_cause) and normalize families
+    grouped = {}
+    for issue in quality_issues:
+        rule = issue.get("rule_violated", "") if isinstance(issue, dict) else getattr(issue, "rule_violated", "")
+        if not rule:
+            rule = issue.get("rule", "") if isinstance(issue, dict) else getattr(issue, "rule", "")
+        rule = str(rule or "")
+
+        if rule in ("missing_evidence", "missing_verified_evidence", "evidence_semantic_mismatch"):
+            root_cause = "EVIDENCE_NOT_GROUNDED"
+        else:
+            root_cause = rule
+
+        item_id = issue.get("item_id", None) if isinstance(issue, dict) else getattr(issue, "item_id", None)
+        severity = issue.get("severity", "") if isinstance(issue, dict) else getattr(issue, "severity", "")
+        severity = str(severity or "").lower()
+
+        key = (item_id, root_cause)
+        if key not in grouped:
+            grouped[key] = {
+                "item_id": item_id,
+                "root_cause": root_cause,
+                "severity": severity,
+                "rule_violated": rule,
+            }
+        else:
+            # keep highest severity
+            existing_sev = grouped[key]["severity"]
+            if severity == "high" or (severity == "medium" and existing_sev != "high"):
+                grouped[key]["severity"] = severity
+
+    DIAGNOSTIC_ROOT_CAUSES = {
+        "priority_not_source_supported",
+        "requirement_confidence_invalid",
+        "low_confidence_classification",
+        "requirement_missing_labels",
+        "non_human_story_persona",
+        "story_description_shape",
+        "story_missing_evidence_reference",
+        "coverage_bad_story_id",
+        "coverage_bad_requirement_id",
+        "out_of_scope_covered_by_story",
+        "open_question_covered_by_story",
+    }
+
+    REPRESENTED_ROOT_CAUSES = {
+        # Groundedness (excluded from penalties and caps as missing evidence reduces groundedness but is not subtracted again)
+        "EVIDENCE_NOT_GROUNDED",
+        "evidence_not_grounded",
+        "evidence_chunk_mismatch",
+        "evidence_document_mismatch",
+    }
+
+    penalizable_high_count = 0
+    penalizable_medium_count = 0
+    penalizable_low_count = 0
+
+    for (item_id, root_cause), info in grouped.items():
+        if "complementary" in root_cause.lower():
+            continue
+        if root_cause in DIAGNOSTIC_ROOT_CAUSES:
+            continue
+        if root_cause not in REPRESENTED_ROOT_CAUSES:
+            sev = info["severity"]
+            if sev == "high":
+                penalizable_high_count += 1
+            elif sev == "medium":
+                penalizable_medium_count += 1
+            elif sev == "low":
+                penalizable_low_count += 1
+
+    # Reported high severity issues count (includes represented + penalizable user-facing defects, excluding diagnostic/informational)
+    high_count = sum(
+        1 for info in grouped.values()
+        if info["severity"] == "high"
+        and "complementary" not in info["root_cause"].lower()
+        and info["root_cause"] not in DIAGNOSTIC_ROOT_CAUSES
+    )
 
     overall = (
         groundedness * 0.30
@@ -202,11 +277,11 @@ def compute_quality_scores(requirements: Sequence, stories: Sequence, quality_is
         + ac_quality * 0.20
         + (1.0 - duplicate_risk) * 0.10
     )
-    penalty = min(0.70, high_count * 0.15 + medium_count * 0.05 + low_count * 0.01)
+    penalty = min(0.70, penalizable_high_count * 0.15 + penalizable_medium_count * 0.05 + penalizable_low_count * 0.01)
     overall = max(0.0, overall - penalty)
-    if high_count:
+    if penalizable_high_count:
         overall = min(overall, 0.59)
-    elif medium_count:
+    elif penalizable_medium_count:
         overall = min(overall, 0.79)
 
     return QualityScores(

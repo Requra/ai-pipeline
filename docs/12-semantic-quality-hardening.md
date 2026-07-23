@@ -659,6 +659,39 @@ Known limitations:
 
 ## 15. Changelog
 
+### 2026-07-23 - Scoring Correctness and Three-State Polarity Hardening
+
+Problem:
+- Evidence issues (like missing or unverified evidence) applied duplicate penalties and caps, double-penalizing requirements whose groundedness component score had already taken a hit.
+- Omissions of facts or unrelated acceptance criteria were incorrectly treated as contradictions (polarity reversals) rather than omission (not covered), resulting in false-positive quality issues and severe overall score drops (e.g. from 0.91 to 0.21).
+
+Decision:
+- Avoid double-penalization: exclude quality issues already represented by component scores (especially evidence grounding issues) from overall score penalties and caps.
+- Introduce three polarity states: ENTAILED, CONTRADICTED, and NOT_COVERED, and treat omission or unrelated acceptance criteria as NOT_COVERED rather than a polarity conflict. Let NOT_COVERED reduce clause coverage rather than create a contradiction.
+
+Implementation:
+- Modified [semantic_quality.py](file:///D:/ITI/GP/ai-pipeline/ai-service/app/services/semantic_quality.py):
+  - Added `evaluate_polarity(text, sources) -> str` returning "ENTAILED", "CONTRADICTED", or "NOT_COVERED".
+  - Redefined `has_polarity_conflict(text, sources) -> bool` to return True only on "CONTRADICTED".
+  - Updated `clause_coverage` to check that the matched criterion does not contradict the clause.
+- Modified [quality_scoring.py](file:///D:/ITI/GP/ai-pipeline/ai-service/app/services/quality_scoring.py):
+  - Normalized issues into root-cause families (grouping `missing_evidence`, `missing_verified_evidence`, and `evidence_semantic_mismatch` into `EVIDENCE_NOT_GROUNDED`).
+  - Grouped issues by `(item_id, root_cause)` so multiple warnings count once.
+  - Excluded represented grounding issues (`EVIDENCE_NOT_GROUNDED`, `evidence_not_grounded`, `evidence_chunk_mismatch`, `evidence_document_mismatch`), diagnostic events, and informational relationships (`COMPLEMENTARY`) from penalties and score caps.
+
+Contract impact:
+- None.
+
+Tests:
+- Added `test_three_state_polarity()`, `test_clause_coverage_with_contradiction()`, and `test_quality_scoring_deduplication_and_exclusions()`.
+- Full-suite result: `354 passed, 1 skipped, 1 warning`.
+
+Operational notes:
+- The updated logic ensures that regenerated pipeline outputs like `response.json` do not suffer from false-positive score drops.
+
+Known limitations:
+- Number words (e.g. "three") are not normalized. Negation words are matched via simple regex.
+
 ### 2026-07-22 - MVP response-quality hardening
 
 Problem:
