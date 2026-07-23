@@ -264,6 +264,39 @@ def test_three_state_polarity():
     assert evaluate_polarity("The user can invite collaborators.", sources) == "NOT_COVERED"
 
 
+def test_polarity_omission_is_not_contradiction():
+    from app.services.semantic_quality import evaluate_polarity
+
+    sources = [
+        "The report shall summarize response compliance without exposing customer credentials."
+    ]
+
+    assert (
+        evaluate_polarity("The report is grouped by support team.", sources)
+        == "NOT_COVERED"
+    )
+    assert (
+        evaluate_polarity("The report exposes customer credentials.", sources)
+        == "CONTRADICTED"
+    )
+
+
+def test_behavior_synonyms_do_not_create_false_unsupported_facts():
+    sources = [
+        "The notification service shall alert account owners when an export is downloaded.",
+        "The system shall record immutable audit events.",
+    ]
+
+    assert not unsupported_fact_terms(
+        "As an owner, I want to be notified when an export is downloaded.",
+        sources,
+    )
+    assert not unsupported_fact_terms(
+        "As an operator, I want to maintain an immutable audit log.",
+        sources,
+    )
+
+
 def test_clause_coverage_with_contradiction():
     from app.services.semantic_quality import clause_coverage
     class Req:
@@ -312,3 +345,151 @@ def test_quality_scoring_deduplication_and_exclusions():
     # because they are either represented, diagnostic, or complementary!
     assert scores.overall_score > 0.79
 
+
+@pytest.mark.asyncio
+async def test_evidence_grounding_decision_flow_accept():
+    from app.nodes.evidence_grounding import evidence_grounding_node
+    req = _classified(
+        "The system shall display reports.",
+        [EvidenceSpan(chunk_id="c1", quote="The system shall display reports.", document_id="doc1")]
+    )
+    chunks = [_chunk("c1", "The system shall display reports.", "doc1")]
+    state = {
+        "classified_requirements": [req],
+        "chunks": chunks,
+        "source_documents": [{"source_id": "doc1", "language": "en"}],
+        "language": "en"
+    }
+    result = await evidence_grounding_node(state)
+    assert len(result["classified_requirements"][0].evidence) == 1
+    assert result["classified_requirements"][0].needs_review is False
+
+
+@pytest.mark.asyncio
+async def test_evidence_grounding_decision_flow_reject_mismatch():
+    from app.nodes.evidence_grounding import evidence_grounding_node
+    req = _classified(
+        "The system shall not display reports.",
+        [EvidenceSpan(chunk_id="c1", quote="The system shall display reports.", document_id="doc1")]
+    )
+    chunks = [_chunk("c1", "The system shall display reports.", "doc1")]
+    state = {
+        "classified_requirements": [req],
+        "chunks": chunks,
+        "source_documents": [{"source_id": "doc1", "language": "en"}],
+        "language": "en"
+    }
+    result = await evidence_grounding_node(state)
+    assert len(result["classified_requirements"][0].evidence) == 0
+    assert result["classified_requirements"][0].needs_review is True
+    assert any(iss.rule_violated == "evidence_semantic_mismatch" for iss in result["quality_issues"])
+
+
+@pytest.mark.asyncio
+async def test_evidence_grounding_decision_flow_partial_support():
+    from app.nodes.evidence_grounding import evidence_grounding_node
+    req = _classified(
+        "The system displays case files.",
+        [EvidenceSpan(chunk_id="c1", quote="The system displays.", document_id="doc1")]
+    )
+    chunks = [_chunk("c1", "The system displays.", "doc1")]
+    state = {
+        "classified_requirements": [req],
+        "chunks": chunks,
+        "source_documents": [{"source_id": "doc1", "language": "en"}],
+        "language": "en"
+    }
+    result = await evidence_grounding_node(state)
+    assert len(result["classified_requirements"][0].evidence) == 1
+    assert result["classified_requirements"][0].needs_review is True
+
+
+@pytest.mark.asyncio
+async def test_evidence_grounding_decision_flow_different_languages():
+    from app.nodes.evidence_grounding import evidence_grounding_node
+    req = _classified(
+        "The system shall translate Arabic.",
+        [EvidenceSpan(chunk_id="c1", quote="النظام يجب أن يترجم العربية.", document_id="doc1")]
+    )
+    chunks = [_chunk("c1", "النظام يجب أن يترجم العربية.", "doc1")]
+    state = {
+        "classified_requirements": [req],
+        "chunks": chunks,
+        "source_documents": [{"source_id": "doc1", "language": "ar"}],
+        "language": "en"
+    }
+    result = await evidence_grounding_node(state)
+    assert len(result["classified_requirements"][0].evidence) == 1
+    assert result["classified_requirements"][0].needs_review is True
+
+
+@pytest.mark.asyncio
+async def test_low_confidence_audio_evidence_is_retained_for_review():
+    from app.nodes.evidence_grounding import evidence_grounding_node
+
+    req = _classified(
+        "The system shall display reports.",
+        [
+            EvidenceSpan(
+                chunk_id="audio-1",
+                quote="The system shall display reports.",
+                timestamp="12.4",
+            )
+        ],
+    )
+    chunk = _chunk("audio-1", "The system shall display reports.", None)
+    chunk.start_time_sec = 12.4
+    chunk.end_time_sec = 15.0
+    chunk.speaker = "2"
+    chunk.language = "en"
+    chunk.asr_confidence = 0.42
+
+    result = await evidence_grounding_node(
+        {
+            "classified_requirements": [req],
+            "chunks": [chunk],
+            "source_documents": [],
+            "quality_issues": [],
+        }
+    )
+
+    grounded = result["classified_requirements"][0]
+    assert len(grounded.evidence) == 1
+    assert grounded.needs_review is True
+    assert any(
+        issue.rule_violated == "evidence_low_transcription_confidence"
+        for issue in result["quality_issues"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_low_confidence_audio_does_not_bypass_semantic_rejection():
+    from app.nodes.evidence_grounding import evidence_grounding_node
+
+    req = _classified(
+        "The system shall display reports.",
+        [
+            EvidenceSpan(
+                chunk_id="audio-unrelated",
+                quote="The cafeteria closes after lunch.",
+            )
+        ],
+    )
+    chunk = _chunk(
+        "audio-unrelated",
+        "The cafeteria closes after lunch.",
+        None,
+    )
+    chunk.language = "en"
+    chunk.asr_confidence = 0.30
+
+    result = await evidence_grounding_node(
+        {
+            "classified_requirements": [req],
+            "chunks": [chunk],
+            "source_documents": [],
+            "quality_issues": [],
+        }
+    )
+
+    assert result["classified_requirements"][0].evidence == []

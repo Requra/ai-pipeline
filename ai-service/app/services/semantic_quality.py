@@ -43,11 +43,30 @@ _FACT_SCAFFOLDING = {
 _ASSERTIVE_FACT_TERMS = {
     "automatic", "automatically", "authorize", "authorized", "block",
     "delete", "deleted", "deny", "denied", "encrypt", "encrypted", "error",
-    "escalate", "escalated", "escalation", "expire", "expired", "failure",
-    "fail", "failed", "invalid", "lock", "locked", "log", "logged",
-    "notify", "notification", "permission", "reject", "rejected", "retain",
-    "retry", "scan", "scanned", "timeout", "virus", "warning",
+    "escalate", "escalated", "escalation", "expire", "expired",
+    "invalid", "lock", "locked", "permission", "reject", "rejected", "retain",
+    "retry", "scan", "scanned", "timeout", "virus",
 }
+
+# Lower-risk behavioral terms are review signals rather than proof of an
+# invented requirement.  They are checked only when used as actions so nouns
+# such as "audit logs" cannot create a false unsupported-behavior defect.
+_REVIEW_FACT_TERMS = {"fail", "failure", "notify", "record", "warning"}
+
+_FACT_ALIASES = {
+    "alert": "notify",
+    "notification": "notify",
+    "notify": "notify",
+    "captur": "record",
+    "capture": "record",
+    "log": "record",
+    "record": "record",
+}
+
+_NEGATION_RE = re.compile(
+    r"\b(?:not|never|no|cannot|can't|mustn't|without)\b",
+    re.IGNORECASE,
+)
 
 _EXPLICIT_PRIORITY_PATTERNS = {
     "Critical": (
@@ -90,10 +109,15 @@ def _fact_stem(token: str) -> str:
     return token
 
 
+def _canonical_fact_token(token: str) -> str:
+    stem = _fact_stem(token)
+    return _FACT_ALIASES.get(stem, stem)
+
+
 def fact_tokens(text: str) -> set[str]:
     """Return normalized proposition tokens without Given/When/Then scaffolding."""
     return {
-        _fact_stem(token)
+        _canonical_fact_token(token)
         for token in _FACT_TOKEN_RE.findall((text or "").lower())
         if token not in _FACT_SCAFFOLDING and len(token) > 1
     }
@@ -125,8 +149,69 @@ def unsupported_fact_terms(text: str, sources: Iterable[str]) -> set[str]:
         source_tokens.update(fact_tokens(source))
     candidate_tokens = fact_tokens(text)
     unsupported = candidate_tokens - source_tokens
-    assertive_stems = {_fact_stem(term) for term in _ASSERTIVE_FACT_TERMS}
+    assertive_stems = {_canonical_fact_token(term) for term in _ASSERTIVE_FACT_TERMS}
     return unsupported & assertive_stems
+
+
+def unsupported_review_terms(text: str, sources: Iterable[str]) -> set[str]:
+    """Return uncertain behavioral additions that should trigger review.
+
+    Unlike high-risk fact checks, these terms are required to occur in an
+    action position.  This intentionally distinguishes "filter audit logs"
+    (``logs`` is an object) from "the system shall log access" (``log`` is an
+    asserted action).
+    """
+    source_tokens: set[str] = set()
+    for source in sources:
+        source_tokens.update(fact_tokens(source))
+    unsupported = fact_tokens(text) - source_tokens
+    candidates = unsupported & _REVIEW_FACT_TERMS
+    if not candidates:
+        return set()
+
+    lowered = (text or "").lower()
+    asserted: set[str] = set()
+    if "notify" in candidates and re.search(
+        r"\b(?:shall|must|will|should|can|may|to|want(?:s)?(?:\s+to)?)\s+"
+        r"(?:\w+\s+){0,2}(?:notify|alert)\b|\bsend(?:s|ing)?\b[^.;]{0,40}\bnotifications?\b",
+        lowered,
+    ):
+        asserted.add("notify")
+    if "record" in candidates and re.search(
+        r"\b(?:shall|must|will|should|can|may|to|want(?:s)?(?:\s+to)?)\s+"
+        r"(?:\w+\s+){0,1}(?:record|capture|log)\b",
+        lowered,
+    ):
+        asserted.add("record")
+    for term in candidates - {"notify", "record"}:
+        if re.search(rf"\b{re.escape(term)}\b", lowered):
+            asserted.add(term)
+    return asserted
+
+
+def _claim_clauses(text: str) -> list[str]:
+    """Return candidate claim clauses without Given/When scaffolding."""
+    claims: list[str] = []
+    for part in re.split(r"\s*;\s*|(?<=[.!?])\s+", text or ""):
+        cleaned = part.strip()
+        if not cleaned:
+            continue
+        then_parts = re.split(r"\bthen\b", cleaned, maxsplit=1, flags=re.IGNORECASE)
+        if len(then_parts) == 2 and then_parts[1].strip():
+            cleaned = then_parts[1].strip()
+        claims.extend(split_requirement_clauses(cleaned))
+    return claims
+
+
+def _clause_relation_score(source: str, candidate: str) -> float:
+    source_tokens = fact_tokens(source) - {"not", "never", "no", "without"}
+    candidate_tokens = fact_tokens(candidate) - {"not", "never", "no", "without"}
+    if not source_tokens or not candidate_tokens:
+        return lexical_support(source, candidate)
+    containment = len(source_tokens & candidate_tokens) / min(
+        len(source_tokens), len(candidate_tokens)
+    )
+    return max(lexical_support(source, candidate), containment)
 
 
 def evaluate_polarity(text: str, sources: Iterable[str]) -> str:
@@ -137,30 +222,50 @@ def evaluate_polarity(text: str, sources: Iterable[str]) -> str:
     - "CONTRADICTED": Polarity contradicts the closest related source clause.
     - "NOT_COVERED": Omission or no related source clause found.
     """
-    all_clauses = []
+    source_clauses = []
     for source in sources:
         if source:
-            all_clauses.extend(split_requirement_clauses(source))
-    
-    if not all_clauses:
+            source_clauses.extend(split_requirement_clauses(source))
+    candidate_clauses = _claim_clauses(text)
+
+    if not source_clauses or not candidate_clauses:
         return "NOT_COVERED"
-        
-    best_clause = None
+
+    best_source = None
+    best_candidate = None
     best_score = -1.0
-    for clause in all_clauses:
-        score = lexical_support(clause, text)
-        if score > best_score:
-            best_score = score
-            best_clause = clause
-            
-    if best_score < 0.15 or best_clause is None:
+    for source_clause in source_clauses:
+        for candidate_clause in candidate_clauses:
+            score = _clause_relation_score(source_clause, candidate_clause)
+            if score > best_score:
+                best_score = score
+                best_source = source_clause
+                best_candidate = candidate_clause
+
+    if best_score < 0.25 or best_source is None or best_candidate is None:
         return "NOT_COVERED"
-        
-    negation_pattern = r"\b(?:not|never|no|cannot|can't|mustn't|without)\b"
-    candidate_negative = bool(re.search(negation_pattern, text or "", re.I))
-    clause_negative = bool(re.search(negation_pattern, best_clause or "", re.I))
-    
-    if candidate_negative != clause_negative:
+
+    related_source_tokens = fact_tokens(best_source) - {
+        "not", "never", "no", "without",
+    }
+    related_candidate_tokens = fact_tokens(best_candidate) - {
+        "not", "never", "no", "without",
+    }
+    if len(related_source_tokens & related_candidate_tokens) < 2:
+        return "NOT_COVERED"
+
+    candidate_negative = bool(_NEGATION_RE.search(best_candidate))
+    source_negative = bool(_NEGATION_RE.search(best_source))
+    if candidate_negative != source_negative:
+        source_tokens = fact_tokens(best_source) - {"not", "never", "no", "without"}
+        candidate_tokens = fact_tokens(best_candidate) - {"not", "never", "no", "without"}
+        shared = source_tokens & candidate_tokens
+        source_coverage = len(shared) / len(source_tokens) if source_tokens else 0.0
+        # A polarity mismatch is a contradiction only when the candidate
+        # explicitly asserts the same proposition.  Merely omitting a negative
+        # source clause is NOT_COVERED.
+        if len(shared) < 2 or source_coverage < 0.60:
+            return "NOT_COVERED"
         return "CONTRADICTED"
     return "ENTAILED"
 
@@ -174,7 +279,7 @@ def split_requirement_clauses(text: str) -> list[str]:
     """Split a canonical requirement into clauses that should be covered."""
     source = text or ""
     raw = re.split(
-        r"\s*;\s*|\s+and\s+(?=(?:shall|must|will|should|may|allows?|retains?|records?|displays?|sends?|includes?|enforces?|provides?|produces?|identifies?|attaches?|scans?)\b)",
+        r"\s*;\s*|\s+(?=without\b)|\s+and\s+(?=(?:shall|must|will|should|may|allows?|retains?|records?|displays?|sends?|includes?|enforces?|provides?|produces?|identifies?|attaches?|scans?)\b)",
         source,
         flags=re.I,
     )
@@ -198,8 +303,9 @@ def split_requirement_clauses(text: str) -> list[str]:
 def clause_coverage(requirements: Sequence, criteria: Sequence[str]) -> float:
     """Measure how many source clauses are represented by acceptance criteria.
 
-    A clause is represented (covered) only if there is a criterion with at least
-    0.15 lexical support and no polarity contradiction.
+    A clause is represented only when a criterion entails that clause.  An
+    omitted clause and a contradiction are both uncovered, but only the latter
+    is reported as a polarity defect by callers.
     """
     clauses = [
         clause
@@ -208,21 +314,13 @@ def clause_coverage(requirements: Sequence, criteria: Sequence[str]) -> float:
     ]
     if not clauses:
         return 1.0
-        
-    covered = 0
-    negation_pattern = r"\b(?:not|never|no|cannot|can't|mustn't|without)\b"
-    for clause in clauses:
-        is_covered = False
-        for criterion in criteria:
-            if lexical_support(clause, criterion) >= 0.15:
-                criterion_negative = bool(re.search(negation_pattern, criterion or "", re.I))
-                clause_negative = bool(re.search(negation_pattern, clause or "", re.I))
-                if criterion_negative == clause_negative:
-                    is_covered = True
-                    break
-        if is_covered:
-            covered += 1
-            
+
+    covered = sum(
+        1
+        for clause in clauses
+        if any(evaluate_polarity(criterion, [clause]) == "ENTAILED" for criterion in criteria)
+    )
+
     return covered / len(clauses)
 
 
@@ -338,3 +436,20 @@ def unsupported_numeric_claims(text: str, sources: Iterable[str]) -> set[str]:
     for source in sources:
         supported.update(normalized_numbers(source))
     return claims - supported
+
+
+def check_different_languages(text1: str, text2: str, lang1: str | None = None, lang2: str | None = None) -> bool:
+    """Return True if languages are different (metadata check or script check)."""
+    if lang1 and lang2:
+        l1 = str(lang1).split("-")[0].lower()
+        l2 = str(lang2).split("-")[0].lower()
+        if l1 != l2:
+            return True
+
+    # Arabic vs English check
+    has_ar1 = bool(re.search(r"[\u0600-\u06FF]", text1 or ""))
+    has_ar2 = bool(re.search(r"[\u0600-\u06FF]", text2 or ""))
+    if has_ar1 != has_ar2:
+        return True
+
+    return False
