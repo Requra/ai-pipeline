@@ -4,6 +4,8 @@ from app.llm import get_llm
 from app.prompts.loader import load_prompt
 from app.prompts.registry import PromptId
 from app.progress import update_progress
+from app.nodes.dedupe_requirements import canonicalize_requirements
+from app.nodes.extract import project_legacy_requirements
 from app.validators.story_validator import find_duplicate_story_ids, validate_stories
 from app.services.semantic_quality import (
     clause_coverage,
@@ -300,17 +302,103 @@ def _dedupe_generated_stories(stories: List[UserStory]) -> List[UserStory]:
 
 # ---------------- NODE ----------------
 
+
+def _remap_pre_generation_issues(issues, id_map: dict[int, int], requirements) -> list:
+    """Reconcile requirement issues after the final canonicalization pass."""
+    requirements_by_id = {req.id: req for req in requirements}
+    evidence_rules = {
+        "missing_evidence",
+        "missing_verified_evidence",
+        "evidence_semantic_mismatch",
+    }
+    duplicate_rules = {
+        "duplicate_requirement",
+        "semantic_conflict_duplicate",
+    }
+    remapped = []
+    seen = set()
+    for issue in issues or []:
+        item_type = getattr(issue, "item_type", "")
+        old_item_id = getattr(issue, "item_id", None)
+        new_item_id = id_map.get(old_item_id, old_item_id)
+        rule = getattr(issue, "rule_violated", "")
+        if rule in duplicate_rules:
+            continue
+        linked = requirements_by_id.get(new_item_id)
+        if rule in evidence_rules and linked is not None and linked.evidence:
+            continue
+        updated = (
+            issue.model_copy(update={"item_id": new_item_id})
+            if item_type in {"requirement", "coverage"} and new_item_id != old_item_id
+            else issue
+        )
+        key = (
+            getattr(updated, "item_type", ""),
+            getattr(updated, "item_id", None),
+            getattr(updated, "rule_violated", ""),
+            getattr(updated, "details", ""),
+        )
+        if key not in seen:
+            seen.add(key)
+            remapped.append(updated)
+    return remapped
+
+
 async def generate_node(state: PipelineState) -> dict:
     print("--- GENERATE NODE (MULTI-LABEL) ---")
     update_progress(state.get("job_id"), "generate", 85, "PROCESSING")
 
-    classified = state.get("classified_requirements", [])
+    classified = list(state.get("classified_requirements", []) or [])
     if not classified:
         new_warnings = [
             {"node_name": "generate", "code": "GENERATE_SKIPPED_NO_REQUIREMENTS", "message": "No classified requirements available; generation skipped."}
         ]
         existing_warnings = state.get("warnings", []) or []
         return {"user_stories": [], "warnings": existing_warnings + new_warnings}
+
+    classified, merged_count, id_map, _ = canonicalize_requirements(
+        classified,
+        reassign_ids=False,
+    )
+    canonical_changed = merged_count > 0 or any(
+        old_id != new_id for old_id, new_id in id_map.items()
+    )
+    canonical_warning = None
+    canonical_issues = state.get("quality_issues", []) or []
+    if canonical_changed:
+        canonical_issues = _remap_pre_generation_issues(
+            canonical_issues,
+            id_map,
+            classified,
+        )
+    if merged_count:
+        canonical_warning = {
+            "node_name": "generate",
+            "code": "PRE_GENERATION_DUPLICATE_MERGED",
+            "message": (
+                f"Merged {merged_count} duplicate requirement(s) during the "
+                "final pre-generation canonicalization pass."
+            ),
+        }
+
+    def finalize(payload: dict) -> dict:
+        payload["classified_requirements"] = classified
+        payload["functional_requirements"] = project_legacy_requirements(classified)
+        if canonical_changed:
+            payload["quality_issues"] = canonical_issues
+        if merged_count:
+            warnings = list(payload.get("warnings", state.get("warnings", []) or []))
+            if not any(
+                getattr(warning, "code", None) == "PRE_GENERATION_DUPLICATE_MERGED"
+                or (
+                    isinstance(warning, dict)
+                    and warning.get("code") == "PRE_GENERATION_DUPLICATE_MERGED"
+                )
+                for warning in warnings
+            ):
+                warnings.append(canonical_warning)
+            payload["warnings"] = warnings
+        return payload
 
     to_generate = []
     to_skip = []
@@ -342,11 +430,11 @@ async def generate_node(state: PipelineState) -> dict:
             {"node_name": "generate", "code": "GENERATE_SKIPPED_NO_ACTIONABLE", "message": "No actionable requirements available for generation; skipped."}
         ]
         existing_warnings = state.get("warnings", []) or []
-        return {
+        return finalize({
             "user_stories": [], 
             "warnings": existing_warnings + new_warnings,
             "requirement_coverages": requirement_coverages
-        }
+        })
 
 
     try:
@@ -627,7 +715,7 @@ async def generate_node(state: PipelineState) -> dict:
                 "code": "GENERATE_STORY_QUALITY",
                 "message": "Generated story quality issues: " + "; ".join(parts) + ".",
             }]
-        return result_payload
+        return finalize(result_payload)
 
     except Exception as e:
         print(f"Generate node LLM failure or parse error: {e}")
@@ -683,9 +771,9 @@ async def generate_node(state: PipelineState) -> dict:
             "message": f"Generation LLM failed or output could not be parsed; fallback stories generated. Error: {type(e).__name__}: {str(e)}"
         }]
 
-        return {
+        return finalize({
             "user_stories": fallback_stories,
             "requirement_coverages": requirement_coverages,
             "warnings": existing_warnings + new_warnings,
             "status": "partial"
-        }
+        })

@@ -252,7 +252,7 @@ async def format_node(state: PipelineState) -> dict:
                 source_type=s_type,
                 file_name=doc_name,
                 mime_type=doc_mime_type,
-                language="en"
+                language=doc.get("language") or state.get("language") or "en"
             ))
     elif file_name != "unknown" or file_type != "unknown" or source_metadata:
         source_docs.append(SourceDocumentV1(
@@ -260,7 +260,7 @@ async def format_node(state: PipelineState) -> dict:
             source_type=source_type,
             file_name=file_name,
             mime_type=mime_type,
-            language="en"
+            language=state.get("language") or "en"
         ))
 
     # 2. Requirements mapping

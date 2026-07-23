@@ -265,7 +265,9 @@ async def _transcribe_groq(
                 end_char=0,
                 start_time_sec=seg.get("start", 0) + start_time_offset,
                 end_time_sec=seg.get("end", 0) + start_time_offset,
-                speaker=None # Groq Whisper doesn't provide speaker IDs
+                speaker=None,  # Groq Whisper doesn't provide speaker IDs
+                language=language,
+                asr_confidence=seg.get("confidence"),
             ))
         return chunks
 
@@ -288,8 +290,10 @@ def _merge_bilingual_to_chunks(ar_data: dict, en_data: dict, job_id: str) -> Lis
     en_utts = en_data.get("results", {}).get("utterances", [])
     
     if not ar_utts and not en_utts: return []
-    if not ar_utts: return _map_dg_utterances(en_utts, job_id)
-    if not en_utts: return _map_dg_utterances(ar_utts, job_id)
+    if not ar_utts:
+        return _map_dg_utterances(en_utts, job_id, language="en")
+    if not en_utts:
+        return _map_dg_utterances(ar_utts, job_id, language="ar")
 
     merged_segments = []
     _KEYWORD_SET = {"user story", "sprint", "backlog", "requirement", "acceptance criteria", "api", "database"} # simplified
@@ -308,13 +312,16 @@ def _merge_bilingual_to_chunks(ar_data: dict, en_data: dict, job_id: str) -> Lis
         keyword_detected = any(word in _KEYWORD_SET for word in en_text.lower().split())
         required_delta = 0.10 - (KEYWORD_MERGE_BIAS if keyword_detected else 0.0)
 
-        chosen_text = en_text if en_conf > (ar_conf + required_delta) else ar_utt.get("transcript", "")
+        use_english = en_conf > (ar_conf + required_delta)
+        chosen_text = en_text if use_english else ar_utt.get("transcript", "")
         if chosen_text.strip():
             merged_segments.append({
                 "speaker": str(ar_utt.get("speaker", 0)),
                 "text": clean_transcript(chosen_text),
                 "start": start,
-                "end": end
+                "end": end,
+                "language": "en" if use_english else "ar",
+                "confidence": en_conf if use_english else ar_conf,
             })
 
     # Catch orphaned English
@@ -326,7 +333,9 @@ def _merge_bilingual_to_chunks(ar_data: dict, en_data: dict, job_id: str) -> Lis
                     "speaker": str(en_utt.get("speaker", 0)),
                     "text": clean_transcript(en_utt["transcript"]),
                     "start": en_utt["start"],
-                    "end": en_utt["end"]
+                    "end": en_utt["end"],
+                    "language": "en",
+                    "confidence": en_utt.get("confidence"),
                 })
 
     merged_segments.sort(key=lambda x: x["start"])
@@ -336,10 +345,16 @@ def _merge_bilingual_to_chunks(ar_data: dict, en_data: dict, job_id: str) -> Lis
         start_char=0, end_char=0,
         start_time_sec=s["start"],
         end_time_sec=s["end"],
-        speaker=s["speaker"]
+        speaker=s["speaker"],
+        language=s.get("language"),
+        asr_confidence=s.get("confidence"),
     ) for i, s in enumerate(merged_segments) if s["text"]]
 
-def _map_dg_utterances(utterances: List[dict], job_id: str) -> List[SourceChunk]:
+def _map_dg_utterances(
+    utterances: List[dict],
+    job_id: str,
+    language: str | None = None,
+) -> List[SourceChunk]:
     chunks = []
     for i, utt in enumerate(utterances):
         text = clean_transcript(utt.get("transcript", ""))
@@ -350,7 +365,9 @@ def _map_dg_utterances(utterances: List[dict], job_id: str) -> List[SourceChunk]
             start_char=0, end_char=0,
             start_time_sec=utt.get("start", 0),
             end_time_sec=utt.get("end", 0),
-            speaker=str(utt.get("speaker", 0))
+            speaker=str(utt.get("speaker", 0)),
+            language=language,
+            asr_confidence=utt.get("confidence"),
         ))
     return chunks
 
@@ -392,7 +409,11 @@ async def _transcribe_deepgram(
     else:
         target = "ar-EG" if language == "mixed" else ("en-US" if language == "en" else "ar-EG")
         data = await _single_run(target)
-        chunks = _map_dg_utterances(data.get("results", {}).get("utterances", []), job_id)
+        chunks = _map_dg_utterances(
+            data.get("results", {}).get("utterances", []),
+            job_id,
+            language=target.split("-")[0],
+        )
 
     full_text = "\n\n".join([f"**[Speaker {c.speaker}]**: {c.text}" if c.speaker else c.text for c in chunks])
     return full_text, chunks

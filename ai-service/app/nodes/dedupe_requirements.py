@@ -79,7 +79,19 @@ def _actors_conflict(a: ExtractedRequirement, b: ExtractedRequirement) -> bool:
     na, nb = _norm_actor(a.actor), _norm_actor(b.actor)
     if na and nb and na != nb:
         # "user"/"users" style differences should not count as a conflict.
-        return not (na.rstrip("s") == nb.rstrip("s"))
+        if na.rstrip("s") == nb.rstrip("s"):
+            return False
+        technical_terms = {
+            "system", "service", "application", "workspace", "portal",
+            "platform", "api", "database",
+        }
+        # LLM extraction frequently alternates between "system" and a named
+        # technical component for the same source proposition.
+        if any(term in na for term in technical_terms) and any(
+            term in nb for term in technical_terms
+        ):
+            return False
+        return True
     return False
 
 
@@ -103,6 +115,14 @@ def _merge_into(base: ExtractedRequirement, other: ExtractedRequirement) -> None
     for label in other.candidate_labels:
         if label not in base.candidate_labels:
             base.candidate_labels.append(label)
+    if hasattr(base, "labels") and hasattr(other, "labels"):
+        for label in getattr(other, "labels", []) or []:
+            if label not in base.labels:
+                base.labels.append(label)
+        base.classification_confidence = max(
+            getattr(base, "classification_confidence", 0.0),
+            getattr(other, "classification_confidence", 0.0),
+        )
 
     base.actor = base.actor or other.actor
     base.goal = base.goal or other.goal
@@ -129,7 +149,11 @@ def _containment_duplicate(a: ExtractedRequirement, b: ExtractedRequirement) -> 
     )
     # A source-level composite normally joins clauses with a conjunction or
     # semicolon. Requiring that marker avoids collapsing merely related peers.
-    is_composite = ";" in (larger_text or "") or bool(re.search(r"\band\b", larger_text or "", re.I))
+    is_composite = (
+        ";" in (larger_text or "")
+        or "," in (larger_text or "")
+        or bool(re.search(r"\b(?:and|or)\b", larger_text or "", re.I))
+    )
     return is_composite and len(smaller & larger) / len(smaller) >= 0.72
 
 
@@ -152,11 +176,15 @@ def _canonical_components(
             parent[right_root] = left_root
 
     norms = [_normalize_text(req.text) for req in reqs]
-    token_sets = [set(tokenize(req.text)) for req in reqs]
+    token_sets = [fact_tokens(req.text) for req in reqs]
     for left in range(len(reqs)):
         for right in range(left + 1, len(reqs)):
             exact = bool(norms[left]) and norms[left] == norms[right]
-            near = _jaccard(token_sets[left], token_sets[right]) >= NEAR_DUPLICATE_THRESHOLD
+            near = (
+                min(len(token_sets[left]), len(token_sets[right])) >= 4
+                and _jaccard(token_sets[left], token_sets[right])
+                >= NEAR_DUPLICATE_THRESHOLD
+            )
             contained = _containment_duplicate(reqs[left], reqs[right])
             if exact or contained:
                 # Exact text with different actor fields is an extraction
@@ -177,6 +205,68 @@ def _canonical_components(
     for index in range(len(reqs)):
         grouped.setdefault(find(index), []).append(index)
     return list(grouped.values()), actor_review_ids
+
+
+def canonicalize_requirements(
+    reqs: List[ExtractedRequirement],
+    *,
+    reassign_ids: bool = True,
+) -> tuple[List[ExtractedRequirement], int, dict[int, int], List[int]]:
+    """Canonicalize requirements and return a stable old-to-new ID mapping.
+
+    The helper is reusable from existing nodes, so a final deterministic pass
+    can run immediately before story generation without adding a graph node or
+    changing the public response contract.
+    """
+    if len(reqs) <= 1:
+        identity = {req.id: req.id for req in reqs}
+        return list(reqs), 0, identity, []
+
+    original_ids = {id(req): req.id for req in reqs}
+    components, possible_dup_ids = _canonical_components(reqs)
+    canonical: List[ExtractedRequirement] = []
+    component_old_ids: List[List[int]] = []
+    merged_count = 0
+
+    for component in components:
+        representative_index = max(
+            component,
+            key=lambda index: (
+                len(meaningful_tokens(reqs[index].text)),
+                len(reqs[index].text or ""),
+                reqs[index].confidence,
+                -index,
+            ),
+        )
+        representative = reqs[representative_index]
+        old_ids = [original_ids[id(reqs[index])] for index in component]
+        for index in component:
+            if index == representative_index:
+                continue
+            _merge_into(representative, reqs[index])
+            merged_count += 1
+        canonical.append(representative)
+        component_old_ids.append(old_ids)
+
+    source_position = {id(req): index for index, req in enumerate(reqs)}
+    ordering = sorted(
+        range(len(canonical)),
+        key=lambda index: source_position[id(canonical[index])],
+    )
+    canonical = [canonical[index] for index in ordering]
+    component_old_ids = [component_old_ids[index] for index in ordering]
+
+    old_to_new: dict[int, int] = {}
+    for position, (req, old_ids) in enumerate(
+        zip(canonical, component_old_ids),
+        start=1,
+    ):
+        new_id = position if reassign_ids or merged_count else old_ids[0]
+        req.id = new_id
+        for old_id in old_ids:
+            old_to_new[old_id] = new_id
+
+    return canonical, merged_count, old_to_new, possible_dup_ids
 
 
 # --- Conflict Detection Helpers ---
@@ -396,33 +486,7 @@ async def dedupe_requirements_node(state: PipelineState) -> dict:
     if len(reqs) <= 1:
         return {}  # nothing to dedupe
 
-    components, possible_dup_ids = _canonical_components(reqs)
-    deduped: List[ExtractedRequirement] = []
-    merged_count = 0
-    for component in components:
-        # Prefer the most complete source-level proposition. Confidence breaks
-        # ties between repeated equivalent extractions.
-        representative_index = max(
-            component,
-            key=lambda index: (
-                len(meaningful_tokens(reqs[index].text)),
-                len(reqs[index].text or ""),
-                reqs[index].confidence,
-                -index,
-            ),
-        )
-        representative = reqs[representative_index]
-        for index in component:
-            if index == representative_index:
-                continue
-            _merge_into(representative, reqs[index])
-            merged_count += 1
-        deduped.append(representative)
-
-    source_position = {id(req): index for index, req in enumerate(reqs)}
-    deduped.sort(key=lambda req: source_position[id(req)])
-    for new_id, req in enumerate(deduped, start=1):
-        req.id = new_id
+    deduped, merged_count, _, possible_dup_ids = canonicalize_requirements(reqs)
 
     # --- Conflict Detection Phase ---
     candidates = []
