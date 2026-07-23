@@ -659,6 +659,139 @@ Known limitations:
 
 ## 15. Changelog
 
+### 2026-07-23 - Generalized MVP P0 Quality Completion
+
+Problem:
+- The revised quality score still fell from a raw component score of about `0.90` to `0.35`.
+- Duplicate requirements were represented by `duplicate_risk` but were also penalized through both `duplicate_requirement` and `semantic_conflict_duplicate`.
+- Story behavior checks treated nouns and safe synonyms such as `audit logs`, `record`, `alert`, and `notify` as invented High-severity behavior.
+- Every story issue used `item_id=0`, so unrelated story defects collapsed into one unstable scoring identity.
+- The first three-state polarity implementation could still interpret an omitted negative clause as a contradiction.
+- Audio chunks preserved speakers and timestamps but did not consistently retain language or provider confidence.
+
+Decision:
+- Keep the graph, endpoints, request payloads, and V1 response models unchanged.
+- Make each quality component own its corresponding defect family. Component-owned problems affect the component once and never receive an additional penalty or severity cap.
+- Run a final deterministic canonicalization pass inside the existing `generate` node before stories are created.
+- Prefer conservative review over false High defects or unsupported automatic citations.
+- Keep DOCX pages null for MVP and defer rendered pagination.
+
+Implementation:
+- Updated `quality_scoring.py`:
+  - Added internal root-cause normalization for evidence, duplicate content, acceptance-criteria quality, story traceability, and story completeness.
+  - Grouped scoring identities by `(item_type, item_id, normalized_root_cause)`.
+  - Excluded component-owned defects, diagnostics, and `COMPLEMENTARY` relationships from additive penalties and caps.
+  - Made story traceability reject clear unsupported facts or real polarity contradictions.
+- Updated `dedupe_requirements.py` and `generate.py`:
+  - Extracted reusable `canonicalize_requirements`.
+  - Added synonym-aware fact tokens, technical-actor normalization, `and`/`or`/comma composite containment, evidence union, label union, and stable ID remapping.
+  - Added a final pre-generation canonicalization pass without adding a graph node.
+  - Reconciled requirement quality issues after a merge and removed resolved duplicate issues.
+  - Required at least four fact tokens for near-duplicate merging, preventing low-information statements such as `Req 1`, `Req 2`, and `Req 3` from collapsing.
+- Updated `semantic_quality.py` and `quality_gate.py`:
+  - Canonicalized `alert`/`notify`/`notification` and `record`/`capture`/`log` fact families.
+  - Kept clear invented behavior, numbers, permissions, deletion, retention, and polarity problems High severity.
+  - Made uncertain action-position behavior a Medium review event.
+  - Assigned stable one-based story item IDs.
+  - Compared source and candidate clauses, including explicit `without` clauses.
+  - Returned `NOT_COVERED` for omission and `CONTRADICTED` only when the same predicate/object proposition is explicitly reversed.
+  - Made clause coverage require `ENTAILED`.
+- Updated `retrieve_evidence.py` and `evidence_grounding.py`:
+  - Kept retrieval as candidate generation only.
+  - Required exact chunk membership, document identity, numeric consistency, behavioral consistency, polarity consistency, and configured support thresholds before automatic acceptance.
+  - Retained ambiguous, cross-language, or low-ASR-confidence evidence only as review/partial evidence.
+  - Corrected internal source-document language lookup to accept `document_id` or `source_id`.
+- Updated `items.py`, `transcribe.py`, `ingest.py`, `parse_to_chunks.py`, and `format.py`:
+  - Added internal-only chunk language and ASR-confidence fields.
+  - Preserved provider language, confidence, speaker, and timestamps when available.
+  - Preserved DOCX paragraph index, heading, section, document identity, and exact quotes.
+  - Kept DOCX `page=null`; `_extract_docx` does not invoke rendering in the MVP.
+  - Preserved known source language in the existing public `language` field without adding a field.
+
+Contract impact:
+- None.
+- No endpoint, payload, response field, field type, graph node, or final response structure changed.
+
+Tests:
+- Added regressions for component-owned score defects, duplicate aliases, stable story identities, synonym false positives, explicit versus omitted polarity, technical-actor paraphrases, `or` composites, pre-generation canonicalization, low-ASR evidence, transcription metadata, and DOCX non-rendering fallback.
+- Focused MVP suite: `68 passed`.
+- Full service suite: `371 passed, 1 skipped, 1 warning`.
+- Scoped Ruff validation for the new scoring, semantic, canonicalization, evidence, schema, and regression-test core: all checks passed.
+- The remaining warning is the existing Starlette `httpx`/`httpx2` deprecation warning.
+
+Operational notes:
+- NLI remains disabled and is not an MVP dependency.
+- Cross-language or uncertain evidence produces review/partial output rather than an automatic citation decision.
+- Thresholds are source-independent and no fixture requirement IDs, filenames, or exact fixture statements are hard-coded.
+
+Known limitations:
+- Metadata plus script checks are not a full language-identification system.
+- Deterministic validation is not full multilingual entailment.
+- DOCX page numbers remain null until a controlled renderer is approved and deployed.
+
+### 2026-07-23 - MVP DOCX Paragraph Traceability (Rendering Deferred)
+
+Problem:
+- DOCX documents lacked reliable page numbers for source reference citations (unlike PDF files which have distinct page divisions), making page traceability difficult.
+- In headless production settings, we need a controlled way to render DOCX files to PDF to extract actual visual page boundaries while preserving paragraph structure, headings, and sections when rendering is not possible.
+
+Decision:
+- Use paragraph-level chunking and metadata preservation for the MVP.
+- Keep the page parameter null and never fabricate page numbers.
+- Defer DOCX-to-PDF rendering until the runtime dependency, sandboxing, resource limits, and operational ownership are approved.
+
+Implementation:
+- Modified [items.py](file:///D:/ITI/GP/ai-pipeline/ai-service/app/schemas/items.py):
+  - Added internal fields `paragraph_index`, `heading`, and `section` to the `SourceChunk` class.
+- Modified [ingest.py](file:///D:/ITI/GP/ai-pipeline/ai-service/app/nodes/ingest.py):
+  - Implemented `_extract_docx` returning the full text and parsed paragraph/section metadata.
+  - Passed `docx_paragraphs` in the returned state's `source_documents` list.
+  - Kept the conversion helper as deferred prototype code, but `_extract_docx` does not invoke it in the MVP path.
+- Modified [parse_to_chunks.py](file:///D:/ITI/GP/ai-pipeline/ai-service/app/nodes/parse_to_chunks.py):
+  - Implemented `_chunk_docx_paragraphs` to split fallback text paragraph-by-paragraph up to character limits while attaching start paragraph index, current heading style, and active section header internally on the chunk.
+
+Contract impact:
+- None. The public response contract for `SourceRefV1.page` is unchanged as it already supports optional/null page values.
+
+Tests:
+- Created [test_docx_traceability.py](file:///D:/ITI/GP/ai-pipeline/ai-service/tests/nodes/test_docx_traceability.py) with unit and E2E node tests verifying fallback chunking metadata and page nullability.
+- Added a regression that fails if DOCX conversion is invoked by the MVP ingestion path.
+- Current full-suite result: `371 passed, 1 skipped, 1 warning`.
+
+Operational notes:
+- Reliable page numbers require a future controlled renderer. Paragraph, heading, section, chunk, document, and quote metadata provide honest fallback traceability meanwhile.
+
+### 2026-07-23 - Strengthened Deterministic Evidence Validation
+
+Problem:
+- High lexical scores could bypass validation rules (e.g. numeric mismatches, polarity contradictions, or semantic fact mismatches), resulting in incorrect or weak citations being accepted.
+- Unrelated top-ranked chunks could be incorrectly published as verified evidence, and different source vs requirement languages were not cleanly caught or flagged.
+
+Decision:
+- Strengthen the validation pipeline: evaluate support against specific decision gates (support >= 0.60 must pass all validation checks; support < 0.25 is rejected; support between 0.25 and 0.60 or different languages triggers Review/partial status).
+- Ambiguous or partial evidence is retained (producing an honest partial groundedness result) but flagged for user review, ensuring the pipeline continues smoothly without failing.
+
+Implementation:
+- Modified [semantic_quality.py](file:///D:/ITI/GP/ai-pipeline/ai-service/app/services/semantic_quality.py):
+  - Defined `check_different_languages` to detect language mismatches using primary tags (metadata) or script checks (Arabic characters).
+- Modified [retrieve_evidence.py](file:///D:/ITI/GP/ai-pipeline/ai-service/app/nodes/retrieve_evidence.py):
+  - Refactored `_quote_support_score` and candidate loop to filter snippets and enforce numeric, behavior, polarity, and language check decision flows.
+- Modified [evidence_grounding.py](file:///D:/ITI/GP/ai-pipeline/ai-service/app/nodes/evidence_grounding.py):
+  - Refactored `evidence_grounding_node` to execute the identical decision flow, flagging partial support and different languages while keeping the evidence to calculate the partial score.
+
+Contract impact:
+- None.
+
+Tests:
+- Added `test_evidence_grounding_decision_flow_accept()`, `test_evidence_grounding_decision_flow_reject_mismatch()`, `test_evidence_grounding_decision_flow_partial_support()`, and `test_evidence_grounding_decision_flow_different_languages()`.
+- Full-suite result: `358 passed, 1 skipped, 1 warning`.
+
+Operational notes:
+- Resolves false-positive citations while preserving ambiguous matches for review under `Review / partial` status.
+
+Known limitations:
+- Language detection is limited to metadata comparison and Arabic script regex.
+
 ### 2026-07-23 - Scoring Correctness and Three-State Polarity Hardening
 
 Problem:
