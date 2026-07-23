@@ -110,6 +110,7 @@ async def test_groq_chunking_and_mapping(monkeypatch):
         assert chunks[0].text == "Hello world"
         assert chunks[0].start_time_sec == 0.0
         assert chunks[0].chunk_id.startswith("trans_test_groq")
+        assert chunks[0].language == "en"
 
 @pytest.mark.asyncio
 async def test_deepgram_bilingual_mapping(monkeypatch):
@@ -151,3 +152,5 @@ async def test_deepgram_bilingual_mapping(monkeypatch):
         assert len(chunks) == 1
         assert chunks[0].text == "Hello"
         assert chunks[0].speaker == "0"
+        assert chunks[0].language == "en"
+        assert chunks[0].asr_confidence == pytest.approx(0.95)

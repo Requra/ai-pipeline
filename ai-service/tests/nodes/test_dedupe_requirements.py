@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import pytest
 
-from app.nodes.dedupe_requirements import dedupe_requirements_node
+from app.nodes.dedupe_requirements import (
+    canonicalize_requirements,
+    dedupe_requirements_node,
+)
 from app.schemas.items import EvidenceSpan, ExtractedRequirement
 
 
@@ -149,6 +152,42 @@ async def test_atomic_children_collapse_into_source_level_composite():
     assert len(out["extracted_requirements"]) == 1
     assert out["extracted_requirements"][0].text == composite.text
     assert len(out["extracted_requirements"][0].evidence) == 3
+
+
+def test_pre_generation_canonicalization_merges_technical_actor_paraphrases():
+    first = _req(
+        5,
+        "The system shall produce CSV and PDF audit reports including the applied filters.",
+        actor="System",
+        evidence=[EvidenceSpan(chunk_id="c5", quote="produce CSV and PDF reports")],
+    )
+    second = _req(
+        11,
+        "The export service shall produce CSV and PDF audit reports including the applied filters.",
+        actor="Export service",
+        evidence=[EvidenceSpan(chunk_id="c11", quote="reports include applied filters")],
+    )
+
+    canonical, merged_count, id_map, _ = canonicalize_requirements([first, second])
+
+    assert merged_count == 1
+    assert len(canonical) == 1
+    assert id_map == {5: 1, 11: 1}
+    assert {e.chunk_id for e in canonical[0].evidence} == {"c5", "c11"}
+
+
+def test_atomic_or_clause_is_absorbed_by_equivalent_composite():
+    atomic = _req(8, "The service shall notify owners when an export is downloaded.")
+    composite = _req(
+        9,
+        "The service shall notify owners when an administrator role is granted or an export is downloaded.",
+    )
+
+    canonical, merged_count, _, _ = canonicalize_requirements([atomic, composite])
+
+    assert merged_count == 1
+    assert len(canonical) == 1
+    assert "administrator role" in canonical[0].text
 
 
 @pytest.mark.asyncio

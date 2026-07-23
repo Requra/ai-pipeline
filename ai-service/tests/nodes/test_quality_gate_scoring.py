@@ -92,3 +92,69 @@ async def test_issues_are_not_duplicated(base_state):
     issues = out["quality_issues"]
     keys = {(q.item_id, q.item_type, q.rule_violated, q.details) for q in issues}
     assert len(keys) == len(issues)
+
+
+@pytest.mark.asyncio
+async def test_story_quality_issues_use_stable_story_indexes(base_state):
+    first = _story("job_story_a", title="")
+    second = _story("job_story_b", title="")
+
+    out = await quality_gate_node(
+        _state(base_state, [_req(1)], [first, second])
+    )
+
+    empty_title_ids = {
+        issue.item_id
+        for issue in out["quality_issues"]
+        if issue.rule_violated == "story_empty_title"
+    }
+    assert empty_title_ids == {1, 2}
+
+
+@pytest.mark.asyncio
+async def test_notification_synonym_does_not_create_high_story_fact(base_state):
+    requirement = ClassifiedRequirement(
+        id=1,
+        text="The service shall alert account owners when an export is downloaded.",
+        candidate_labels=["FR"],
+        labels=["FR"],
+        confidence=0.9,
+        classification_confidence=0.9,
+        evidence=[
+            EvidenceSpan(
+                chunk_id="c",
+                quote="The service shall alert account owners when an export is downloaded.",
+            )
+        ],
+    )
+    story = UserStory(
+        id="job_story_1",
+        title="Notify owners about exports",
+        description=(
+            "As an account owner, I want to be notified when an export is "
+            "downloaded, so that I can monitor access."
+        ),
+        acceptance_criteria=[
+            _ac(
+                "Given an export, when it is downloaded, then the account owner is notified.",
+                "job_story_1",
+                1,
+            ),
+            _ac(
+                "Given an account owner, when an export download occurs, then an alert is sent.",
+                "job_story_1",
+                2,
+            ),
+        ],
+        source_requirement_ids=[1],
+        labels=["FR"],
+        evidence_reference=requirement.evidence,
+        story_points=3,
+    )
+
+    out = await quality_gate_node(_state(base_state, [requirement], [story]))
+
+    assert not any(
+        issue.rule_violated == "story_unsupported_fact"
+        for issue in out["quality_issues"]
+    )
