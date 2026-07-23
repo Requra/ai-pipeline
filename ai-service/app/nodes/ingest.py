@@ -4,6 +4,9 @@ import io
 import json
 import logging
 import re
+import os
+import tempfile
+import subprocess
 from typing import Any, Optional, TypedDict
 
 import docx
@@ -196,18 +199,103 @@ def _extract_pdf(raw_bytes: bytes) -> tuple[str, Optional[str]]:
         return "", f"INGEST_FAILED: PDF extraction error ({exc})"
 
 
-def _extract_docx(raw_bytes: bytes) -> tuple[str, Optional[str]]:
+def convert_docx_to_pdf(docx_bytes: bytes) -> bytes | None:
+    """Convert DOCX to PDF using LibreOffice (if installed) or Microsoft Word COM (via PowerShell)."""
+    soffice_paths = [
+        "C:\\Program Files\\LibreOffice\\program\\soffice.exe",
+        "C:\\Program Files (x86)\\LibreOffice\\program\\soffice.exe",
+    ]
+    soffice_bin = None
+    for path in soffice_paths:
+        if os.path.exists(path):
+            soffice_bin = path
+            break
+
+    if soffice_bin:
+        try:
+            with tempfile.TemporaryDirectory() as tempdir:
+                in_file = os.path.join(tempdir, "input.docx")
+                with open(in_file, "wb") as f:
+                    f.write(docx_bytes)
+
+                subprocess.run(
+                    [soffice_bin, "--headless", "--convert-to", "pdf", "--outdir", tempdir, in_file],
+                    capture_output=True,
+                    check=True,
+                    timeout=30,
+                )
+
+                out_file = os.path.join(tempdir, "input.pdf")
+                if os.path.exists(out_file):
+                    with open(out_file, "rb") as f:
+                        return f.read()
+        except Exception as e:
+            logger.warning("LibreOffice DOCX to PDF conversion failed: %s", e)
+
+    try:
+        with tempfile.TemporaryDirectory() as tempdir:
+            in_file = os.path.abspath(os.path.join(tempdir, "input.docx"))
+            out_file = os.path.abspath(os.path.join(tempdir, "input.pdf"))
+
+            with open(in_file, "wb") as f:
+                f.write(docx_bytes)
+
+            ps_script = f"""
+            $word = New-Object -ComObject Word.Application
+            $word.Visible = $false
+            $doc = $word.Documents.Open('{in_file}')
+            $doc.SaveAs('{out_file}', 17)
+            $doc.Close()
+            $word.Quit()
+            """
+
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command", ps_script],
+                capture_output=True,
+                check=True,
+                timeout=30,
+            )
+
+            if os.path.exists(out_file):
+                with open(out_file, "rb") as f:
+                    return f.read()
+    except Exception as e:
+        logger.warning("Word COM DOCX to PDF conversion failed: %s", e)
+
+    return None
+
+
+def _extract_docx(raw_bytes: bytes) -> tuple[str, Optional[str]] | tuple[str, Optional[str], Optional[list[dict]]]:
     if not raw_bytes:
-        return "", "INGEST_FAILED: missing DOCX bytes"
+        return "", "INGEST_FAILED: missing DOCX bytes", None
 
     try:
         document = docx.Document(io.BytesIO(raw_bytes))
-        # Use \n\n as paragraph separator
-        paragraphs = [paragraph.text for paragraph in document.paragraphs]
-        return "\n\n".join(paragraphs), None
+        paragraphs_data = []
+        current_section = None
+
+        for idx, para in enumerate(document.paragraphs):
+            text = (para.text or "").strip()
+            if not text:
+                continue
+
+            style_name = para.style.name if para.style else ""
+            is_heading = style_name.startswith("Heading") or style_name.startswith("Title")
+            if is_heading:
+                current_section = text
+
+            paragraphs_data.append({
+                "text": text,
+                "paragraph_index": idx,
+                "heading": text if is_heading else None,
+                "section": current_section,
+            })
+
+        full_text = "\n\n".join(p["text"] for p in paragraphs_data)
+        return full_text, None, paragraphs_data
     except Exception as exc:
         logger.warning("DOCX extraction failed: %s", exc)
-        return "", f"INGEST_FAILED: DOCX extraction error ({exc})"
+        return "", f"INGEST_FAILED: DOCX extraction error ({exc})", None
 
 
 def extract_pdf(raw_bytes: bytes) -> str:
@@ -218,13 +306,12 @@ def extract_pdf(raw_bytes: bytes) -> str:
 
 def extract_docx(raw_bytes: bytes) -> str:
     """Backward-compatible DOCX extractor API used by existing callers."""
-    text, _ = _extract_docx(raw_bytes)
-    return text
+    res = _extract_docx(raw_bytes)
+    return res[0]
 
 
 def _extract_from_state(state: PipelineState, file_type: str) -> tuple[str, Optional[str]]:
     raw_text = state.get("raw_text")
-    # If text is already provided, assume it's already sanitized or handle as plain text
     if isinstance(raw_text, str) and raw_text.strip():
         return raw_text, None
 
@@ -234,7 +321,8 @@ def _extract_from_state(state: PipelineState, file_type: str) -> tuple[str, Opti
         return _extract_pdf(raw_bytes)
 
     if file_type == "docx":
-        return _extract_docx(raw_bytes)
+        res = _extract_docx(raw_bytes)
+        return res[0], res[1]
 
     if file_type in ("text", "document"):
         if not raw_bytes:
@@ -242,7 +330,6 @@ def _extract_from_state(state: PipelineState, file_type: str) -> tuple[str, Opti
         try:
             return raw_bytes.decode("utf-8"), None
         except UnicodeDecodeError:
-            # Fallback keeps ingest resilient for legacy encodings.
             return raw_bytes.decode("latin-1", errors="replace"), None
 
     return "", f"INGEST_FAILED: unsupported file_type '{file_type}'"
@@ -253,7 +340,8 @@ def _extract_from_bytes(raw_bytes: bytes, file_type: str) -> tuple[str, Optional
     if file_type == "pdf":
         return _extract_pdf(raw_bytes)
     if file_type == "docx":
-        return _extract_docx(raw_bytes)
+        res = _extract_docx(raw_bytes)
+        return res[0], res[1]
     if file_type in ("text", "document"):
         try:
             return raw_bytes.decode("utf-8"), None
@@ -304,7 +392,7 @@ async def _run_relevance_check(masked_text: str) -> RelevanceCheck:
             ("user", user_prompt)
         ])
         content = getattr(raw, "content", None) or str(raw)
-        
+
         # Strip code fences
         content = content.strip()
         if content.startswith("```"):
@@ -360,9 +448,17 @@ async def ingest_node(state: PipelineState) -> IngestOutput:
             for raw_input in raw_inputs:
                 document_id = raw_input.get("document_id")
                 filename = raw_input.get("filename") or document_id or "unknown_file"
-                text, extraction_error = _extract_from_bytes(
-                    raw_input.get("raw_bytes") or b"", raw_input.get("file_type", "")
-                )
+                docx_paragraphs = None
+                if raw_input.get("file_type") == "docx":
+                    res = _extract_docx(raw_input.get("raw_bytes") or b"")
+                    if len(res) == 3:
+                        text, extraction_error, docx_paragraphs = res
+                    else:
+                        text, extraction_error = res
+                else:
+                    text, extraction_error = _extract_from_bytes(
+                        raw_input.get("raw_bytes") or b"", raw_input.get("file_type", "")
+                    )
                 if extraction_error:
                     return _build_output(
                         raw_text=None, is_useful=False, relevance_score=0.0, status="rejected",
@@ -387,6 +483,8 @@ async def ingest_node(state: PipelineState) -> IngestOutput:
                     "mime_type": raw_input.get("mime_type"),
                     "sha256_hash": raw_input.get("sha256_hash"),
                     "text": normalized_text,
+                    "docx_paragraphs": docx_paragraphs,
+                    "language": raw_input.get("language") or state.get("language"),
                 })
                 extracted_documents.append(source_doc)
                 combined_text_parts.append(normalized_text)
@@ -425,7 +523,15 @@ async def ingest_node(state: PipelineState) -> IngestOutput:
         )
 
     try:
-        extracted_text, extraction_error = _extract_from_state(state, file_type)
+        docx_paragraphs = None
+        if file_type == "docx":
+            res = _extract_docx(state.get("raw_bytes", b""))
+            if len(res) == 3:
+                extracted_text, extraction_error, docx_paragraphs = res
+            else:
+                extracted_text, extraction_error = res
+        else:
+            extracted_text, extraction_error = _extract_from_state(state, file_type)
         if extraction_error:
             return _build_output(
                 raw_text=None,
@@ -437,7 +543,7 @@ async def ingest_node(state: PipelineState) -> IngestOutput:
 
         # Basic normalization (keeping markers)
         normalized_text = extracted_text.strip()
-        
+
         if len(normalized_text) < MIN_TEXT_LENGTH:
             return _build_output(
                 raw_text=normalized_text or None,
@@ -477,7 +583,7 @@ async def ingest_node(state: PipelineState) -> IngestOutput:
                 pii_stats=stats,
             )
 
-        return _build_output(
+        out = _build_output(
             raw_text=masked_text,
             is_useful=True,
             relevance_score=relevance.relevance_score,
@@ -485,6 +591,19 @@ async def ingest_node(state: PipelineState) -> IngestOutput:
             error=None,
             pii_stats=stats,
         )
+        # Populate source_documents metadata so parse_to_chunks can use it
+        doc_source = state.get("metadata", {}) or {}
+        out["source_documents"] = [
+            {
+                "document_id": state.get("job_id") or "default_doc",
+                "filename": doc_source.get("filename") or "document.docx",
+                "file_type": file_type,
+                "text": masked_text,
+                "docx_paragraphs": docx_paragraphs,
+                "language": state.get("language"),
+            }
+        ]
+        return out
     except Exception as exc:
         logger.exception("Unhandled ingest failure")
         return _build_output(

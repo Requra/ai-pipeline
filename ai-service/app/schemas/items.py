@@ -24,6 +24,11 @@ class SourceChunk(BaseModel):
     start_time_sec: Optional[float] = None
     end_time_sec: Optional[float] = None
     document_id: Optional[str] = None
+    paragraph_index: Optional[int] = None
+    heading: Optional[str] = None
+    section: Optional[str] = None
+    language: Optional[str] = None
+    asr_confidence: Optional[float] = None
 
 class RetrievedChunk(BaseModel):
     """A chunk returned by the lexical retriever, annotated with its score.
