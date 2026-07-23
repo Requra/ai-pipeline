@@ -80,7 +80,74 @@ def _story_traceable(story, requirements_by_id: dict) -> bool:
     if not any(is_substantive(text) for text in req_texts):
         return True
     story_text = f"{getattr(story, 'title', '')} {getattr(story, 'description', '')}"
-    return story_alignment(req_texts, story_text) >= 0.25
+    sources = source_fact_texts(linked)
+    return (
+        story_alignment(req_texts, story_text) >= 0.25
+        and not unsupported_fact_terms(story_text, sources)
+        and not has_polarity_conflict(story_text, sources)
+    )
+
+
+_ROOT_CAUSE_MAP = {
+    # Groundedness
+    "missing_evidence": "EVIDENCE_NOT_GROUNDED",
+    "missing_verified_evidence": "EVIDENCE_NOT_GROUNDED",
+    "evidence_semantic_mismatch": "EVIDENCE_NOT_GROUNDED",
+    "evidence_not_grounded": "EVIDENCE_NOT_GROUNDED",
+    "evidence_chunk_mismatch": "EVIDENCE_NOT_GROUNDED",
+    "evidence_document_mismatch": "EVIDENCE_NOT_GROUNDED",
+    "evidence_low_transcription_confidence": "EVIDENCE_NOT_GROUNDED",
+    # Duplicate risk
+    "duplicate_requirement": "DUPLICATE_CONTENT",
+    "duplicate_story": "DUPLICATE_CONTENT",
+    "semantic_conflict_duplicate": "DUPLICATE_CONTENT",
+    # Acceptance-criteria quality
+    "acceptance_criterion_unsupported_fact": "AC_QUALITY",
+    "acceptance_criterion_not_source_aligned": "AC_QUALITY",
+    "acceptance_criteria_missing_source_clause": "AC_QUALITY",
+    "generic_acceptance_criteria": "AC_QUALITY",
+    # Story traceability
+    "incorrect_story_requirement_mapping": "STORY_TRACEABILITY",
+    "story_missing_source_ids": "STORY_TRACEABILITY",
+    "story_unsupported_fact": "STORY_TRACEABILITY",
+    # Story completeness
+    "story_empty_title": "STORY_COMPLETENESS",
+    "story_missing_acceptance": "STORY_COMPLETENESS",
+}
+
+_COMPONENT_OWNED_ROOT_CAUSES = {
+    "EVIDENCE_NOT_GROUNDED",
+    "DUPLICATE_CONTENT",
+    "AC_QUALITY",
+    "STORY_TRACEABILITY",
+    "STORY_COMPLETENESS",
+}
+
+_DIAGNOSTIC_ROOT_CAUSES = {
+    "priority_not_source_supported",
+    "requirement_confidence_invalid",
+    "low_confidence_classification",
+    "requirement_missing_labels",
+    "non_human_story_persona",
+    "story_description_shape",
+    "story_missing_evidence_reference",
+    "story_behavior_needs_review",
+    "coverage_bad_story_id",
+    "coverage_bad_requirement_id",
+    "out_of_scope_covered_by_story",
+    "open_question_covered_by_story",
+}
+
+
+def _issue_value(issue, field: str, default=None):
+    return issue.get(field, default) if isinstance(issue, dict) else getattr(issue, field, default)
+
+
+def _root_cause(rule: str) -> str:
+    normalized = str(rule or "")
+    if "complementary" in normalized.lower():
+        return "COMPLEMENTARY"
+    return _ROOT_CAUSE_MAP.get(normalized, normalized)
 
 
 def _criterion_supported(criterion, linked_requirements: Sequence) -> bool:
@@ -191,27 +258,26 @@ def compute_quality_scores(requirements: Sequence, stories: Sequence, quality_is
     story_duplicate_risk = len(find_duplicate_story_ids(stories)) / story_count if story_count else 0.0
     requirement_duplicate_risk = _duplicate_requirement_count(requirements) / req_count if req_count else 0.0
     duplicate_risk = max(story_duplicate_risk, requirement_duplicate_risk)
-    # 1. Group issues by (item_id, root_cause) and normalize families
+    # Group issues by stable entity and normalized root cause.  The public
+    # QualityIssue contract stays unchanged; this identity exists only for
+    # scoring and prevents aliases from being counted more than once.
     grouped = {}
     for issue in quality_issues:
-        rule = issue.get("rule_violated", "") if isinstance(issue, dict) else getattr(issue, "rule_violated", "")
+        rule = _issue_value(issue, "rule_violated", "")
         if not rule:
-            rule = issue.get("rule", "") if isinstance(issue, dict) else getattr(issue, "rule", "")
+            rule = _issue_value(issue, "rule", "")
         rule = str(rule or "")
-
-        if rule in ("missing_evidence", "missing_verified_evidence", "evidence_semantic_mismatch"):
-            root_cause = "EVIDENCE_NOT_GROUNDED"
-        else:
-            root_cause = rule
-
-        item_id = issue.get("item_id", None) if isinstance(issue, dict) else getattr(issue, "item_id", None)
-        severity = issue.get("severity", "") if isinstance(issue, dict) else getattr(issue, "severity", "")
+        root_cause = _root_cause(rule)
+        item_id = _issue_value(issue, "item_id")
+        item_type = str(_issue_value(issue, "item_type", "") or "")
+        severity = _issue_value(issue, "severity", "")
         severity = str(severity or "").lower()
 
-        key = (item_id, root_cause)
+        key = (item_type, item_id, root_cause)
         if key not in grouped:
             grouped[key] = {
                 "item_id": item_id,
+                "item_type": item_type,
                 "root_cause": root_cause,
                 "severity": severity,
                 "rule_violated": rule,
@@ -222,38 +288,16 @@ def compute_quality_scores(requirements: Sequence, stories: Sequence, quality_is
             if severity == "high" or (severity == "medium" and existing_sev != "high"):
                 grouped[key]["severity"] = severity
 
-    DIAGNOSTIC_ROOT_CAUSES = {
-        "priority_not_source_supported",
-        "requirement_confidence_invalid",
-        "low_confidence_classification",
-        "requirement_missing_labels",
-        "non_human_story_persona",
-        "story_description_shape",
-        "story_missing_evidence_reference",
-        "coverage_bad_story_id",
-        "coverage_bad_requirement_id",
-        "out_of_scope_covered_by_story",
-        "open_question_covered_by_story",
-    }
-
-    REPRESENTED_ROOT_CAUSES = {
-        # Groundedness (excluded from penalties and caps as missing evidence reduces groundedness but is not subtracted again)
-        "EVIDENCE_NOT_GROUNDED",
-        "evidence_not_grounded",
-        "evidence_chunk_mismatch",
-        "evidence_document_mismatch",
-    }
-
     penalizable_high_count = 0
     penalizable_medium_count = 0
     penalizable_low_count = 0
 
-    for (item_id, root_cause), info in grouped.items():
-        if "complementary" in root_cause.lower():
+    for (_, _, root_cause), info in grouped.items():
+        if root_cause == "COMPLEMENTARY":
             continue
-        if root_cause in DIAGNOSTIC_ROOT_CAUSES:
+        if root_cause in _DIAGNOSTIC_ROOT_CAUSES:
             continue
-        if root_cause not in REPRESENTED_ROOT_CAUSES:
+        if root_cause not in _COMPONENT_OWNED_ROOT_CAUSES:
             sev = info["severity"]
             if sev == "high":
                 penalizable_high_count += 1
@@ -266,8 +310,8 @@ def compute_quality_scores(requirements: Sequence, stories: Sequence, quality_is
     high_count = sum(
         1 for info in grouped.values()
         if info["severity"] == "high"
-        and "complementary" not in info["root_cause"].lower()
-        and info["root_cause"] not in DIAGNOSTIC_ROOT_CAUSES
+        and info["root_cause"] != "COMPLEMENTARY"
+        and info["root_cause"] not in _DIAGNOSTIC_ROOT_CAUSES
     )
 
     overall = (

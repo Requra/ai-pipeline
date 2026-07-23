@@ -93,6 +93,64 @@ def test_high_severity_issue_counted():
     assert s.high_severity_issue_count == 1
 
 
+def test_component_owned_duplicate_issues_are_not_double_penalized():
+    from app.schemas.items import QualityIssue
+
+    reqs = [
+        _req(1),
+        ClassifiedRequirement(
+            id=2,
+            text="req 1",
+            candidate_labels=["FR"],
+            labels=["FR"],
+            confidence=0.9,
+            classification_confidence=0.9,
+            evidence=[EvidenceSpan(chunk_id="c2", quote="req 1")],
+            quote_support_score=1.0,
+        ),
+    ]
+    baseline = compute_quality_scores(reqs, [], [])
+    issues = [
+        QualityIssue(
+            item_id=2,
+            item_type="requirement",
+            severity="high",
+            rule_violated="duplicate_requirement",
+            details="duplicate",
+        ),
+        QualityIssue(
+            item_id=1,
+            item_type="requirement",
+            severity="medium",
+            rule_violated="semantic_conflict_duplicate",
+            details="same duplicate pair",
+        ),
+    ]
+
+    scored = compute_quality_scores(reqs, [], issues)
+
+    assert scored.duplicate_risk == baseline.duplicate_risk
+    assert scored.overall_score == baseline.overall_score
+
+
+def test_story_unsupported_fact_is_owned_by_traceability():
+    from app.schemas.items import QualityIssue
+
+    req = _req(1, quote_support=1.0)
+    story = _story("US1")
+    issue = QualityIssue(
+        item_id=1,
+        item_type="story",
+        severity="high",
+        rule_violated="story_unsupported_fact",
+        details="unsupported behavior",
+    )
+
+    scored = compute_quality_scores([req], [story], [issue])
+
+    assert scored.overall_score > 0.59
+
+
 def test_invented_non_numeric_behavior_lowers_acceptance_quality():
     req = ClassifiedRequirement(
         id=1,
