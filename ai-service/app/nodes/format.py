@@ -49,6 +49,32 @@ def v1_type_from_labels(labels) -> str:
     return "Functional"
 
 
+def _dedupe_source_refs(refs: list[SourceRefV1]) -> list[SourceRefV1]:
+    """Remove repeated document citations while retaining strongest provenance."""
+    deduped: list[SourceRefV1] = []
+    positions: dict[tuple, int] = {}
+    for ref in refs:
+        normalized_quote = re.sub(r"\s+", " ", ref.quote or "").strip().lower()
+        key = (
+            ref.source_type,
+            ref.source_id,
+            ref.document_name,
+            normalized_quote,
+            # Repeated audio utterances at distinct timestamps/chunks may be
+            # separate evidence. Documents need only one identical citation.
+            ref.chunk_id if ref.source_type == "audio" else None,
+        )
+        existing_index = positions.get(key)
+        if existing_index is None:
+            positions[key] = len(deduped)
+            deduped.append(ref)
+            continue
+        existing = deduped[existing_index]
+        if ref.confidence_score > existing.confidence_score:
+            deduped[existing_index] = ref
+    return deduped
+
+
 def parse_pipeline_error(err_str: str, status: str) -> Optional[PipelineError]:
     if not err_str:
         return None
@@ -169,7 +195,14 @@ async def format_node(state: PipelineState) -> dict:
             )
             # Successful canonicalization is informational; it should not turn
             # an otherwise clean result into a partial response.
-            informational_warning_codes = {"DUPLICATE_REQUIREMENT_MERGED"}
+            informational_warning_codes = {
+                "DUPLICATE_REQUIREMENT_MERGED",
+                "SEMANTIC_COMPLEMENTARY",
+                "EXTRACT_WEAK_EVIDENCE",
+                "WEAK_EVIDENCE_SUPPORT",
+                "NO_RETRIEVED_EVIDENCE",
+                "EVIDENCE_LIMIT_APPLIED",
+            }
             actionable_warnings = [
                 warning for warning in warnings
                 if (
@@ -282,6 +315,9 @@ async def format_node(state: PipelineState) -> dict:
         # Source refs mapping
         source_refs = []
         for ev in getattr(r, "evidence", []) or []:
+            support_score = float(getattr(ev, "support_score", 0.0) or 0.0)
+            if 0.0 < support_score < 0.60:
+                continue
             ref_doc_id = getattr(ev, "document_id", None)
             
             # Robust fallback: if ref_doc_id is not set, parse it from chunk_id
@@ -317,6 +353,7 @@ async def format_node(state: PipelineState) -> dict:
                     4,
                 )
             ))
+        source_refs = _dedupe_source_refs(source_refs)
             
         # Quality mapping
         req_issues = [
@@ -362,6 +399,9 @@ async def format_node(state: PipelineState) -> dict:
         # Source refs mapping
         source_refs = []
         for ev in getattr(s, "evidence_reference", []) or []:
+            support_score = float(getattr(ev, "support_score", 0.0) or 0.0)
+            if 0.0 < support_score < 0.60:
+                continue
             ref_doc_id = getattr(ev, "document_id", None)
             
             # Robust fallback: if ref_doc_id is not set, parse it from chunk_id
@@ -397,6 +437,7 @@ async def format_node(state: PipelineState) -> dict:
                     4,
                 )
             ))
+        source_refs = _dedupe_source_refs(source_refs)
             
         # Quality mapping
         story_issues = [

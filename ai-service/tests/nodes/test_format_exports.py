@@ -9,6 +9,8 @@ from app.schemas.items import (
     AcceptanceCriterion,
     ClassifiedRequirement,
     EvidenceSpan,
+    PipelineWarning,
+    QualityIssue,
     UserStory,
 )
 
@@ -101,3 +103,78 @@ async def test_exports_empty_when_no_stories(base_state):
     jr = result["job_result"]
     assert jr.exports.excel.available is False
     assert jr.exports.jira.available is False
+
+
+@pytest.mark.asyncio
+async def test_format_deduplicates_identical_document_source_refs(base_state):
+    requirement = _req(1, ["FR"])
+    requirement.evidence = [
+        EvidenceSpan(
+            chunk_id="c1",
+            document_id="doc-1",
+            quote="The system shall export a report.",
+            support_score=0.70,
+        ),
+        EvidenceSpan(
+            chunk_id="c2",
+            document_id="doc-1",
+            quote="The system shall export a report.",
+            support_score=1.0,
+        ),
+    ]
+    story = _story("s1", 1, ["FR"])
+    story.evidence_reference = list(requirement.evidence)
+    state = base_state.copy()
+    state["classified_requirements"] = [requirement]
+    state["user_stories"] = [story]
+    state["source_documents"] = [
+        {
+            "document_id": "doc-1",
+            "filename": "requirements.pdf",
+            "file_type": "pdf",
+        }
+    ]
+
+    result = await format_node(state)
+    job = result["job_result"]
+
+    assert len(job.requirements[0].source_refs) == 1
+    assert job.requirements[0].source_refs[0].confidence_score == 1.0
+    assert len(job.user_stories[0].source_refs) == 1
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_warnings_do_not_force_partial_status(base_state):
+    state = base_state.copy()
+    state["classified_requirements"] = [_req(1, ["FR"])]
+    state["user_stories"] = [_story("s1", 1, ["FR"])]
+    state["quality_issues"] = [
+        QualityIssue(
+            item_id=1,
+            item_type="requirement",
+            severity="medium",
+            rule_violated="semantic_conflict_complementary",
+            details="The requirements are complementary.",
+        )
+    ]
+    state["warnings"] = [
+        PipelineWarning(
+            node_name="extract",
+            code="EXTRACT_WEAK_EVIDENCE",
+            message="Fallback evidence was later grounded.",
+        ),
+        PipelineWarning(
+            node_name="dedupe_requirements",
+            code="SEMANTIC_COMPLEMENTARY",
+            message="Informational relationship.",
+        ),
+        PipelineWarning(
+            node_name="retrieve_evidence",
+            code="NO_RETRIEVED_EVIDENCE",
+            message="Existing extracted evidence was sufficient.",
+        ),
+    ]
+
+    result = await format_node(state)
+
+    assert result["job_result"].status == "completed"
