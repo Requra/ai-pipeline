@@ -132,7 +132,13 @@ File: `ai-service/app/nodes/retrieve_evidence.py`
 
 - `MIN_RETRIEVAL_SUPPORT = 0.35`.
 - Original evidence is scored only against its declared chunk.
-- Top retrieval results remain candidates until they pass `lexical_support`.
+- Top retrieval results remain candidates until the best exact clause in the
+  declared chunk reaches `0.60` and passes numeric, behavior, provenance, and
+  polarity checks.
+- Results between `0.25` and `0.60` remain internal review diagnostics and are
+  never promoted into public `source_refs`.
+- Cross-language retrieval hits are not automatically cited while deterministic
+  adjudication cannot verify their meaning.
 - The node no longer fills the evidence list just to reach the evidence cap.
 - Only qualified hits update `evidence_match_score`.
 - `quote_support_score` is the strongest verified evidence score, not the fraction of quotes found somewhere in the corpus.
@@ -148,9 +154,29 @@ For each citation, grounding now verifies:
 2. The declared `chunk_id` exists.
 3. The quote occurs inside that exact chunk.
 4. The evidence `document_id`, when supplied, matches the chunk document.
-5. The quote supports the requirement with a score of at least `0.35`.
+5. The requirement is compared with the best exact sentence or paragraph inside
+   that declared chunk.
+6. The selected clause supports the requirement with a score of at least `0.60`.
+7. The selected clause passes numeric, behavior, and polarity checks.
+
+Sentence candidates preserve complete semicolon-delimited composite statements.
+Adjacent two- and three-sentence windows are also considered when one requirement
+spans multiple source sentences. Equal-support candidates prefer the shortest
+exact source span, preventing unrelated chunk material from entering citations.
+Exact or safely contained propositions with matching negation are classified as
+`ENTAILED` before clause-level polarity comparison.
 
 Invalid evidence is removed from the requirement before formatting. If all candidates are removed, the requirement receives a high-severity `missing_verified_evidence` issue.
+
+Ambiguous evidence is not a public citation. Verified low-ASR evidence may remain
+traceable with a review warning because its semantic support and provenance are
+valid; its transcription confidence is the uncertain property.
+
+After grounding, the node reconciles the aggregate
+`EXTRACT_WEAK_EVIDENCE` warning. If all fallback requirements now have verified
+evidence, the warning is removed. If some fallback requirements remain
+ungrounded, the warning is retained with the exact unresolved count. Other
+warning codes are preserved.
 
 New or strengthened issue rules include:
 
@@ -172,9 +198,17 @@ File: `ai-service/app/nodes/quality_gate.py`
 
 The existing quality node now adds semantic checks without changing graph topology:
 
-- A story with linked IDs but alignment below `0.25` receives high-severity `incorrect_story_requirement_mapping`.
+- Story alignment compares normalized source clauses with the title,
+  description, and complete acceptance-criteria text.
+- Alignment below `0.40` creates a review issue, but a low score alone cannot
+  create a High defect. High severity requires additional evidence such as an
+  unsupported action, numeric conflict, or polarity conflict.
 - Acceptance criteria introducing numeric facts absent from requirements and evidence receive high-severity `acceptance_criterion_unsupported_fact`.
 - Acceptance criteria with insufficient alignment to all linked source facts receive medium-severity `acceptance_criterion_not_source_aligned`.
+- Clause coverage uses the complete Given + When + Then criterion; the Then
+  outcome remains authoritative for unsupported-behavior and polarity checks.
+- Exclusive source permissions such as `only ROLE may ACTION` entail denial of
+  the same action to a non-ROLE actor.
 - Existing generic-criteria, missing-evidence, coverage, confidence, and duplicate checks remain active.
 
 ### 7.6 Quality scoring
@@ -186,13 +220,14 @@ Groundedness now uses the strongest verified evidence support for each requireme
 Traceability now requires both:
 
 - A valid linked requirement ID.
-- Semantic alignment of at least `0.25` for substantive source text.
+- Normalized clause alignment of at least `0.40` for substantive source text.
 
 Acceptance-criteria quality requires criteria to be:
 
 - Non-generic.
 - Free from unsupported digit-based numeric facts.
 - Aligned with linked requirement text or evidence.
+- Evaluated for coverage using Given + When + Then context.
 
 The overall score is now weighted as follows:
 
@@ -225,7 +260,21 @@ Severity caps prevent misleading scores:
 
 File: `ai-service/app/nodes/format.py`
 
-The public `SourceRefV1.confidence_score` now uses `EvidenceSpan.support_score`. Legacy evidence without a calculated score is limited to a conservative fallback confidence instead of inheriting the requirement's extraction confidence.
+The public `SourceRefV1.confidence_score` now uses `EvidenceSpan.support_score`.
+As defense in depth, evidence with a calculated non-zero support below `0.60`
+is filtered during formatting even if an upstream caller bypassed grounding.
+Legacy evidence without a calculated score is limited to a conservative fallback
+confidence instead of inheriting the requirement's extraction confidence.
+
+Identical document references are normalized by source identity and quote and
+collapsed to the strongest citation. Audio references retain their chunk identity
+because repeated utterances at different moments may be distinct evidence.
+
+Final status is determined by useful output, errors, High user-facing defects,
+and actionable operational warnings. Diagnostic or informational codes such as
+successful duplicate merging, `COMPLEMENTARY` relationships, extraction fallback
+events, and unsuccessful optional retrieval do not independently force
+`status=partial`; unresolved evidence defects still do so through the quality gate.
 
 The final response schema is unchanged.
 
@@ -233,9 +282,10 @@ The final response schema is unchanged.
 
 | Threshold | Value | Purpose |
 |---|---:|---|
-| Retrieval support | `0.35` | Minimum score before a retrieved chunk becomes candidate evidence |
-| Grounding support | `0.35` | Minimum score before evidence may be publicly cited |
-| Story mapping alignment | `0.25` | Minimum story-to-requirement alignment |
+| Weak-support warning | `0.35` | Flags requirements lacking grounded or retrieved support |
+| Public citation support | `0.60` | Minimum score plus safety checks before evidence reaches `source_refs` |
+| Ambiguous evidence band | `0.25–0.60` | Review diagnostic only; never a public citation |
+| Story mapping alignment | `0.40` | Minimum normalized clause alignment; lower scores alone are not High |
 | Acceptance-criterion alignment | `0.15` | Minimum criterion-to-source alignment |
 | Near-duplicate story similarity | `0.90` | Description-token Jaccard threshold |
 | Fallback evidence cap | `0.70` | Maximum confidence for substituted source snippets |
@@ -256,6 +306,18 @@ Coverage includes:
 - Evidence presence with zero support does not produce full groundedness.
 - Incorrect story-to-requirement mappings are high severity and reduce traceability.
 - Unsupported numeric acceptance facts are detected.
+- Ambiguous and cross-language candidates are excluded from public evidence.
+- The best supporting clause is selected from a long declared chunk.
+- Given + When + Then context contributes to source-clause coverage.
+- Exclusive permissions support equivalent non-role denial criteria.
+- Valid MFA and other normalized paraphrases do not become false mapping defects.
+- Low alignment without independent contradiction or invented behavior is Medium,
+  not High.
+- Exact negative source statements do not contradict themselves after clause
+  splitting.
+- Composite requirements cite the shortest complete source sentence/window.
+- Identical document references collapse to the strongest citation.
+- Diagnostic warnings do not force a clean, complete result to `partial`.
 - A medium issue prevents an overall score of `1.0`.
 
 Existing retrieval, grounding, scoring, contract, node, API, worker, and end-to-end tests remain active.
@@ -658,6 +720,181 @@ Known limitations:
 ```
 
 ## 15. Changelog
+
+### 2026-07-24 - Post-Grounding Warning Reconciliation
+
+Problem:
+- Extraction emitted one aggregate `EXTRACT_WEAK_EVIDENCE` warning whenever it
+  substituted source snippets.
+- The warning survived after authoritative grounding verified those snippets,
+  leaving a completed response that incorrectly said requirements still needed
+  evidence review.
+
+Decision:
+- Make evidence grounding the authority for the final lifecycle of extraction
+  evidence warnings.
+- Remove only resolved extraction warnings and preserve unrelated warnings.
+- Retain an accurate warning when fallback evidence genuinely remains unresolved.
+
+Implementation:
+- Updated `evidence_grounding.py`:
+  - Recorded which requirements entered grounding with fallback evidence.
+  - Removed the upstream aggregate warning when those requirements finished with
+    verified evidence.
+  - Replaced it with an evidence-grounding warning containing the exact unresolved
+    fallback count when verification still failed.
+  - Preserved all unrelated warning objects and dictionaries.
+
+Contract impact:
+- None.
+- The existing warning list and `EXTRACT_WEAK_EVIDENCE` code are reused.
+- No endpoint, payload, graph node, response field, or field type changed.
+
+Tests:
+- Added resolved-warning, unresolved-warning, and unrelated-warning preservation
+  regressions.
+- Focused grounding and end-to-end suite: `40 passed`.
+- Full AI-service suite: `385 passed, 1 skipped, 1 warning`.
+- The warning is the existing Starlette `httpx`/`httpx2` deprecation warning.
+
+Operational notes:
+- Regenerate `response.json`; a fully grounded run should no longer contain
+  `EXTRACT_WEAK_EVIDENCE`.
+- A run with rejected fallback evidence will still expose the warning with its
+  post-grounding unresolved count.
+
+### 2026-07-24 - Post-Regeneration Evidence and Status Closure
+
+Problem:
+- A verbatim requirement containing `without` was split into positive and
+  negative clauses and falsely classified as `CONTRADICTED`.
+- Composite requirements separated by semicolons selected an entire multi-page
+  chunk because the complete source sentence was not retained as a candidate.
+- Canonical evidence unions exposed repeated identical references.
+- Stale extraction/retrieval diagnostics and informational `COMPLEMENTARY`
+  warnings forced otherwise complete results to `partial`.
+
+Decision:
+- Preserve exact and safely contained propositions before clause polarity logic.
+- Select the shortest exact span that supports the complete requirement.
+- Deduplicate public document citations without changing `source_refs`.
+- Let user-facing quality defects and operational failures own final status;
+  diagnostics remain visible but non-blocking.
+
+Implementation:
+- Updated `semantic_quality.py`:
+  - Added normalized exact/contained entailment with matching negation.
+  - Preserved full sentence candidates before semicolon splitting.
+  - Added bounded adjacent sentence windows for cross-sentence composites.
+  - Preferred the shortest candidate when support scores are equal.
+- Updated `format.py`:
+  - Deduplicated identical document citations and retained the strongest support.
+  - Preserved separate audio chunks.
+  - Classified known extraction, retrieval, canonicalization, and complementary
+    warning codes as non-blocking diagnostics.
+
+Contract impact:
+- None.
+- Endpoints, payloads, graph topology, response fields, and field types remain
+  unchanged.
+
+Tests:
+- Added regressions for exact negative polarity, grounding of `without` clauses,
+  minimal composite citations, public citation deduplication, and diagnostic
+  warning status behavior.
+- Focused closure suite: `53 passed`.
+- Full AI-service suite: `383 passed, 1 skipped, 1 warning`.
+- Critical Ruff checks passed.
+- The warning is the existing Starlette `httpx`/`httpx2` deprecation warning.
+
+Operational notes:
+- Regenerate `response.json` again to validate the corrected status and citation
+  spans; existing JSON artifacts are not rewritten.
+- No requirement IDs, document names, or fixture sentences are hard-coded in
+  production logic.
+
+Known limitations:
+- Cross-language entailment still requires review while NLI remains disabled.
+- Warning-code ownership should remain covered by tests whenever a new warning
+  type is introduced.
+
+### 2026-07-24 - MVP P0 Citation and Validator Adjudication
+
+Problem:
+- Ambiguous retrieval candidates between `0.25` and `0.60` could still be
+  serialized into `source_refs`.
+- Grounding compared requirements with one proposed quote instead of the best
+  supporting clause in the declared chunk, causing valid PDF requirements to
+  lose evidence.
+- Given/When facts were discarded before acceptance-criteria coverage was
+  calculated.
+- `deny` was treated as invented behavior even when it was logically implied by
+  an exclusive access rule.
+- Any low lexical story alignment could become a High mapping defect.
+
+Decision:
+- Keep the current graph, endpoints, request payloads, and public response
+  structure unchanged.
+- Treat retrieval as candidate generation and publish only deterministically
+  verified citations.
+- Use normalized proposition and clause semantics consistently in retrieval,
+  grounding, generation, validation, and scoring.
+- Prefer Medium review over a false High defect when low alignment is the only
+  negative signal.
+
+Implementation:
+- Updated `semantic_quality.py`:
+  - Added normalized proposition support and exact source-clause selection.
+  - Added safe aliases for MFA, invitations, administrator roles, retrieval,
+    retention/preservation, and account recovery/reset.
+  - Preserved complete Given/When/Then context for coverage.
+  - Added general role/action access-control entailment for exclusive
+    permissions.
+  - Added a shared `0.40` story-alignment policy and a clear-mismatch decision
+    requiring evidence beyond a low score.
+- Updated `retrieve_evidence.py` and `evidence_grounding.py`:
+  - Selected the best exact sentence or paragraph from the declared chunk.
+  - Applied score, numeric, behavior, and polarity checks to that same clause.
+  - Promoted only support of at least `0.60`.
+  - Kept ambiguous and cross-language candidates out of public evidence.
+  - Retained semantically verified low-ASR evidence with an explicit review
+    warning.
+- Updated `generate.py`, `story_validator.py`, `quality_gate.py`, and
+  `quality_scoring.py`:
+  - Included acceptance criteria in mapping alignment.
+  - Used normalized proposition support for criteria.
+  - Classified low alignment alone as Medium review.
+  - Preserved High mapping severity for independently demonstrated conflicts.
+- Updated `format.py` with a final defensive filter for calculated ambiguous
+  support scores.
+
+Contract impact:
+- None.
+- No endpoint, request field, response field, field type, graph node, or final
+  response structure changed.
+
+Tests:
+- Added regressions for ambiguous citation suppression, cross-language
+  suppression, best-clause grounding, full Given/When/Then coverage, exclusive
+  access entailment, valid paraphrased mappings, and review-only low alignment.
+- Focused semantic and contract suite: `66 passed`.
+- Full AI-service suite: `378 passed, 1 skipped, 1 warning`.
+- The warning is the existing Starlette `httpx`/`httpx2` deprecation warning.
+
+Operational notes:
+- Regenerate `response.json`; previous outputs are immutable artifacts and do not
+  change automatically.
+- NLI remains disabled. Cross-language semantic evidence requires review instead
+  of automatic citation.
+- No fixture IDs, filenames, or exact test-document statements are hard-coded in
+  production logic.
+
+Known limitations:
+- Deterministic aliases and clause matching are not full multilingual
+  entailment.
+- A cross-language transcript can preserve provenance internally, but it cannot
+  become an automatically verified citation until a trusted adjudicator is
+  enabled.
 
 ### 2026-07-23 - Generalized MVP P0 Quality Completion
 

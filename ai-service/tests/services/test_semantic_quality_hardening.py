@@ -19,6 +19,9 @@ from app.schemas.items import (
 )
 from app.services.quality_scoring import compute_quality_scores
 from app.services.semantic_quality import (
+    access_control_entails,
+    best_evidence_clause,
+    clause_coverage,
     infer_requirement_category,
     infer_requirement_priority,
     normalize_story_points,
@@ -281,6 +284,74 @@ def test_polarity_omission_is_not_contradiction():
     )
 
 
+def test_exact_negative_source_sentence_is_entailed_before_clause_comparison():
+    from app.services.semantic_quality import evaluate_polarity
+
+    requirement = (
+        "The reporting view shall summarize response-time compliance by team, "
+        "priority, and calendar month without exposing customer credentials."
+    )
+    evidence = (
+        "The reporting view shall summarize response-time compliance by team,\n"
+        "priority, and calendar month without exposing customer credentials."
+    )
+
+    assert evaluate_polarity(requirement, [evidence]) == "ENTAILED"
+
+
+def test_composite_evidence_uses_shortest_exact_supporting_sentence():
+    requirement = (
+        "Analysts shall attach sanitized diagnostic files to a case; attachments "
+        "shall be virus-scanned before they become available to other users."
+    )
+    source = (
+        "The reporting view shall summarize compliance. "
+        "Analysts shall attach sanitized diagnostic files to a case; attachments "
+        "shall be virus-scanned before they become available to other users. "
+        "Weekend travel notes discuss museums, trains, and cafes."
+    )
+
+    score, quote = best_evidence_clause(requirement, source)
+
+    assert score == 1.0
+    assert quote.startswith("Analysts shall attach")
+    assert "virus-scanned" in quote
+    assert "reporting view" not in quote.lower()
+    assert "travel notes" not in quote.lower()
+    assert len(quote) < 250
+
+
+@pytest.mark.asyncio
+async def test_grounding_accepts_exact_requirement_with_without_clause():
+    requirement = (
+        "The reporting view shall summarize response-time compliance by team, "
+        "priority, and calendar month without exposing customer credentials."
+    )
+    source = requirement + " Review note: validates long-document chunking."
+    req = _classified(
+        requirement,
+        [EvidenceSpan(chunk_id="reporting", quote=source, document_id="ops")],
+    )
+
+    result = await evidence_grounding_node({
+        "classified_requirements": [req],
+        "chunks": [_chunk("reporting", source, "ops")],
+        "source_documents": [{"source_id": "ops", "language": "en"}],
+        "quality_issues": [],
+    })
+
+    evidence = result["classified_requirements"][0].evidence
+    assert len(evidence) == 1
+    assert evidence[0].quote == requirement
+    assert not any(
+        issue.rule_violated in {
+            "evidence_semantic_mismatch",
+            "missing_verified_evidence",
+        }
+        for issue in result["quality_issues"]
+    )
+
+
 def test_behavior_synonyms_do_not_create_false_unsupported_facts():
     sources = [
         "The notification service shall alert account owners when an export is downloaded.",
@@ -400,8 +471,12 @@ async def test_evidence_grounding_decision_flow_partial_support():
         "language": "en"
     }
     result = await evidence_grounding_node(state)
-    assert len(result["classified_requirements"][0].evidence) == 1
+    assert len(result["classified_requirements"][0].evidence) == 0
     assert result["classified_requirements"][0].needs_review is True
+    assert any(
+        issue.rule_violated == "evidence_semantic_mismatch"
+        for issue in result["quality_issues"]
+    )
 
 
 @pytest.mark.asyncio
@@ -419,7 +494,7 @@ async def test_evidence_grounding_decision_flow_different_languages():
         "language": "en"
     }
     result = await evidence_grounding_node(state)
-    assert len(result["classified_requirements"][0].evidence) == 1
+    assert len(result["classified_requirements"][0].evidence) == 0
     assert result["classified_requirements"][0].needs_review is True
 
 
@@ -493,3 +568,166 @@ async def test_low_confidence_audio_does_not_bypass_semantic_rejection():
     )
 
     assert result["classified_requirements"][0].evidence == []
+
+
+@pytest.mark.asyncio
+async def test_grounding_uses_best_supporting_clause_from_declared_chunk():
+    source = (
+        "The queue displays pending support cases. "
+        "Each status transition must preserve the prior value, the acting user, "
+        "the timestamp, and a human-readable rationale in the case history. "
+        "Weekend travel notes are out of scope."
+    )
+    requirement = (
+        "Each status transition shall retain the prior value, acting user, "
+        "timestamp, and human-readable rationale in case history."
+    )
+    req = _classified(
+        requirement,
+        [EvidenceSpan(chunk_id="case-page", quote=source, document_id="ops-doc")],
+    )
+
+    result = await evidence_grounding_node({
+        "classified_requirements": [req],
+        "chunks": [_chunk("case-page", source, "ops-doc")],
+        "source_documents": [{"source_id": "ops-doc", "language": "en"}],
+        "quality_issues": [],
+    })
+
+    evidence = result["classified_requirements"][0].evidence
+    assert len(evidence) == 1
+    assert evidence[0].support_score >= 0.60
+    assert evidence[0].quote.startswith("Each status transition")
+    assert "Weekend travel" not in evidence[0].quote
+
+
+def test_exclusive_permission_entails_denial_for_other_roles():
+    sources = [
+        "The application shall allow only administrators to retrieve a retained report."
+    ]
+    criterion = (
+        "Given a retained report, when a non-administrator retrieves it, "
+        "then access is denied."
+    )
+
+    assert access_control_entails(criterion, sources)
+    assert "deny" not in unsupported_fact_terms(criterion, sources)
+
+
+def test_gwt_context_is_used_for_acceptance_criteria_coverage():
+    req = _classified(
+        "The audit search screen shall allow filtering by actor, action, "
+        "target project, and a caller-selected date range."
+    )
+    criteria = [
+        (
+            "Given the audit search screen, when a user filters by actor, action, "
+            "target project, and a selected date range, then matching audit events "
+            "are displayed."
+        )
+    ]
+
+    assert clause_coverage([req], criteria) == 1.0
+
+
+@pytest.mark.asyncio
+async def test_valid_paraphrased_story_is_not_reported_as_wrong_mapping(base_state):
+    source = (
+        "The workspace shall require multi-factor authentication for administrators "
+        "before they can change organization settings or billing contacts."
+    )
+    requirement = _classified(
+        source,
+        [EvidenceSpan(chunk_id="mfa", quote=source, support_score=1.0)],
+    )
+    story = _story(
+        "As an administrator, I want to secure settings and billing changes via MFA, "
+        "so that unauthorized changes are prevented.",
+        [
+            "Given an administrator, when organization settings are changed, then multi-factor authentication is required.",
+            "Given an administrator, when billing contacts are changed, then MFA is required.",
+        ],
+    )
+    state = base_state.copy()
+    state.update({
+        "classified_requirements": [requirement],
+        "user_stories": [story],
+        "requirement_coverages": [],
+        "quality_issues": [],
+    })
+
+    result = await quality_gate_node(state)
+
+    assert not any(
+        issue.rule_violated == "incorrect_story_requirement_mapping"
+        for issue in result["quality_issues"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_exclusive_access_negative_ac_is_supported_and_covered(base_state):
+    source = (
+        "The application shall allow only administrators to retrieve a retained report."
+    )
+    requirement = _classified(
+        source,
+        [EvidenceSpan(chunk_id="access", quote=source, support_score=1.0)],
+    )
+    story = _story(
+        "As an administrator, I want to retrieve retained reports, so that access "
+        "is limited to administrators.",
+        [
+            "Given a retained report, when an administrator retrieves it, then retrieval succeeds.",
+            "Given a retained report, when a non-administrator retrieves it, then access is denied.",
+        ],
+    )
+    state = base_state.copy()
+    state.update({
+        "classified_requirements": [requirement],
+        "user_stories": [story],
+        "requirement_coverages": [],
+        "quality_issues": [],
+    })
+
+    result = await quality_gate_node(state)
+    story_rules = {
+        issue.rule_violated
+        for issue in result["quality_issues"]
+        if issue.item_type == "story"
+    }
+
+    assert "acceptance_criterion_unsupported_fact" not in story_rules
+    assert "acceptance_criteria_missing_source_clause" not in story_rules
+
+
+@pytest.mark.asyncio
+async def test_low_alignment_alone_creates_review_not_high_mapping_issue(base_state):
+    source = "Operators shall reconcile submitted settlement records."
+    requirement = _classified(
+        source,
+        [EvidenceSpan(chunk_id="settlement", quote=source, support_score=1.0)],
+    )
+    story = _story(
+        "As a specialist, I want a workspace overview, so that daily work is visible.",
+        [
+            "Given the workspace, when it opens, then current information is visible.",
+            "Given daily work, when it changes, then the overview remains available.",
+        ],
+    )
+    state = base_state.copy()
+    state.update({
+        "classified_requirements": [requirement],
+        "user_stories": [story],
+        "requirement_coverages": [],
+        "quality_issues": [],
+    })
+
+    result = await quality_gate_node(state)
+    mapping = [
+        issue
+        for issue in result["quality_issues"]
+        if issue.rule_violated == "incorrect_story_requirement_mapping"
+    ]
+
+    assert len(mapping) == 1
+    assert mapping[0].severity == "medium"

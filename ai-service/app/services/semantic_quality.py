@@ -15,6 +15,9 @@ from typing import Iterable, Sequence
 from app.rag.scoring import tokenize
 
 
+MIN_STORY_ALIGNMENT = 0.40
+
+
 _GENERIC_TERMS = {
     "system", "service", "application", "portal", "screen", "user", "users",
     "shall", "must", "should", "want", "wants", "allow", "allows", "able",
@@ -54,11 +57,23 @@ _ASSERTIVE_FACT_TERMS = {
 _REVIEW_FACT_TERMS = {"fail", "failure", "notify", "record", "warning"}
 
 _FACT_ALIASES = {
+    "admin": "administrator",
+    "administrative": "administrator",
     "alert": "notify",
     "notification": "notify",
     "notify": "notify",
     "captur": "record",
     "capture": "record",
+    "invitation": "invite",
+    "inviting": "invite",
+    "invited": "invite",
+    "mfa": "authentication",
+    "preserv": "retain",
+    "preserve": "retain",
+    "recover": "reset",
+    "retention": "retain",
+    "retrieval": "retrieve",
+    "retriev": "retrieve",
     "log": "record",
     "record": "record",
 }
@@ -116,11 +131,182 @@ def _canonical_fact_token(token: str) -> str:
 
 def fact_tokens(text: str) -> set[str]:
     """Return normalized proposition tokens without Given/When/Then scaffolding."""
-    return {
+    tokens = {
         _canonical_fact_token(token)
         for token in _FACT_TOKEN_RE.findall((text or "").lower())
         if token not in _FACT_SCAFFOLDING and len(token) > 1
     }
+    lowered = (text or "").lower()
+    if re.search(r"\bmulti[-\s]+factor\s+authentication\b", lowered):
+        tokens.add("authentication")
+    return tokens
+
+
+def proposition_support(source: str, candidate: str) -> float:
+    """Return deterministic proposition support after fact normalization.
+
+    This complements ``lexical_support`` for safe paraphrases such as
+    ``MFA``/``multi-factor authentication`` and ``invite``/``invitation``.
+    Recall remains authoritative because a short source clause may be expressed
+    inside a longer story or acceptance criterion.
+    """
+    source_tokens = fact_tokens(source)
+    candidate_tokens = fact_tokens(candidate)
+    if not source_tokens or not candidate_tokens:
+        return lexical_support(source, candidate)
+
+    source_numbers = normalized_numbers(source)
+    candidate_numbers = normalized_numbers(candidate)
+    if source_numbers and candidate_numbers and not candidate_numbers.issubset(source_numbers):
+        return 0.0
+
+    shared = source_tokens & candidate_tokens
+    recall = len(shared) / len(source_tokens)
+    precision = len(shared) / len(candidate_tokens)
+    normalized_score = (0.80 * recall) + (0.20 * precision)
+    return round(max(lexical_support(source, candidate), normalized_score), 4)
+
+
+def evidence_clause_candidates(text: str) -> list[str]:
+    """Return exact, minimal sentence/window candidates from source text."""
+    source = text or ""
+    candidates = [source.strip()]
+
+    sentence_spans = [
+        (match.start(), match.end(), match.group(0).strip())
+        for match in re.finditer(
+            r"[^.!?]+(?:[.!?]+(?=\s|$)|$)",
+            source,
+            flags=re.DOTALL,
+        )
+        if match.group(0).strip()
+    ]
+    candidates.extend(sentence for _, _, sentence in sentence_spans)
+
+    # Composite requirements may span adjacent source sentences. Preserve the
+    # exact substring, including its original whitespace, for public quoting.
+    for index in range(len(sentence_spans)):
+        for window_size in (2, 3):
+            end_index = index + window_size - 1
+            if end_index >= len(sentence_spans):
+                continue
+            start = sentence_spans[index][0]
+            end = sentence_spans[end_index][1]
+            window = source[start:end].strip()
+            if window and len(window) <= 1200:
+                candidates.append(window)
+
+    # Atomic requirements may need only one side of a semicolon, while the
+    # complete sentence above remains available for composite requirements.
+    for _, _, sentence in sentence_spans:
+        candidates.extend(
+            part.strip()
+            for part in re.split(r"\s*;\s*", sentence)
+            if part.strip()
+        )
+
+    return list(dict.fromkeys(candidate for candidate in candidates if candidate))
+
+
+def best_evidence_clause(requirement: str, source_text: str) -> tuple[float, str]:
+    """Select the exact source clause that best supports a requirement."""
+    candidates = evidence_clause_candidates(source_text)
+    if not candidates:
+        return 0.0, ""
+    scored = [
+        (proposition_support(requirement, candidate), candidate)
+        for candidate in candidates
+    ]
+    # Prefer the shortest exact source span when support is equal. This prevents
+    # full chunks containing unrelated material from becoming public quotes.
+    return max(scored, key=lambda item: (item[0], -len(item[1])))
+
+
+def _normalized_proposition_text(text: str) -> str:
+    return re.sub(r"\W+", " ", text or "", flags=re.UNICODE).strip().lower()
+
+
+def _exact_or_contained_entailment(text: str, sources: Iterable[str]) -> bool:
+    """Recognize exact source facts before clause-level polarity comparison."""
+    candidate = _normalized_proposition_text(text)
+    if not candidate:
+        return False
+    candidate_negative = bool(_NEGATION_RE.search(text or ""))
+
+    for source in sources:
+        normalized_source = _normalized_proposition_text(source)
+        if not normalized_source:
+            continue
+        source_negative = bool(_NEGATION_RE.search(source or ""))
+        if candidate_negative != source_negative:
+            continue
+        if candidate == normalized_source:
+            return True
+        if (
+            (candidate in normalized_source or normalized_source in candidate)
+            and proposition_support(text, source) >= 0.90
+        ):
+            return True
+    return False
+
+
+def access_control_entails(text: str, sources: Iterable[str]) -> bool:
+    """Recognize the negative consequence of a source-exclusive permission.
+
+    ``Only ROLE may ACTION`` entails that a non-ROLE actor is denied that same
+    action. The rule is role/action based and is not tied to administrators.
+    """
+    candidate = re.sub(r"\s+", " ", text or "").strip().lower()
+    denied = bool(
+        re.search(
+            r"\b(?:den(?:y|ied)|reject(?:ed)?|block(?:ed)?|prevent(?:ed)?|"
+            r"cannot|can't|not\s+allowed|not\s+permitted)\b",
+            candidate,
+        )
+    )
+    if not denied:
+        return False
+
+    patterns = (
+        re.compile(
+            r"\bonly\s+(?P<role>[a-z][a-z0-9 _-]{1,60}?)\s+"
+            r"(?:may|can|shall|must|are\s+allowed\s+to|are\s+permitted\s+to)\s+"
+            r"(?P<action>[^.;]+)",
+            re.I,
+        ),
+        re.compile(
+            r"\b(?:allow|allows|permit|permits)\s+only\s+"
+            r"(?P<role>[a-z][a-z0-9 _-]{1,60}?)\s+to\s+(?P<action>[^.;]+)",
+            re.I,
+        ),
+    )
+
+    candidate_tokens = fact_tokens(candidate)
+    for source in sources:
+        normalized_source = re.sub(r"\s+", " ", source or "").strip()
+        for pattern in patterns:
+            match = pattern.search(normalized_source)
+            if not match:
+                continue
+            role_tokens = fact_tokens(match.group("role"))
+            action_tokens = fact_tokens(match.group("action"))
+            if not role_tokens or not action_tokens:
+                continue
+            role_pattern = "|".join(
+                re.escape(role) + "s?" for role in sorted(role_tokens)
+            )
+            excluded_role = bool(
+                re.search(rf"\bnon[-\s]?(?:{role_pattern})\b", candidate)
+                or re.search(
+                    rf"\bnot\s+(?:an?\s+|the\s+)?(?:{role_pattern})\b",
+                    candidate,
+                )
+                or re.search(r"\b(?:other|unauthorized)\s+(?:user|users|actor|actors|role|roles)\b", candidate)
+            )
+            action_overlap = len(action_tokens & candidate_tokens) / len(action_tokens)
+            if excluded_role and action_overlap >= 0.40:
+                return True
+    return False
 
 
 def source_fact_texts(requirements: Sequence) -> list[str]:
@@ -144,13 +330,17 @@ def source_fact_texts(requirements: Sequence) -> list[str]:
 
 def unsupported_fact_terms(text: str, sources: Iterable[str]) -> set[str]:
     """Return high-risk behavioral assertions absent from linked source facts."""
+    sources = list(sources)
     source_tokens: set[str] = set()
     for source in sources:
         source_tokens.update(fact_tokens(source))
     candidate_tokens = fact_tokens(text)
     unsupported = candidate_tokens - source_tokens
     assertive_stems = {_canonical_fact_token(term) for term in _ASSERTIVE_FACT_TERMS}
-    return unsupported & assertive_stems
+    result = unsupported & assertive_stems
+    if "deny" in result and access_control_entails(text, sources):
+        result.remove("deny")
+    return result
 
 
 def unsupported_review_terms(text: str, sources: Iterable[str]) -> set[str]:
@@ -190,28 +380,29 @@ def unsupported_review_terms(text: str, sources: Iterable[str]) -> set[str]:
 
 
 def _claim_clauses(text: str) -> list[str]:
-    """Return candidate claim clauses without Given/When scaffolding."""
+    """Return candidate claims while retaining Given/When coverage context."""
     claims: list[str] = []
     for part in re.split(r"\s*;\s*|(?<=[.!?])\s+", text or ""):
         cleaned = part.strip()
         if not cleaned:
             continue
+        claims.append(cleaned)
         then_parts = re.split(r"\bthen\b", cleaned, maxsplit=1, flags=re.IGNORECASE)
         if len(then_parts) == 2 and then_parts[1].strip():
-            cleaned = then_parts[1].strip()
+            claims.append(then_parts[1].strip())
         claims.extend(split_requirement_clauses(cleaned))
-    return claims
+    return list(dict.fromkeys(claims))
 
 
 def _clause_relation_score(source: str, candidate: str) -> float:
     source_tokens = fact_tokens(source) - {"not", "never", "no", "without"}
     candidate_tokens = fact_tokens(candidate) - {"not", "never", "no", "without"}
     if not source_tokens or not candidate_tokens:
-        return lexical_support(source, candidate)
+        return proposition_support(source, candidate)
     containment = len(source_tokens & candidate_tokens) / min(
         len(source_tokens), len(candidate_tokens)
     )
-    return max(lexical_support(source, candidate), containment)
+    return max(proposition_support(source, candidate), containment)
 
 
 def evaluate_polarity(text: str, sources: Iterable[str]) -> str:
@@ -222,6 +413,12 @@ def evaluate_polarity(text: str, sources: Iterable[str]) -> str:
     - "CONTRADICTED": Polarity contradicts the closest related source clause.
     - "NOT_COVERED": Omission or no related source clause found.
     """
+    sources = list(sources)
+    if _exact_or_contained_entailment(text, sources):
+        return "ENTAILED"
+    if access_control_entails(text, sources):
+        return "ENTAILED"
+
     source_clauses = []
     for source in sources:
         if source:
@@ -315,11 +512,20 @@ def clause_coverage(requirements: Sequence, criteria: Sequence[str]) -> float:
     if not clauses:
         return 1.0
 
-    covered = sum(
-        1
-        for clause in clauses
-        if any(evaluate_polarity(criterion, [clause]) == "ENTAILED" for criterion in criteria)
-    )
+    covered = 0
+    for clause in clauses:
+        clause_is_covered = False
+        for criterion in criteria:
+            if access_control_entails(criterion, [clause]):
+                clause_is_covered = True
+                break
+            if (
+                proposition_support(clause, criterion) >= 0.25
+                and evaluate_polarity(criterion, [clause]) == "ENTAILED"
+            ):
+                clause_is_covered = True
+                break
+        covered += int(clause_is_covered)
 
     return covered / len(clauses)
 
@@ -416,10 +622,44 @@ def lexical_support(requirement: str, evidence: str) -> float:
 
 
 def story_alignment(requirement_texts: Sequence[str], story_text: str) -> float:
-    """Return the best lexical alignment between a story and its linked requirements."""
+    """Return normalized clause alignment for a story and linked requirements."""
     if not requirement_texts:
         return 0.0
-    return max((lexical_support(text, story_text) for text in requirement_texts), default=0.0)
+    clauses = [
+        clause
+        for text in requirement_texts
+        for clause in (split_requirement_clauses(text) or [text])
+    ]
+    return max(
+        (proposition_support(clause, story_text) for clause in clauses),
+        default=0.0,
+    )
+
+
+def clear_story_mapping_mismatch(
+    requirement_texts: Sequence[str],
+    story_text: str,
+    alignment: float | None = None,
+) -> bool:
+    """Return True only when evidence beyond a low lexical score shows mismatch."""
+    if not requirement_texts:
+        return False
+    score = (
+        story_alignment(requirement_texts, story_text)
+        if alignment is None
+        else alignment
+    )
+    if score >= MIN_STORY_ALIGNMENT:
+        return False
+    return bool(
+        unsupported_numeric_claims(story_text, requirement_texts)
+        or has_polarity_conflict(story_text, requirement_texts)
+        or unsupported_fact_terms(story_text, requirement_texts)
+        or (
+            score < MIN_STORY_ALIGNMENT
+            and unsupported_review_terms(story_text, requirement_texts)
+        )
+    )
 
 
 def is_substantive(text: str) -> bool:
