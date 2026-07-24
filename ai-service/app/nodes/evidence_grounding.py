@@ -4,7 +4,7 @@ from app.progress import update_progress
 from app.schemas.items import ClassifiedRequirement, QualityIssue, SourceChunk
 from app.schemas.pipeline_state import PipelineState
 from app.services.semantic_quality import (
-    lexical_support,
+    best_evidence_clause,
     unsupported_numeric_claims,
     unsupported_fact_terms,
     has_polarity_conflict,
@@ -30,6 +30,48 @@ def _document_language(source_docs: list[dict], document_id: str | None) -> str 
     return None
 
 
+def _warning_code(warning) -> str | None:
+    if isinstance(warning, dict):
+        return warning.get("code")
+    return getattr(warning, "code", None)
+
+
+def _reconcile_extract_evidence_warning(
+    warnings: list,
+    classified: List[ClassifiedRequirement],
+    fallback_requirement_ids: set[int],
+) -> list:
+    """Remove or update extraction warnings after authoritative grounding."""
+    had_extract_warning = any(
+        _warning_code(warning) == "EXTRACT_WEAK_EVIDENCE"
+        for warning in warnings
+    )
+    if not had_extract_warning:
+        return warnings
+
+    reconciled = [
+        warning
+        for warning in warnings
+        if _warning_code(warning) != "EXTRACT_WEAK_EVIDENCE"
+    ]
+    unresolved = sum(
+        1
+        for req in classified
+        if req.id in fallback_requirement_ids
+        and not (getattr(req, "evidence", None) or [])
+    )
+    if unresolved:
+        reconciled.append({
+            "node_name": "evidence_grounding",
+            "code": "EXTRACT_WEAK_EVIDENCE",
+            "message": (
+                f"{unresolved} fallback-evidence requirement(s) still lack "
+                "verified evidence after grounding."
+            ),
+        })
+    return reconciled
+
+
 async def evidence_grounding_node(state: PipelineState) -> dict:
     """Keep only evidence grounded to its declared chunk, document, and claim.
 
@@ -44,7 +86,16 @@ async def evidence_grounding_node(state: PipelineState) -> dict:
     chunks_by_id = {chunk.chunk_id: chunk for chunk in chunks}
     source_docs = state.get("source_documents", []) or []
     existing_q = state.get("quality_issues", []) or []
+    existing_warnings = state.get("warnings", []) or []
     new_issues: List[QualityIssue] = []
+    fallback_requirement_ids = {
+        req.id
+        for req in classified
+        if any(
+            getattr(evidence, "origin", None) == "fallback"
+            for evidence in (getattr(req, "evidence", None) or [])
+        )
+    }
 
     for req in classified:
         evidence = list(getattr(req, "evidence", []) or [])
@@ -132,7 +183,8 @@ async def evidence_grounding_node(state: PipelineState) -> dict:
                 and float(asr_confidence) < MIN_ASR_CONFIDENCE
             )
 
-            support = lexical_support(req.text, quote)
+            support_text = chunk.text if chunk is not None else quote
+            support, supporting_clause = best_evidence_clause(req.text, support_text)
             if ev.origin == "fallback":
                 support = min(support, 0.70)
             ev.lexical_score = support
@@ -140,18 +192,35 @@ async def evidence_grounding_node(state: PipelineState) -> dict:
             ev.support_score = support
 
             is_accepted = False
-            is_partial = False
+            is_reviewable_verified = False
 
             if diff_lang:
-                is_partial = True
+                _review(req, "EVIDENCE_CROSS_LANGUAGE_NOT_ADJUDICATED")
+                new_issues.append(QualityIssue(
+                    item_id=req.id,
+                    item_type="requirement",
+                    severity="medium",
+                    rule_violated="evidence_semantic_mismatch",
+                    details=(
+                        f"Evidence in chunk '{ev.chunk_id}' is cross-language "
+                        "and was not promoted to a public citation."
+                    ),
+                ))
+                continue
             else:
                 if support >= 0.60:
-                    numeric_mismatch = bool(unsupported_numeric_claims(req.text, [quote]))
-                    unsupported_behavior = bool(unsupported_fact_terms(req.text, [quote]))
-                    polarity_conflict = has_polarity_conflict(req.text, [quote])
+                    numeric_mismatch = bool(
+                        unsupported_numeric_claims(req.text, [supporting_clause])
+                    )
+                    unsupported_behavior = bool(
+                        unsupported_fact_terms(req.text, [supporting_clause])
+                    )
+                    polarity_conflict = has_polarity_conflict(
+                        req.text, [supporting_clause]
+                    )
                     if not (numeric_mismatch or unsupported_behavior or polarity_conflict):
-                        is_partial = low_asr_confidence
-                        is_accepted = not low_asr_confidence
+                        is_accepted = True
+                        is_reviewable_verified = low_asr_confidence
                     else:
                         _review(req, "EVIDENCE_REJECTED_VERIFICATION_FAIL")
                         new_issues.append(QualityIssue(
@@ -173,34 +242,33 @@ async def evidence_grounding_node(state: PipelineState) -> dict:
                     ))
                     continue
                 else:
-                    is_partial = True
+                    _review(req, "EVIDENCE_PARTIAL_SUPPORT_NOT_CITED")
+                    new_issues.append(QualityIssue(
+                        item_id=req.id,
+                        item_type="requirement",
+                        severity="medium",
+                        rule_violated="evidence_semantic_mismatch",
+                        details=(
+                            f"Evidence in chunk '{ev.chunk_id}' has ambiguous "
+                            "support and was not promoted to a public citation."
+                        ),
+                    ))
+                    continue
 
-            if is_accepted or is_partial:
+            if is_accepted:
+                ev.quote = supporting_clause
                 verified.append(ev)
-                if is_partial:
-                    marker = (
-                        "EVIDENCE_LOW_TRANSCRIPTION_CONFIDENCE"
-                        if low_asr_confidence
-                        else "EVIDENCE_PARTIAL_SUPPORT"
-                    )
+                if is_reviewable_verified:
+                    marker = "EVIDENCE_LOW_TRANSCRIPTION_CONFIDENCE"
                     _review(req, marker)
                     new_issues.append(QualityIssue(
                         item_id=req.id,
                         item_type="requirement",
                         severity="medium",
-                        rule_violated=(
-                            "evidence_low_transcription_confidence"
-                            if low_asr_confidence
-                            else "evidence_semantic_mismatch"
-                        ),
+                        rule_violated="evidence_low_transcription_confidence",
                         details=(
                             f"Evidence in chunk '{ev.chunk_id}' has low ASR confidence "
                             f"({float(asr_confidence):.2f})."
-                            if low_asr_confidence
-                            else (
-                                f"Evidence in chunk '{ev.chunk_id}' has different "
-                                "languages or ambiguous support."
-                            )
                         ),
                     ))
 
@@ -219,7 +287,14 @@ async def evidence_grounding_node(state: PipelineState) -> dict:
                 details="All candidate evidence was rejected during grounding.",
             ))
 
+    reconciled_warnings = _reconcile_extract_evidence_warning(
+        existing_warnings,
+        classified,
+        fallback_requirement_ids,
+    )
+
     return {
         "classified_requirements": classified,
         "quality_issues": existing_q + new_issues,
+        "warnings": reconciled_warnings,
     }

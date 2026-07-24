@@ -136,3 +136,26 @@ async def test_no_index_is_graceful():
 async def test_empty_requirements_is_noop():
     out = await retrieve_evidence_node({"job_id": "ret-empty", "extracted_requirements": []})
     assert out == {}
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_retrieval_candidate_is_not_promoted_to_evidence():
+    job_id = "ret-ambiguous"
+    chunks = [
+        _chunk(
+            "monthly-report",
+            "Administrators shall export a monthly operations report.",
+        )
+    ]
+    req = _req(
+        1,
+        "The application shall allow only administrators to retrieve a retained report.",
+    )
+
+    out = await retrieve_evidence_node(_state(job_id, [req], chunks))
+    result = out["extracted_requirements"][0]
+
+    assert result.evidence == []
+    assert result.needs_review is True
+    assert "ambiguous retrieval not promoted" in (result.review_reason or "")
+    clear_source_index(job_id)

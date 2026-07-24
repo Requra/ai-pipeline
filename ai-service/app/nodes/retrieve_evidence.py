@@ -30,7 +30,7 @@ from app.rag.source_index import get_source_index
 from app.schemas.items import EvidenceSpan, ExtractedRequirement, PipelineWarning, SourceChunk
 from app.schemas.pipeline_state import PipelineState
 from app.services.semantic_quality import (
-    lexical_support,
+    best_evidence_clause,
     unsupported_numeric_claims,
     unsupported_fact_terms,
     has_polarity_conflict,
@@ -103,7 +103,9 @@ def _quote_support_score(
             and float(asr_confidence) < MIN_ASR_CONFIDENCE
         )
 
-        score = lexical_support(req.text, quote)
+        score, supporting_clause = best_evidence_clause(req.text, chunk.text)
+        if supporting_clause:
+            evidence.quote = supporting_clause
         if evidence.origin == "fallback":
             # A source snippet can still strongly support the claim even when
             # verbatim alignment failed because punctuation/layout changed.
@@ -116,9 +118,15 @@ def _quote_support_score(
             is_partial = True
         else:
             if score >= 0.60:
-                numeric_mismatch = bool(unsupported_numeric_claims(req.text, [quote]))
-                unsupported_behavior = bool(unsupported_fact_terms(req.text, [quote]))
-                polarity_conflict = has_polarity_conflict(req.text, [quote])
+                numeric_mismatch = bool(
+                    unsupported_numeric_claims(req.text, [supporting_clause])
+                )
+                unsupported_behavior = bool(
+                    unsupported_fact_terms(req.text, [supporting_clause])
+                )
+                polarity_conflict = has_polarity_conflict(
+                    req.text, [supporting_clause]
+                )
                 if numeric_mismatch or unsupported_behavior or polarity_conflict:
                     evidence.support_score = 0.0
                     continue
@@ -247,9 +255,12 @@ async def retrieve_evidence_node(state: PipelineState) -> dict:
             if not snippet:
                 continue
 
-            support = lexical_support(req.text, snippet)
             orig_chunk = chunks_by_id.get(hit.chunk_id)
             orig_doc_id = getattr(orig_chunk, "document_id", None) if orig_chunk else None
+            support, supporting_clause = best_evidence_clause(
+                req.text,
+                getattr(orig_chunk, "text", "") or snippet,
+            )
 
             evidence_lang = (
                 getattr(orig_chunk, "language", None)
@@ -273,8 +284,6 @@ async def retrieve_evidence_node(state: PipelineState) -> dict:
             )
 
             is_accepted = False
-            is_partial = False
-
             if diff_lang:
                 # A cross-language retrieval hit cannot be adjudicated by the
                 # deterministic lexical guard.  Do not promote it into a
@@ -287,23 +296,32 @@ async def retrieve_evidence_node(state: PipelineState) -> dict:
                 continue
             else:
                 if support >= 0.60:
-                    numeric_mismatch = bool(unsupported_numeric_claims(req.text, [snippet]))
-                    unsupported_behavior = bool(unsupported_fact_terms(req.text, [snippet]))
-                    polarity_conflict = has_polarity_conflict(req.text, [snippet])
+                    numeric_mismatch = bool(
+                        unsupported_numeric_claims(req.text, [supporting_clause])
+                    )
+                    unsupported_behavior = bool(
+                        unsupported_fact_terms(req.text, [supporting_clause])
+                    )
+                    polarity_conflict = has_polarity_conflict(
+                        req.text, [supporting_clause]
+                    )
                     if not (numeric_mismatch or unsupported_behavior or polarity_conflict):
-                        is_partial = low_asr_confidence
-                        is_accepted = not low_asr_confidence
+                        is_accepted = True
                     else:
                         continue
                 elif support < 0.25:
                     continue
                 else:
-                    is_partial = True
+                    req.needs_review = True
+                    reason = "[WEAK_EVIDENCE_SUPPORT: ambiguous retrieval not promoted]"
+                    if reason not in (req.review_reason or ""):
+                        req.review_reason = ((req.review_reason or "") + " " + reason).strip()
+                    continue
 
-            if is_accepted or is_partial:
+            if is_accepted:
                 req.evidence.append(EvidenceSpan(
                     chunk_id=hit.chunk_id,
-                    quote=snippet,
+                    quote=supporting_clause,
                     page_number=hit.page_number,
                     speaker=hit.speaker,
                     timestamp=hit.timestamp,
@@ -317,14 +335,9 @@ async def retrieve_evidence_node(state: PipelineState) -> dict:
                 qualified_hits += 1
                 req.evidence_match_score = max(req.evidence_match_score or 0.0, support)
 
-                if is_partial:
+                if low_asr_confidence:
                     req.needs_review = True
-                    if low_asr_confidence:
-                        reason = "[WEAK_EVIDENCE_SUPPORT: low ASR confidence]"
-                    elif diff_lang:
-                        reason = "[WEAK_EVIDENCE_SUPPORT: different languages]"
-                    else:
-                        reason = "[WEAK_EVIDENCE_SUPPORT: ambiguous/partial support]"
+                    reason = "[WEAK_EVIDENCE_SUPPORT: low ASR confidence]"
                     if reason not in (req.review_reason or ""):
                         req.review_reason = ((req.review_reason or "") + " " + reason).strip()
 
