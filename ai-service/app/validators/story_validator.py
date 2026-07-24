@@ -13,8 +13,10 @@ from typing import Dict, List, Sequence
 
 from app.services.semantic_quality import (
     clause_coverage,
+    clear_story_mapping_mismatch,
     has_polarity_conflict,
     is_substantive,
+    MIN_STORY_ALIGNMENT,
     meaningful_tokens,
     source_fact_texts,
     story_alignment,
@@ -84,9 +86,17 @@ def validate_story(story, reqs_by_id: Dict[int, object]) -> List[str]:
 
         linked = [reqs_by_id[req_id] for req_id in src_ids if req_id in reqs_by_id]
         req_texts = [getattr(req, "text", "") or "" for req in linked]
-        story_text = f"{title} {description}"
+        story_text = " ".join([
+            title,
+            description,
+            *[getattr(ac, "text", "") or "" for ac in acs],
+        ])
         if linked and any(is_substantive(text) for text in req_texts):
-            if story_alignment(req_texts, story_text) < 0.25:
+            alignment = story_alignment(req_texts, story_text)
+            if (
+                alignment < MIN_STORY_ALIGNMENT
+                and clear_story_mapping_mismatch(req_texts, story_text, alignment)
+            ):
                 issues.append("incorrect_story_requirement_mapping")
 
         facts = source_fact_texts(linked)

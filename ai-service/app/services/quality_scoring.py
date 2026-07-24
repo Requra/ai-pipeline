@@ -9,8 +9,9 @@ from app.services.semantic_quality import (
     clause_coverage,
     has_polarity_conflict,
     is_substantive,
-    lexical_support,
     meaningful_tokens,
+    MIN_STORY_ALIGNMENT,
+    proposition_support,
     source_fact_texts,
     story_alignment,
     unsupported_fact_terms,
@@ -79,10 +80,17 @@ def _story_traceable(story, requirements_by_id: dict) -> bool:
     req_texts = [(getattr(req, "text", "") or "") for req in linked]
     if not any(is_substantive(text) for text in req_texts):
         return True
-    story_text = f"{getattr(story, 'title', '')} {getattr(story, 'description', '')}"
+    story_text = " ".join([
+        getattr(story, "title", "") or "",
+        getattr(story, "description", "") or "",
+        *[
+            getattr(criterion, "text", "") or ""
+            for criterion in (getattr(story, "acceptance_criteria", []) or [])
+        ],
+    ])
     sources = source_fact_texts(linked)
     return (
-        story_alignment(req_texts, story_text) >= 0.25
+        story_alignment(req_texts, story_text) >= MIN_STORY_ALIGNMENT
         and not unsupported_fact_terms(story_text, sources)
         and not has_polarity_conflict(story_text, sources)
     )
@@ -162,7 +170,10 @@ def _criterion_supported(criterion, linked_requirements: Sequence) -> bool:
         return False
     if unsupported_fact_terms(text, sources) or has_polarity_conflict(text, sources):
         return False
-    return max((lexical_support(source, text) for source in substantive), default=0.0) >= 0.15
+    return max(
+        (proposition_support(source, text) for source in substantive),
+        default=0.0,
+    ) >= 0.15
 
 
 def _duplicate_requirement_count(requirements: Sequence) -> int:

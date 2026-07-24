@@ -11,11 +11,13 @@ from app.services.quality_scoring import compute_quality_scores
 from app.validators.story_validator import find_duplicate_story_ids, is_generic_ac
 from app.services.semantic_quality import (
     clause_coverage,
+    clear_story_mapping_mismatch,
     has_polarity_conflict,
     infer_requirement_priority,
     is_substantive,
-    lexical_support,
     meaningful_tokens,
+    MIN_STORY_ALIGNMENT,
+    proposition_support,
     source_fact_texts,
     story_alignment,
     unsupported_fact_terms,
@@ -389,18 +391,32 @@ async def quality_gate_node(state: PipelineState) -> dict:
         story_index = story_item_ids[id(s)]
         linked = [req_map[rid] for rid in (getattr(s, "source_requirement_ids", []) or []) if rid in req_map]
         req_texts = [(getattr(req, "text", "") or "") for req in linked]
-        story_text = f"{getattr(s, 'title', '')} {getattr(s, 'description', '')}"
+        criteria_text = " ".join(
+            getattr(criterion, "text", "") or ""
+            for criterion in (getattr(s, "acceptance_criteria", []) or [])
+        )
+        story_text = (
+            f"{getattr(s, 'title', '')} {getattr(s, 'description', '')} "
+            f"{criteria_text}"
+        )
         if linked and any(is_substantive(text) for text in req_texts):
             alignment = story_alignment(req_texts, story_text)
-            if alignment < 0.25:
+            if alignment < MIN_STORY_ALIGNMENT:
+                clear_mismatch = clear_story_mapping_mismatch(
+                    req_texts,
+                    story_text,
+                    alignment,
+                )
                 new_issues.append(QualityIssue(
                     item_id=story_index,
                     item_type="story",
-                    severity="high",
+                    severity="high" if clear_mismatch else "medium",
                     rule_violated="incorrect_story_requirement_mapping",
                     details=(
                         f"Story {s.id} does not semantically match its linked requirement(s) "
-                        f"{getattr(s, 'source_requirement_ids', [])} (alignment={alignment:.2f})."
+                        f"{getattr(s, 'source_requirement_ids', [])} "
+                        f"(alignment={alignment:.2f}, "
+                        f"decision={'clear mismatch' if clear_mismatch else 'review'})."
                     ),
                 ))
 
@@ -441,7 +457,7 @@ async def quality_gate_node(state: PipelineState) -> dict:
                 ))
                 continue
             if substantive_facts and max(
-                (lexical_support(fact, criterion_text) for fact in substantive_facts),
+                (proposition_support(fact, criterion_text) for fact in substantive_facts),
                 default=0.0,
             ) < 0.15:
                 new_issues.append(QualityIssue(

@@ -12,7 +12,8 @@ from app.services.semantic_quality import (
     fact_tokens,
     has_polarity_conflict,
     is_substantive,
-    lexical_support,
+    MIN_STORY_ALIGNMENT,
+    proposition_support,
     normalize_story_points,
     source_fact_texts,
     split_requirement_clauses,
@@ -201,12 +202,18 @@ def _criterion_supported(text: str, requirements) -> bool:
         return False
     if has_polarity_conflict(text, sources):
         return False
-    return max((lexical_support(source, text) for source in sources), default=0.0) >= 0.15
+    return max(
+        (proposition_support(source, text) for source in sources),
+        default=0.0,
+    ) >= 0.15
 
 
 def _mapping_supported(requirement, story_text: str) -> bool:
     req_text = getattr(requirement, "text", "") or ""
-    if not is_substantive(req_text) or story_alignment([req_text], story_text) >= 0.25:
+    if (
+        not is_substantive(req_text)
+        or story_alignment([req_text], story_text) >= MIN_STORY_ALIGNMENT
+    ):
         return True
     req_tokens = fact_tokens(req_text)
     story_tokens = fact_tokens(story_text)
@@ -215,7 +222,14 @@ def _mapping_supported(requirement, story_text: str) -> bool:
 
 def _sanitize_generated_story(story: UserStory, req_map: dict[int, Any]) -> UserStory:
     """Remove unsupported mappings/facts and constrain estimates before output."""
-    story_text = f"{story.title} {story.description}"
+    story_text = " ".join([
+        story.title,
+        story.description,
+        *[
+            getattr(criterion, "text", "") or ""
+            for criterion in (story.acceptance_criteria or [])
+        ],
+    ])
     valid_ids = []
     for req_id in dict.fromkeys(story.source_requirement_ids):
         req = req_map.get(req_id)
@@ -484,7 +498,14 @@ async def generate_node(state: PipelineState) -> dict:
                 req_ids.extend(s.source_requirement_ids)
             if s.source_requirement_id is not None:
                 req_ids.append(s.source_requirement_id)
-            story_text = f"{s.title} {s.description}"
+            story_text = " ".join([
+                s.title,
+                s.description,
+                *[
+                    getattr(criterion, "text", str(criterion)) or ""
+                    for criterion in (s.acceptance_criteria or [])
+                ],
+            ])
             for r_id in dict.fromkeys(req_ids):
                 req = req_map.get(r_id)
                 if req is None:
