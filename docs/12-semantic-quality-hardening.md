@@ -1,1139 +1,648 @@
-# Semantic Quality and Traceability Hardening
+# Response Quality, Semantic Grounding, and Traceability
 
-Status: Implemented  
-Last updated: 2026-07-22  
-Owners: AI Pipeline Team
+> **Audience:** AI engineers, backend engineers, QA engineers, and reviewers
+>
+> **Branch:** `feat/respone-enhancements`
+>
+> **Base branch:** `main`
+>
+> **Implementation status:** MVP implemented
+>
+> **Last verified:** 24 July 2026
+>
+> **Compatibility guarantee:** no API endpoint, request payload, or final response structure was changed
 
-## 1. Purpose
+## 1. How to use this document
 
-This is the living implementation guide for semantic-quality enhancements in the Requra AI pipeline. Add future quality, grounding, traceability, or hallucination-control work to this document so teammates can understand why each change exists, where it is implemented, how it is tested, and whether it affects the public contract.
+This is the current-state reference for the response-quality work on
+`feat/respone-enhancements`. It replaces the previous chronology-first guide.
 
-The first implementation addresses two production-readiness problems:
+Choose the shortest reading path that fits your task:
 
-1. Quality scores could report `1.0` even when requirements contained duplicate stories, unrelated citations, incorrect requirement-to-story mappings, or invented acceptance-criteria facts.
-2. Retrieved chunks were appended directly to evidence. A quote only needed to exist somewhere in the corpus to pass grounding, even when it belonged to another chunk or did not support the requirement.
+- **Five-minute revision:** read Sections 2, 3, 4, and 6.
+- **Code review:** read Sections 5 through 9.
+- **Release review:** use Section 10.
+- **Historical investigation:** use Appendix A.
+- **Finding implementation or tests:** use Appendix B.
 
-## 2. Compatibility constraints
+Historical changes appear only in the appendices. The main sections describe
+what the pipeline does now.
+
+## 2. Executive summary
+
+This branch hardens the quality of generated requirements, evidence references,
+user stories, acceptance criteria, classifications, estimates, summaries, and
+quality scores.
+
+The main outcomes are:
+
+1. Requirements are normalized and deduplicated before stories are generated.
+2. Retrieved chunks are candidates, not automatic citations.
+3. Evidence is published only after provenance, quote, semantic, numeric, and
+   polarity checks pass.
+4. Ambiguous evidence is reported for review and is not exposed in
+   `source_refs`.
+5. Story mappings and acceptance criteria are validated against the complete
+   linked requirement facts.
+6. Omission is separated from contradiction through three-state polarity.
+7. The quality score is component-owned and does not punish the same defect
+   twice.
+8. DOCX traceability is honest: `page` remains `null` when a rendered page is
+   unavailable, while internal paragraph and section metadata is preserved.
+9. Audio traceability preserves available language, speaker, timestamp, and ASR
+   confidence metadata.
+10. Long multi-document summaries use bounded hierarchical reduction instead
+    of silently discarding the middle of the input.
+11. Story points use the Fibonacci set, requirement priority and category are
+    normalized from source facts, and conflict warnings include actionable
+    resolution options.
+12. Resolved extraction warnings are removed after authoritative grounding.
+
+The branch uses deterministic semantic checks for the MVP. It does not require
+an NLI service or an additional LLM call for evidence adjudication.
+
+## 3. Compatibility guarantees
 
 The following integration surfaces remain unchanged:
 
-- API endpoint paths and methods.
-- Request payloads and multipart behavior.
-- Final `JobResult` structure.
-- `RequirementV1`, `UserStoryV1`, `SourceRefV1`, and `QualityReportV1` public fields.
-- Existing LangGraph node topology; no new graph nodes were added.
+- Existing API endpoints
+- Existing request payloads
+- Existing final response object structure
+- Existing `source_refs[].page` field and its nullable behavior
+- Existing asynchronous job flow
+- Existing pipeline nodes and graph topology
 
-The implementation adds internal evidence metadata. `format_node` consumes this metadata and maps it into existing public fields, especially `SourceRefV1.confidence_score`.
+The implementation adds internal metadata, validation, reconciliation, and
+normalization inside the existing flow. Consumers do not need a backend,
+frontend, or contract migration.
 
-## 3. Previous behavior
-
-The previous evidence flow was effectively:
-
-```mermaid
-flowchart LR
-    R["Retrieve top K chunks"] --> A["Append every hit as evidence"]
-    A --> G["Check quote exists in any chunk"]
-    G --> F["Publish source references"]
-    F --> Q["Evidence exists = groundedness 1.0"]
-```
-
-This produced several false-positive signals:
-
-- A high-ranked but unrelated chunk became a public citation.
-- A quote could declare one `chunk_id` but pass because it occurred in a different chunk.
-- A source reference inherited requirement extraction confidence rather than citation-support confidence.
-- A story counted as traceable when it contained any valid requirement ID, even if its content described another requirement.
-- Acceptance-criteria quality mostly checked for boilerplate phrases, not source support.
-- Medium and low quality issues did not reduce the aggregate quality score.
-- Duplicate detection required the same title and description, missing stories with different titles but identical descriptions.
-
-## 4. New behavior
-
-The hardened flow is:
+## 4. Current pipeline flow
 
 ```mermaid
 flowchart LR
-    R["Retrieve top K candidates"] --> L["Lexical and fact compatibility"]
-    L -->|"support below 0.35"| X["Reject candidate"]
-    L -->|"support at least 0.35"| A["Attach internal candidate evidence"]
-    A --> C["Resolve declared chunk_id"]
-    C --> D["Verify document_id"]
-    D --> V["Verify quote is inside that exact chunk"]
-    V --> S["Recompute proposition support"]
-    S -->|"support below 0.35"| X
-    S -->|"verified"| P["Publish existing SourceRefV1"]
-    P --> Q["Score strongest verified support"]
+    A["Ingest documents or transcribe audio"] --> B["Parse and index chunks"]
+    B --> C["Extract atomic requirements"]
+    C --> D["Canonicalize and deduplicate"]
+    D --> E["Retrieve evidence candidates"]
+    E --> F["Classify and normalize"]
+    F --> G["Ground evidence"]
+    G --> H["Generate stories and acceptance criteria"]
+    H --> I["Run quality gate and scoring"]
+    I --> J{"Repair enabled and needed?"}
+    J -- Yes --> K["Repair from source fact ledger"]
+    K --> I
+    J -- No --> L["Build hierarchical summary"]
+    L --> M["Format unchanged response contract"]
 ```
 
-Retrieval is candidate generation. `evidence_grounding` is the authority that decides which evidence is allowed into the public response.
+The important ownership boundary is:
 
-## 5. Internal evidence metadata
+- Retrieval finds candidates.
+- Grounding decides which candidates are publishable citations.
+- The quality gate diagnoses the final artifacts.
+- Scoring measures components without double penalties.
+- Formatting performs the last public-output safety checks.
 
-`EvidenceSpan` now includes these internal fields:
+## 5. Implemented feature catalog
 
-| Field | Meaning |
+### 5.1 Extraction, classification, priority, and category
+
+| Feature | Current behavior |
 |---|---|
-| `origin` | `extracted`, `retrieved`, or `fallback` |
-| `lexical_score` | Deterministic requirement-to-quote overlap score |
-| `entailment_score` | Reserved support signal; currently the deterministic support score |
-| `support_score` | Final internal confidence that the quote supports the requirement |
+| Atomic extraction | The prompts request atomic, source-grounded requirements with verbatim evidence. |
+| Prompt-injection resistance | Source text is treated as untrusted data; embedded instructions must not be followed. |
+| English normalization | Requirement text is normalized to English while the evidence quote remains in the source language. |
+| Evidence diagnostics | Weak extraction evidence produces a diagnostic warning for later grounding, not a permanent final defect. |
+| Priority inference | Explicit source labels and urgency terms can upgrade priority; absent support defaults conservatively. |
+| Priority preservation | Classification does not overwrite a stronger valid priority already established by extraction. |
+| Category normalization | Requirement categories are inferred from source-supported semantics rather than accepted blindly. |
+| Confidence validation | Invalid or weak confidence values are detected by the quality gate. |
 
-These fields are not added to the final response structure.
+Primary implementation:
 
-Fallback snippets are capped at `0.70`. This permits a layout- or punctuation-normalized source snippet to remain useful while preventing it from looking as reliable as a clean exact quote. An unrelated fallback still fails because it has insufficient domain-token overlap.
+- [extract.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/extract.py)
+- [classify.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/classify.py)
+- [semantic_quality.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/services/semantic_quality.py)
+- [extract_requirements_v1.md](file:///d:/ITI/GP/ai-pipeline/ai-service/app/prompts/templates/extract_requirements_v1.md)
+- [extract_requirements_v2.md](file:///d:/ITI/GP/ai-pipeline/ai-service/app/prompts/templates/extract_requirements_v2.md)
 
-## 6. Deterministic semantic-quality service
+### 5.2 Requirement canonicalization and conflict analysis
 
-File: `ai-service/app/services/semantic_quality.py`
+| Feature | Current behavior |
+|---|---|
+| Exact duplicate merging | Identical normalized requirements are merged. |
+| Paraphrase merging | High-confidence semantic duplicates are merged at a threshold of `0.80`. |
+| Composite handling | Equivalent atomic requirements contained in a composite requirement are merged conservatively. |
+| Connected components | Transitive duplicate relationships form one canonical group instead of pairwise inconsistent merges. |
+| Evidence union | Merged requirements retain the union of valid evidence and labels. |
+| Stable IDs | Requirement IDs are reassigned before story generation. |
+| Actor safety | Requirements with materially conflicting actors are not merged blindly. |
+| Conflict types | Contradiction, constraint, permission, scope, priority, complementary, and duplicate relationships are supported. |
+| Resolution guidance | Non-independent conflicts receive two or three dynamic, actionable resolution options. |
+| Clarification questions | Conflict warnings can include questions that help a reviewer resolve ambiguity. |
+| Informational complementary links | `COMPLEMENTARY` relationships do not reduce the score or create a score cap. |
 
-This module centralizes pure, provider-independent checks:
+Canonicalization runs before story generation, so duplicate warnings are not
+merely hidden from scoring; the duplicate requirements themselves are resolved.
 
-### `meaningful_tokens(text)`
+Primary implementation:
 
-Tokenizes text and removes generic requirements language such as `system`, `shall`, `user`, `given`, `when`, and `then`. This prevents unrelated sentences from appearing similar merely because they share common specification vocabulary.
+- [dedupe_requirements.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/dedupe_requirements.py)
+- [generate.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/generate.py)
+- [detect_conflicts_v1.md](file:///d:/ITI/GP/ai-pipeline/ai-service/app/prompts/templates/detect_conflicts_v1.md)
 
-### `normalized_numbers(text)`
+### 5.3 Evidence retrieval, grounding, and traceability
 
-Extracts digit-based numeric claims with optional units, including seconds, hours, days, percentages, and storage sizes.
+| Feature | Current behavior |
+|---|---|
+| Retrieval is non-authoritative | A top-ranked chunk is only a candidate and cannot automatically become a citation. |
+| Clause-level comparison | A requirement is compared with the best supporting clause or bounded sentence window in a chunk. |
+| Provenance validation | Document identity, source identity, and chunk identity must be valid. |
+| Exact quote validation | The published quote must occur in the claimed source chunk or document. |
+| Numeric validation | Unsupported or mismatched numeric facts reject the evidence. |
+| Behavior validation | New unsupported permissions, deletion, retention, notification, timing, or other behavior blocks automatic acceptance. |
+| Polarity validation | Explicit contradiction blocks acceptance; omission is handled separately. |
+| Ambiguous evidence protection | Evidence in the review zone does not reach public `source_refs`. |
+| Cross-language caution | Cross-language pairs are review-only without NLI. |
+| Fallback evidence cap | Fallback-origin confidence is capped at `0.70`. |
+| Low-ASR caution | Semantically valid low-confidence transcript evidence is retained with a review diagnostic. |
+| Final formatting defense | Any non-zero evidence support below `0.60` is filtered before output. |
+| Reference deduplication | Duplicate document references with the same source and normalized quote are collapsed, retaining the strongest one. |
+| Audio identity preservation | Audio references retain chunk identity because timestamps may distinguish otherwise similar quotes. |
+| Warning reconciliation | `EXTRACT_WEAK_EVIDENCE` is removed when final grounding verifies the requirement; unresolved warnings are rebuilt with the exact remaining count. |
 
-### `lexical_support(requirement, evidence)`
+### 5.4 Semantic matching and three-state polarity
 
-Computes:
+The semantic service uses these internal states:
+
+- `ENTAILED`: the candidate is supported by the related source clause.
+- `CONTRADICTED`: the candidate makes an explicit opposite claim.
+- `NOT_COVERED`: the candidate is omitted, unrelated, or cannot be established.
+
+Only `CONTRADICTED` creates an unsupported-fact contradiction. `NOT_COVERED`
+reduces fact or clause coverage without being mislabeled as contradiction.
+
+Additional semantic behavior includes:
+
+- General synonym normalization, including alert/notify, record/capture/log,
+  invite/invitation, administrator/admin, preserve/retain, and recover/reset.
+- Action-aware comparison so a shared noun alone does not prove a behavior.
+- Exact and contained proposition entailment when negation agrees.
+- Access-control entailment: “only administrators may retrieve” supports the
+  logically equivalent denial of retrieval to non-administrators.
+- Comparison with related clauses instead of unrelated full strings.
+- Unsupported numeric fact detection.
+- Distinction between clear unsupported behavior and uncertain review terms.
+
+Primary implementation:
+
+- [semantic_quality.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/services/semantic_quality.py)
+- [retrieve_evidence.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/retrieve_evidence.py)
+- [evidence_grounding.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/evidence_grounding.py)
+
+### 5.5 User-story generation and repair
+
+| Feature | Current behavior |
+|---|---|
+| Canonical input | Stories are generated from canonical requirements after deduplication. |
+| Actor normalization | User-story personas are normalized without inventing a human actor. |
+| Source-bound wording | Story descriptions and criteria use only linked requirement facts and evidence. |
+| No invented behavior | Prompts explicitly prohibit unsupported validation, permissions, notifications, retry, escalation, retention, timing, and negative cases. |
+| Deterministic fallback | If LLM generation fails or is malformed, source-bound fallback stories are produced. |
+| Valid story shape | Malformed wording such as `so that: The system shall...` is normalized. |
+| Complete mappings | Mapping validation considers title, description, and all acceptance criteria. |
+| Story deduplication | Duplicate generated stories are merged while preserving requirement mappings. |
+| Fibonacci estimates | Story points are normalized to `1`, `2`, `3`, `5`, or `8`. |
+| Fact-ledger repair | Repair receives the linked source facts and removes unsupported additions. |
+| Bounded repair loop | Repair is optional and limited to prevent uncontrolled latency or loops. |
+
+Configuration:
 
 ```text
-support = 0.75 * requirement_token_recall + 0.25 * evidence_token_precision
+ENABLE_QUALITY_REPAIR=false
+MAX_REPAIR_ATTEMPTS=1
 ```
 
-Recall has the larger weight because a short exact quote can legitimately support a longer normalized requirement.
+Repair is disabled by default for MVP predictability. It can be enabled without
+changing the API contract.
 
-If both sides contain numeric facts and the evidence introduces incompatible values, support is zero.
+Primary implementation:
 
-### `story_alignment(requirement_texts, story_text)`
+- [generate.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/generate.py)
+- [repair_stories.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/repair_stories.py)
+- [format.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/format.py)
+- [generate_user_stories_v1.md](file:///d:/ITI/GP/ai-pipeline/ai-service/app/prompts/templates/generate_user_stories_v1.md)
+- [generate_user_stories_v2.md](file:///d:/ITI/GP/ai-pipeline/ai-service/app/prompts/templates/generate_user_stories_v2.md)
+- [repair_stories_v1.md](file:///d:/ITI/GP/ai-pipeline/ai-service/app/prompts/templates/repair_stories_v1.md)
 
-Returns the best support score between a story and its linked requirements.
+### 5.6 Acceptance-criteria and mapping validation
 
-### `unsupported_numeric_claims(text, sources)`
+The validator:
 
-Returns digit-based numeric facts introduced by a story or acceptance criterion but absent from all linked requirement text and evidence quotes.
+- Evaluates the combined `Given + When + Then` content, not one field alone.
+- Measures coverage of distinct requirement clauses.
+- Accepts logically entailed access-control negative cases.
+- Detects unsupported numbers and clear new behavior.
+- Uses Medium review for uncertain behavior instead of creating a false High
+  issue from keyword presence.
+- Creates a High mapping issue only when an independent clear mismatch exists.
+- Uses the actual story index or ID rather than `item_id=0`.
+- Detects near-duplicate stories.
+- Flags generic, empty, malformed, or untestable criteria.
 
-## 7. Node and service changes
+Primary implementation:
 
-### 7.1 Extraction
+- [story_validator.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/validators/story_validator.py)
+- [quality_gate.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/quality_gate.py)
 
-File: `ai-service/app/nodes/extract.py`
+### 5.7 Quality scoring and issue ownership
 
-- Evidence created because the model omitted a quote is marked `origin="fallback"`.
-- Evidence whose proposed quote cannot be aligned and is replaced with a source snippet is also marked as fallback.
-- This provenance is later used to limit confidence.
-
-### 7.2 Evidence retrieval
-
-File: `ai-service/app/nodes/retrieve_evidence.py`
-
-- `MIN_RETRIEVAL_SUPPORT = 0.35`.
-- Original evidence is scored only against its declared chunk.
-- Top retrieval results remain candidates until the best exact clause in the
-  declared chunk reaches `0.60` and passes numeric, behavior, provenance, and
-  polarity checks.
-- Results between `0.25` and `0.60` remain internal review diagnostics and are
-  never promoted into public `source_refs`.
-- Cross-language retrieval hits are not automatically cited while deterministic
-  adjudication cannot verify their meaning.
-- The node no longer fills the evidence list just to reach the evidence cap.
-- Only qualified hits update `evidence_match_score`.
-- `quote_support_score` is the strongest verified evidence score, not the fraction of quotes found somewhere in the corpus.
-- Requirements with neither valid original evidence nor a qualified retrieval hit receive a weak-evidence warning and confidence penalty.
-
-### 7.3 Evidence grounding
-
-File: `ai-service/app/nodes/evidence_grounding.py`
-
-For each citation, grounding now verifies:
-
-1. The quote is non-empty.
-2. The declared `chunk_id` exists.
-3. The quote occurs inside that exact chunk.
-4. The evidence `document_id`, when supplied, matches the chunk document.
-5. The requirement is compared with the best exact sentence or paragraph inside
-   that declared chunk.
-6. The selected clause supports the requirement with a score of at least `0.60`.
-7. The selected clause passes numeric, behavior, and polarity checks.
-
-Sentence candidates preserve complete semicolon-delimited composite statements.
-Adjacent two- and three-sentence windows are also considered when one requirement
-spans multiple source sentences. Equal-support candidates prefer the shortest
-exact source span, preventing unrelated chunk material from entering citations.
-Exact or safely contained propositions with matching negation are classified as
-`ENTAILED` before clause-level polarity comparison.
-
-Invalid evidence is removed from the requirement before formatting. If all candidates are removed, the requirement receives a high-severity `missing_verified_evidence` issue.
-
-Ambiguous evidence is not a public citation. Verified low-ASR evidence may remain
-traceable with a review warning because its semantic support and provenance are
-valid; its transcription confidence is the uncertain property.
-
-After grounding, the node reconciles the aggregate
-`EXTRACT_WEAK_EVIDENCE` warning. If all fallback requirements now have verified
-evidence, the warning is removed. If some fallback requirements remain
-ungrounded, the warning is retained with the exact unresolved count. Other
-warning codes are preserved.
-
-New or strengthened issue rules include:
-
-- `evidence_chunk_mismatch`
-- `evidence_not_grounded`
-- `evidence_document_mismatch`
-- `evidence_semantic_mismatch`
-- `missing_verified_evidence`
-
-### 7.4 Story duplicate detection
-
-File: `ai-service/app/validators/story_validator.py`
-
-Duplicate detection still catches identical title-and-description pairs. It now also compares meaningful description-token sets and flags similarity at or above `0.90`. This catches semantically identical stories whose generated titles differ.
-
-### 7.5 Quality gate
-
-File: `ai-service/app/nodes/quality_gate.py`
-
-The existing quality node now adds semantic checks without changing graph topology:
-
-- Story alignment compares normalized source clauses with the title,
-  description, and complete acceptance-criteria text.
-- Alignment below `0.40` creates a review issue, but a low score alone cannot
-  create a High defect. High severity requires additional evidence such as an
-  unsupported action, numeric conflict, or polarity conflict.
-- Acceptance criteria introducing numeric facts absent from requirements and evidence receive high-severity `acceptance_criterion_unsupported_fact`.
-- Acceptance criteria with insufficient alignment to all linked source facts receive medium-severity `acceptance_criterion_not_source_aligned`.
-- Clause coverage uses the complete Given + When + Then criterion; the Then
-  outcome remains authoritative for unsupported-behavior and polarity checks.
-- Exclusive source permissions such as `only ROLE may ACTION` entail denial of
-  the same action to a non-ROLE actor.
-- Existing generic-criteria, missing-evidence, coverage, confidence, and duplicate checks remain active.
-
-### 7.6 Quality scoring
-
-File: `ai-service/app/services/quality_scoring.py`
-
-Groundedness now uses the strongest verified evidence support for each requirement. Evidence presence alone no longer produces a perfect groundedness score.
-
-Traceability now requires both:
-
-- A valid linked requirement ID.
-- Normalized clause alignment of at least `0.40` for substantive source text.
-
-Acceptance-criteria quality requires criteria to be:
-
-- Non-generic.
-- Free from unsupported digit-based numeric facts.
-- Aligned with linked requirement text or evidence.
-- Evaluated for coverage using Given + When + Then context.
-
-The overall score is now weighted as follows:
+The overall score is a weighted component score:
 
 ```text
 overall =
-    groundedness * 0.30
-  + traceability * 0.25
-  + story_completeness * 0.15
-  + acceptance_criteria_quality * 0.20
-  + uniqueness * 0.10
+    groundedness              * 0.30
+  + traceability              * 0.25
+  + story_completeness        * 0.15
+  + acceptance_criteria       * 0.20
+  + (1 - duplicate_risk)      * 0.10
+  - unique_unowned_penalties
 ```
 
-Issue penalty:
+Component ownership prevents double punishment:
 
-```text
-penalty = min(
-    0.70,
-    high_count * 0.15
-  + medium_count * 0.05
-  + low_count * 0.01
-)
-```
+| Root-cause family | Owned by |
+|---|---|
+| `EVIDENCE_NOT_GROUNDED` | Groundedness |
+| `DUPLICATE_CONTENT` | Duplicate risk |
+| `AC_QUALITY` | Acceptance-criteria quality |
+| `STORY_TRACEABILITY` | Traceability |
+| `STORY_COMPLETENESS` | Story completeness |
 
-Severity caps prevent misleading scores:
+Evidence aliases such as `missing_evidence`,
+`missing_verified_evidence`, and `evidence_semantic_mismatch` normalize to one
+root cause. Duplicate aliases normalize to `DUPLICATE_CONTENT`. Issues are
+grouped by stable item and root cause.
 
-- Any high-severity issue caps `overall_score` at `0.59`.
-- Otherwise, any medium-severity issue caps it at `0.79`.
+Rules:
 
-### 7.7 Final formatting
+- Component-owned defects are not subtracted again and do not apply a second
+  severity cap.
+- Diagnostics and informational relationships do not affect the score.
+- `COMPLEMENTARY` never affects penalties or caps.
+- Unique, unowned defects use additive penalties: High `0.15`, Medium `0.05`,
+  Low `0.01`, with a maximum additive penalty of `0.70`.
+- A genuine unowned High defect can cap the final score below `0.60`.
+- A genuine unowned Medium defect can cap it below `0.80`.
 
-File: `ai-service/app/nodes/format.py`
+Primary implementation:
 
-The public `SourceRefV1.confidence_score` now uses `EvidenceSpan.support_score`.
-As defense in depth, evidence with a calculated non-zero support below `0.60`
-is filtered during formatting even if an upstream caller bypassed grounding.
-Legacy evidence without a calculated score is limited to a conservative fallback
-confidence instead of inheriting the requirement's extraction confidence.
+- [quality_scoring.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/services/quality_scoring.py)
+- [quality_gate.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/quality_gate.py)
 
-Identical document references are normalized by source identity and quote and
-collapsed to the strongest citation. Audio references retain their chunk identity
-because repeated utterances at different moments may be distinct evidence.
+### 5.8 Long-document and multi-document summaries
 
-Final status is determined by useful output, errors, High user-facing defects,
-and actionable operational warnings. Diagnostic or informational codes such as
-successful duplicate merging, `COMPLEMENTARY` relationships, extraction fallback
-events, and unsuccessful optional retrieval do not independently force
-`status=partial`; unresolved evidence defects still do so through the quality gate.
+Summarization no longer relies on one blind truncation window.
 
-The final response schema is unchanged.
+Current behavior:
 
-## 8. Threshold summary
+1. Build source-aware summary units.
+2. Split oversized content into bounded chunks.
+3. Summarize each chunk.
+4. Reduce partial summaries hierarchically.
+5. Synthesize across documents while preserving their separate scopes.
+6. Append pipeline questions and artifact digest information.
 
-| Threshold | Value | Purpose |
+The configured input bound is `12,000` characters per summarization unit. The
+middle of long documents is not silently discarded.
+
+Primary implementation:
+
+- [summarize.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/summarize.py)
+- [summarize_structured_v1.md](file:///d:/ITI/GP/ai-pipeline/ai-service/app/prompts/templates/summarize_structured_v1.md)
+
+### 5.9 DOCX, PDF, text, and audio metadata
+
+| Format | Public page | Internal traceability |
 |---|---:|---|
-| Weak-support warning | `0.35` | Flags requirements lacking grounded or retrieved support |
-| Public citation support | `0.60` | Minimum score plus safety checks before evidence reaches `source_refs` |
-| Ambiguous evidence band | `0.25–0.60` | Review diagnostic only; never a public citation |
-| Story mapping alignment | `0.40` | Minimum normalized clause alignment; lower scores alone are not High |
-| Acceptance-criterion alignment | `0.15` | Minimum criterion-to-source alignment |
-| Near-duplicate story similarity | `0.90` | Description-token Jaccard threshold |
-| Fallback evidence cap | `0.70` | Maximum confidence for substituted source snippets |
-| High-issue overall cap | `0.59` | Prevents high-risk output from appearing production-ready |
-| Medium-issue overall cap | `0.79` | Prevents review-required output from appearing perfect |
+| PDF | Extracted page number | Document, source, chunk, page, exact quote |
+| DOCX | `null` unless reliably rendered | Paragraph index, heading, section, document, source, chunk, exact quote |
+| Text | `null` | Document, source, chunk, exact quote |
+| Audio | `null` | Language, speaker when available, timestamps, ASR confidence, source, chunk, exact quote |
 
-Threshold changes must be accompanied by fixture evidence and regression tests. Do not tune a threshold solely to make a failing test green.
+DOCX pages are not fabricated. The ingestion layer can attempt controlled
+headless rendering where supported, but paragraph-based extraction is the safe
+MVP fallback and preserves document identity.
 
-## 9. Tests
+For recordings:
 
-New regression file: `ai-service/tests/services/test_semantic_quality_hardening.py`
+- Deepgram mixed-language processing can evaluate Arabic Egyptian (`ar-EG`) and
+  English (`en-US`) transcripts and select using confidence and keyword signals.
+- Groq metadata is preserved when available.
+- Speaker metadata is provider-dependent.
+- Low-confidence or cross-language evidence is marked for review.
 
-Coverage includes:
+Primary implementation:
 
-- Unrelated top retrieval hits are not appended.
-- A quote found in another chunk does not validate the declared chunk reference.
-- Document-ID mismatch removes evidence.
-- Evidence presence with zero support does not produce full groundedness.
-- Incorrect story-to-requirement mappings are high severity and reduce traceability.
-- Unsupported numeric acceptance facts are detected.
-- Ambiguous and cross-language candidates are excluded from public evidence.
-- The best supporting clause is selected from a long declared chunk.
-- Given + When + Then context contributes to source-clause coverage.
-- Exclusive permissions support equivalent non-role denial criteria.
-- Valid MFA and other normalized paraphrases do not become false mapping defects.
-- Low alignment without independent contradiction or invented behavior is Medium,
-  not High.
-- Exact negative source statements do not contradict themselves after clause
-  splitting.
-- Composite requirements cite the shortest complete source sentence/window.
-- Identical document references collapse to the strongest citation.
-- Diagnostic warnings do not force a clean, complete result to `partial`.
-- A medium issue prevents an overall score of `1.0`.
+- [ingest.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/ingest.py)
+- [parse_to_chunks.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/parse_to_chunks.py)
+- [transcribe.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/transcribe.py)
+- [items.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/schemas/items.py)
 
-Existing retrieval, grounding, scoring, contract, node, API, worker, and end-to-end tests remain active.
+### 5.10 Final formatting and status
 
-Verification result on 2026-07-22:
+The formatter preserves the existing response contract and computes status
+conservatively:
+
+| Status | Meaning |
+|---|---|
+| `rejected` | The input did not produce useful supported artifacts. |
+| `failed` | A processing error occurred and there are no useful requirements or stories. |
+| `partial` | Required artifacts are missing, a genuine High issue remains, or an actionable warning requires review. |
+| `completed` | Useful artifacts are present and no actionable blocker remains. |
+
+Informational warnings do not force `partial`. Examples include merged duplicate
+notifications, complementary relationships, and retrieval-limit diagnostics.
+`EXTRACT_WEAK_EVIDENCE` is actionable only when it remains unresolved after
+grounding.
+
+Primary implementation:
+
+- [format.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/format.py)
+- [evidence_grounding.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/evidence_grounding.py)
+
+### 5.11 Developer verification utility
+
+[verify_fixture_results.py](file:///d:/ITI/GP/ai-pipeline/ai-service/scripts/verify_fixture_results.py) fetches an internal job result and
+prints:
+
+- Requirement IDs and priorities
+- Story IDs, priorities, and points
+- Conflict warnings and resolution guidance
+
+It is a developer utility and does not affect the API or pipeline result.
+
+## 6. Decision rules and thresholds
+
+### 6.1 Evidence publication matrix
+
+| Condition | Decision | Public citation? |
+|---|---|---:|
+| Support `>= 0.60` and all safety checks pass | Accept | Yes |
+| Support `< 0.25` in the same language | Reject | No |
+| Support from `0.25` to `< 0.60` | Review/partial | No |
+| Requirement and source are in different languages | Review/partial | No |
+| Provenance or quote is invalid | Reject | No |
+| Number, behavior, or polarity check fails | Reject | No |
+
+The support score alone cannot override provenance, numeric, behavior, or
+polarity failures.
+
+### 6.2 Story and requirement matching
+
+| Rule | Value |
+|---|---:|
+| Minimum story alignment | `0.40` |
+| Near-duplicate requirement threshold | `0.80` |
+| Allowed story points | `1, 2, 3, 5, 8` |
+| Maximum repair attempts | `1` |
+
+Low lexical alignment alone is not enough to create a High mapping defect. A
+High issue requires a clear semantic mismatch independent of the low score.
+
+### 6.3 Groundedness behavior
+
+Groundedness uses the strongest verified evidence for each requirement.
+Review-only evidence receives reduced credit. Legacy unscored evidence uses a
+conservative fallback rather than being treated as fully grounded.
+
+### 6.4 Acceptance-criteria behavior
+
+Acceptance-criteria quality combines:
+
+- Criterion precision: each criterion is relevant and supported.
+- Clause fact coverage: all distinct source facts are represented.
+
+This avoids a misleading 100% result from many criteria that repeat only one
+source fact.
+
+## 7. Warning and issue lifecycle
+
+Warnings have an owner and a lifecycle:
+
+1. Extraction may emit an early diagnostic.
+2. Retrieval may add candidate-level diagnostics.
+3. Grounding resolves, removes, or rewrites evidence diagnostics.
+4. The quality gate emits artifact-level defects.
+5. Scoring normalizes issues into root causes.
+6. Formatting decides whether remaining warnings are actionable.
+
+Example:
 
 ```text
-340 passed, 1 skipped, 1 warning
+Extraction: 8 requirements have weak direct evidence
+Grounding:   all 8 receive verified fallback evidence
+Final:       EXTRACT_WEAK_EVIDENCE is removed
 ```
 
-The warning is an existing Starlette/TestClient deprecation warning regarding `httpx2`; it is unrelated to this implementation.
+If two remain unresolved, the final warning reports two—not the original eight.
 
-## 10. Operational behavior and interpretation
+This prevents resolved upstream diagnostics from incorrectly changing final
+status or lowering user confidence.
 
-- A requirement can remain in the output with no public source references, but it must be marked for review and receive a reduced groundedness score.
-- Zero trustworthy citations is preferable to several unrelated citations.
-- `relevance_score` answers whether the input is software-related. It must not be interpreted as output correctness.
-- `confidence_score` on a requirement remains extraction/classification confidence.
-- `confidence_score` on a source reference now means evidence support confidence.
-- `traceability_coverage` now means semantically credible requirement linkage, not merely populated IDs.
-- An output with high-severity quality issues cannot score above `0.59`.
+## 8. Security and reliability controls
 
-## 11. Known limitations and next improvements
+The response-quality changes also improve production safety:
 
-The current implementation is intentionally deterministic and inexpensive, but it is not a complete natural-language inference engine.
+- Prompts treat uploaded content and intermediate summaries as untrusted.
+- Evidence must resolve to a known source and chunk.
+- Verbatim quote validation prevents fabricated traceability.
+- Numeric and permission checks reduce high-impact hallucinations.
+- Repair loops are bounded.
+- Summary input sizes are bounded.
+- Model failures have deterministic fallbacks.
+- Ambiguity degrades to review/partial rather than failing the whole pipeline.
+- No external NLI dependency or per-pair LLM adjudication cost is required.
 
-Known limitations:
+These controls improve semantic reliability but do not replace service-level
+controls such as rate limits, authentication, provider timeouts, resource
+budgets, metrics, tracing, and deployment health checks.
 
-- Token overlap can miss valid paraphrases with different vocabulary.
-- It can overestimate statements that reuse the same nouns but reverse meaning.
-- Digit-based numeric detection does not yet normalize number words such as `two`, `twenty-four`, or Arabic numerals written as words.
-- The tokenization and generic-term list are currently English-oriented.
-- Negation, permission reversal, and temporal-condition reasoning need stronger checks.
-- The existing checked-in `response.json` was used as the motivating example but was not regenerated by this code change.
+## 9. Known MVP limitations
 
-Recommended next enhancements:
+1. **No NLI adjudicator:** semantically equivalent cross-language or heavily
+   paraphrased evidence may be sent to review.
+2. **DOCX pages:** `page=null` is expected without reliable rendering.
+3. **Provider-dependent audio metadata:** speaker and confidence fields may not
+   be available from every transcription provider.
+4. **Lexical semantic layer:** deterministic aliases must be maintained as new
+   domain vocabulary appears.
+5. **LLM variability:** free or changing providers may affect extraction count,
+   latency, and structure despite normalization and fallbacks.
+6. **Repair disabled by default:** enabling repair improves some artifacts but
+   adds latency and another model interaction.
+7. **Operational latency:** semantic quality is improved, but provider response
+   time and large-document processing still require production SLO monitoring.
 
-1. Add batched LLM or local-NLI adjudication only for ambiguous pairs with deterministic support between approximately `0.25` and `0.60`.
-2. Normalize number words, units, dates, percentages, currencies, and durations.
-3. Add explicit negation and permission-conflict detection.
-4. Add multilingual tokenization and cross-language entailment.
-5. Create a golden evaluation for the multipart DOCX/PDF fixture with expected canonical requirements and allowed citations.
-6. Measure citation precision and recall separately; do not optimize only for citation coverage.
-7. Add dashboards for rejected-evidence rate, fallback-evidence rate, semantic mapping failures, unsupported-fact rate, and quality-score distribution.
+Recommended post-MVP work:
 
-## 12. Response-enhancement commits from 2026-07-18
+- Build a multilingual golden dataset from real documents and recordings.
+- Measure false acceptance and false rejection separately.
+- Add NLI behind `ENABLE_NLI_ADJUDICATION=false` only if golden results show a
+  material paraphrase or cross-language rejection problem.
+- Add controlled DOCX-to-PDF rendering when page-level references are a product
+  requirement.
+- Add node latency, provider retry, fallback, warning, and score-component
+  metrics.
 
-These four commits were made by `HassanAbdelhamed22`. They improve priority propagation, story estimation, and conflict guidance without adding graph nodes or changing the existing API endpoints, request payloads, or final response structure.
+## 10. Verification and release checklist
 
-| Commit | Enhancement | Main result |
+### Automated verification
+
+The branch was last verified with:
+
+- `385 passed`
+- `1 skipped`
+- `1 existing Starlette/httpx deprecation warning`
+- Ruff critical checks passed
+- `git diff --check` passed
+
+Important suites include:
+
+```powershell
+cd ai-service
+python -m pytest tests/services/test_semantic_quality_hardening.py
+python -m pytest tests/services/test_quality_scoring.py
+python -m pytest tests/nodes/test_evidence_grounding.py
+python -m pytest tests/nodes/test_retrieve_evidence.py
+python -m pytest tests/nodes/test_quality_gate.py
+python -m pytest tests/nodes/test_generate_quality.py
+python -m pytest tests/nodes/test_docx_traceability.py
+python -m pytest tests/validators/test_story_validator.py
+python -m pytest
+```
+
+### Response-level release checks
+
+Before promoting a model or prompt version, verify:
+
+- [ ] Every published source reference passes the `0.60` support threshold and
+      all safety checks.
+- [ ] No review-zone evidence appears in `source_refs`.
+- [ ] Exact quotes exist in the claimed source.
+- [ ] DOCX pages remain `null` unless a renderer produced them reliably.
+- [ ] Requirement IDs are unique and stable after canonicalization.
+- [ ] Stories map only to valid requirement IDs.
+- [ ] Every actionable requirement is represented by a story.
+- [ ] Acceptance criteria cover all distinct source clauses.
+- [ ] Unsupported numbers, permissions, retention, and negative cases are absent.
+- [ ] `COMPLEMENTARY` and diagnostics do not reduce the score.
+- [ ] Resolved `EXTRACT_WEAK_EVIDENCE` warnings are absent.
+- [ ] The status matches remaining actionable defects.
+- [ ] Overall score movement can be explained by its five components.
+- [ ] Latency and provider behavior meet the MVP SLO.
+
+### Golden-data policy
+
+Do not tune thresholds only against the two original fixture documents. The
+golden set should include:
+
+- PDF, DOCX, text, and audio
+- English, Arabic, and mixed-language recordings
+- Exact wording and paraphrases
+- Positive, negative, and omitted requirements
+- Conflicting permissions and numeric constraints
+- Duplicate and composite requirements
+- Low-confidence ASR segments
+- Irrelevant retrieval candidates
+
+## 11. How to revise this document
+
+When adding an enhancement:
+
+1. Update the relevant current-state subsection in Section 5.
+2. Update a threshold or decision table in Section 6 if behavior changed.
+3. Add or update the limitation in Section 9.
+4. Add the verification command or acceptance check in Section 10.
+5. Add one commit entry to Appendix A.
+6. Update the file/test map in Appendix B only if a new responsibility exists.
+
+Do not add another full dated narrative to the main document. The main document
+must always describe the current behavior.
+
+---
+
+## Appendix A. Complete branch commit map
+
+All commits on `feat/respone-enhancements` after its merge base with `main` are
+represented below.
+
+| Commit | Enhancement |
+|---|---|
+| `9c3c632` | Added keyword-based requirement priority upgrades during extraction. |
+| `2e0d6b1` | Preserved existing requirement priority during classification. |
+| `f31c632` | Added dynamic Fibonacci story-point estimation, schemas, prompt rules, and tests. |
+| `121ae1e` | Added dynamic conflict-resolution suggestions to warnings. |
+| `7be5230` | Moved fixture-result verification into `ai-service/scripts`. |
+| `ae48aef` | Established the semantic-quality and RAG traceability baseline. |
+| `bc62c35` | Added shared semantic-quality utilities and helpers. |
+| `2dc7c99` | Added connected-component requirement canonicalization. |
+| `67515ff` | Strengthened prompt enforcement for Fibonacci estimates. |
+| `0d4e43f` | Added source-based priority and category normalization. |
+| `782b9f2` | Added near-duplicate story detection. |
+| `ef83351` | Hardened the quality gate and scoring behavior. |
+| `69b6e08` | Added source fact-ledger story repair. |
+| `45adcbb` | Added hierarchical long-document and multi-document summary reduction. |
+| `5abb8d3` | Expanded end-to-end, formatting, and prompt tests. |
+| `b3e6634` | Added the first consolidated hardening documentation. |
+| `ab5703c` | Added three-state polarity and corrected score double punishment. |
+| `a9d5a2b` | Normalized issue root causes and penalty ownership. |
+| `ab51697` | Added clause-level polarity comparison. |
+| `4a618a5` | Added the deterministic evidence-validation decision flow. |
+| `1a77e55` | Aligned node behavior, schemas, and scoring. |
+| `f0ff78c` | Added internal DOCX metadata and controlled headless extraction support. |
+| `f958fdf` | Added paragraph-based DOCX chunking and traceability fallback. |
+| `75de31a` | Added comprehensive quality and DOCX tests. |
+| `47e9543` | Documented score, evidence, polarity, and DOCX behavior. |
+| `fcf9526` | Added clause matching, semantic aliases, and access-control entailment. |
+| `d1417a3` | Integrated semantic matching into generation, validation, and the quality gate. |
+| `29970fe` | Added clause-level grounding/retrieval and upstream-warning reconciliation. |
+| `f3b26eb` | Deduplicated final references and filtered weak or informational evidence warnings. |
+
+## Appendix B. Implementation and test map
+
+| Responsibility | Implementation | Main tests |
 |---|---|---|
-| `9c3c632` | Keyword-based priority upgrade | Upgrades a default Medium requirement to High when its text contains configured obligation or urgency terms |
-| `2e0d6b1` | Preserve priority during classification | Stops classification from silently resetting an extracted requirement's priority |
-| `f31c632` | Dynamic Fibonacci story points | Requests an LLM-generated estimate and carries it into the existing Jira `story_points` field |
-| `121ae1e` | Dynamic conflict resolution suggestions | Adds actionable resolution choices to semantic-conflict warnings when the model supplies them |
-
-### 12.1 Keyword-based requirement priority upgrade
-
-Commit: `9c3c632` — `feat(nodes): implement keyword-based priority upgrade heuristic for requirements`
-
-Problem:
-- Requirements whose extracted priority was absent defaulted to Medium, even when the text used strong obligation or urgency language.
-
-Implementation:
-- Updated `ai-service/app/nodes/extract.py`.
-- Normalizes unsupported priority values to Medium.
-- If the normalized priority is Medium, upgrades it to High when the requirement contains any of: `shall`, `must`, `mandatory`, `critical`, `essential`, `has to`, or `immediately`.
-- Explicit Low, High, and Critical values are preserved.
-
-Data flow:
-
-```text
-LLM priority -> normalize allowed value -> apply keyword upgrade when Medium -> extracted requirement
-```
-
-Contract impact:
-- None. The existing `priority` field and allowed output values are reused.
-
-Tests:
-- No dedicated automated regression test was added in this commit.
-
-Operational notes and limitation:
-- This is deterministic and inexpensive, but `shall` and `must` commonly express specification modality rather than business urgency. In formal requirements documents, this can upgrade nearly every requirement to High and flatten the priority distribution.
-- A future version should prefer explicit source priority, stakeholder/business-impact signals, dependency/critical-path information, and risk. Generic obligation words should have a lower weight or act only as one feature in a multi-signal rule.
-
-### 12.2 Preserve priority through classification
-
-Commit: `2e0d6b1` — `fix(nodes): preserve requirement priority field in classification node`
-
-Problem:
-- The classification node reconstructs `ClassifiedRequirement` objects. Because `priority` was not copied, an extracted priority could be lost and replaced by the schema default.
-
-Implementation:
-- Updated `ai-service/app/nodes/classify.py`.
-- Added `priority` to the shared constructor arguments used by normal classification, special-label handling, and the per-item fallback.
-- Added the same propagation to the hard LLM-failure fallback.
-
-Data flow:
-
-```text
-extracted priority -> classified requirement -> generated story priority -> final requirement/story/Jira fields
-```
-
-Contract impact:
-- None. This corrects internal field propagation only.
-
-Tests:
-- No dedicated automated regression test was added in this commit.
-
-Recommended regression:
-- Create Low, Medium, High, and Critical extracted requirements; exercise successful classification, missing classification, special labels, and LLM failure; assert that every output retains its input priority.
-
-### 12.3 Dynamic Fibonacci story-point estimation
-
-Commit: `f31c632` — `feat(prompts): implement dynamic Fibonacci story points estimation`
-
-Problem:
-- Final Jira exports always set `story_points` to `0`, so generated stories did not contain useful relative-effort estimates.
-
-Implementation:
-- Updated both `generate_user_stories_v1.md` and `generate_user_stories_v2.md` to require a Fibonacci estimate from `1`, `2`, `3`, `5`, or `8`.
-- Added optional `story_points` to the structured LLM response in `ai-service/app/nodes/generate.py`.
-- Added `story_points` to the internal `UserStory` schema in `ai-service/app/schemas/items.py`.
-- Propagated the generated value into the existing `jira_fields.story_points` field in `ai-service/app/nodes/format.py`.
-- Updated prompt snapshot hashes to protect the intentional prompt changes.
-- A missing or falsey model value falls back to `0`.
-
-Contract impact:
-- No response-shape change. The existing Jira `story_points` field now receives a generated value instead of always receiving zero.
-
-Tests:
-- Prompt snapshot expectations were updated.
-- No behavioral test was added to enforce the Fibonacci set or validate propagation through the complete pipeline.
-
-Operational notes and limitation:
-- The structured schema describes the Fibonacci set but does not strictly constrain it, so a provider may still return another integer.
-- Story points are team-relative, not universal hours. For consistent estimates, prompts should include an agreed baseline and examples, and code should validate allowed values before formatting.
-- Recommended fallback behavior is to coerce an invalid value to the nearest approved value or `0` with a review warning; this can be implemented internally without changing the response contract.
-
-### 12.4 Dynamic conflict-resolution suggestions
-
-Commit: `121ae1e` — `feat(prompts): generate dynamic conflict resolution suggestions in warnings`
-
-Problem:
-- Conflict warnings described the conflict and asked a clarification question but did not give stakeholders actionable choices for resolving it.
-
-Implementation:
-- Updated `detect_conflicts_v1.md` to require two or three short resolution options for classifications other than Independent or Duplicate.
-- Updated `ai-service/app/nodes/dedupe_requirements.py` to read `resolution_options` and append numbered choices under `Proposed Resolutions` in the existing warning and quality-issue text.
-- Updated the prompt snapshot hash.
-- Added `ai-service/verify_fixture_results.py`, a command-line helper that fetches an existing job result and displays priorities, story points, warnings, and proposed resolutions for manual verification.
-
-Contract impact:
-- None. Resolution options are embedded in the existing warning `message` and quality-issue `details` strings; no new public response field was introduced.
-
-Tests:
-- Prompt snapshot expectations were updated.
-- The fixture helper supports manual inspection.
-- No automated behavioral test was added for missing, malformed, excessive, or unsafe resolution options.
-
-Operational notes and limitation:
-- Suggestions are advisory and should not silently modify requirements.
-- Resolution options are now normalized to unique, non-empty strings, limited to three options and 300 characters per option.
-- When a non-independent, non-duplicate conflict has fewer than two usable model suggestions, two deterministic advisory options are supplied.
-- Do not expose secrets or untrusted document instructions through generated suggestions; retain standard prompt-injection defenses and output sanitization.
-
-### 12.5 Combined production-readiness assessment
-
-The four commits correctly reuse existing nodes and fields, so no new graph nodes are required. The MVP response-quality hardening in Section 13 subsequently:
-
-1. Replaced obligation-word priority inflation with explicit source-priority inference.
-2. Strictly normalized story points to `{1, 2, 3, 5, 8}`.
-3. Validated and bounded conflict-resolution options with safe fallbacks.
-4. Added end-to-end and golden canonicalization regression coverage.
-
-Operational metrics for these behaviors remain a production-observability task.
-
-## 13. MVP response-quality hardening
-
-Implementation date: 2026-07-22
-
-Goal:
-- Produce a canonical, source-faithful response with trustworthy traceability, user stories, acceptance criteria, classifications, priorities, estimates, summary, and quality scores.
-- Preserve every existing graph node, API endpoint, request payload, and final response field.
-
-### 13.1 Resulting flow
-
-```text
-extract
-  -> infer only source-supported priority
-  -> canonicalize exact, near, and atomic/composite requirements
-  -> retrieve and ground evidence
-  -> classify
-  -> validate generated mappings against canonical propositions
-  -> sanitize stories and criteria against the internal source-fact ledger
-  -> merge duplicate stories and rebuild coverage
-  -> validate clauses, facts, points, personas, and duplicates
-  -> calculate fact-aware quality scores
-  -> summarize every document through bounded hierarchical reduction
-  -> format through the unchanged public contract
-```
-
-### 13.2 Canonical requirement set
-
-Files:
-- `ai-service/app/nodes/dedupe_requirements.py`
-- `ai-service/tests/nodes/test_dedupe_requirements.py`
-
-Behavior:
-- Exact propositions merge even when the LLM returned inconsistent actor fields.
-- Near-duplicates merge when actors do not materially conflict.
-- Atomic extractions are clustered with their source-level composite requirement when the larger proposition has a conjunction or semicolon and covers at least `0.72` of the normalized smaller proposition.
-- Connected components allow one composite requirement to absorb several atomic children.
-- The most complete source-level proposition becomes the canonical text.
-- Evidence, labels, confidence, review state, and strongest priority are preserved.
-- Canonical requirements retain source order and receive stable sequential IDs.
-
-Golden fixture regression:
-- The previous response contained 27 extracted requirements.
-- The deterministic two-document regression now produces the expected 16 source-level canonical requirements.
-- Five repeated workspace requirements and three atomic/composite operations groups no longer survive as duplicate output.
-
-### 13.3 Internal source-fact ledger
-
-Files:
-- `ai-service/app/services/semantic_quality.py`
-- `ai-service/app/nodes/generate.py`
-- `ai-service/app/validators/story_validator.py`
-- `ai-service/app/nodes/quality_gate.py`
-- `ai-service/app/nodes/repair_stories.py`
-
-The fact ledger is built internally from:
-
-- Canonical requirement text.
-- Verified evidence quotes belonging to linked requirements.
-
-It does not add a public response field.
-
-Validation covers:
-- Numeric facts and units.
-- High-risk behavioral facts such as errors, rejection, denial, permissions, notification, escalation, retry, retention, deletion, encryption, scanning, and timeouts.
-- Negation and polarity reversal.
-- Story-to-requirement semantic alignment.
-- Coverage of every distinct source clause.
-- Enumerated facts such as all audit-event types and all required filters.
-
-Generation behavior:
-- Declared source IDs are accepted only when the story aligns at `0.25` lexical support or at least `0.25` normalized fact-token recall.
-- Unrelated IDs are removed before coverage is created.
-- Unsupported acceptance criteria are removed.
-- If fewer than two supported criteria remain, or any source clause is uncovered, criteria are deterministically regenerated from the linked source clauses.
-- Duplicate generated stories are merged while preserving source IDs, evidence, labels, priority, and the strongest valid estimate.
-- Requirement coverage is rebuilt after validation so it cannot reference a removed or unrelated story.
-
-### 13.4 User-story, classification, priority, and estimate quality
-
-Files:
-- `ai-service/app/nodes/extract.py`
-- `ai-service/app/nodes/generate.py`
-- `ai-service/app/nodes/format.py`
-- `ai-service/app/services/semantic_quality.py`
-- generation, extraction, and repair prompt templates
-
-Priority:
-- `shall`, `must`, `mandatory`, and similar obligation words no longer upgrade backlog priority.
-- Critical, High, or Low is used only when the source explicitly states priority, urgency, business-critical impact, or optional status.
-- Otherwise priority is Medium.
-- The quality gate reports a priority that is not supported by source language.
-
-Classification and category:
-- Story labels are derived from the validated linked classified requirements, not trusted from generation output.
-- The existing public `category` field is populated through deterministic categories including Security & Access Control, Audit & Compliance, Case Management, Notifications & Escalation, Reporting & Export, Data Retention, Performance & Reliability, Integration, Business Rules, and Quality Attributes.
-- `General` is no longer hard-coded.
-
-Personas:
-- Technical components such as service, portal, application, and workspace are normalized to a human `system operator` persona when no source human is available.
-- The quality gate flags remaining technical-component personas.
-
-Story points:
-- Only `{1, 2, 3, 5, 8}` can reach formatted output.
-- Invalid or missing model values receive a deterministic Fibonacci estimate based on source-fact and clause complexity.
-- Story repair preserves the estimate.
-
-### 13.5 Honest quality scoring
-
-Files:
-- `ai-service/app/services/quality_scoring.py`
-- `ai-service/app/nodes/quality_gate.py`
-
-Changes:
-- Traceability combines valid story-mapping precision with actionable-requirement coverage.
-- Acceptance-criteria quality is the minimum of supported-criterion precision and mandatory source-clause coverage.
-- Unsupported non-numeric behavior and polarity changes reduce acceptance quality, not only invented digits.
-- Duplicate risk considers both requirement and story duplication.
-- Duplicate requirements, unsupported story facts, invalid story points, non-human personas, uncovered clauses, and unsupported priorities produce quality issues.
-- Existing severity penalties and overall-score caps remain active.
-
-This prevents a response with duplicate requirements, incomplete source clauses, or invented error behavior from receiving perfect sub-scores.
-
-### 13.6 Multi-document executive summary
-
-Files:
-- `ai-service/app/nodes/summarize.py`
-- `ai-service/app/prompts/templates/summarize_structured_v1.md`
-
-Changes:
-- The first/middle/last truncation approach is no longer used by the summary node.
-- Source chunks are grouped by document ID and associated filename.
-- Every document is split into bounded segments without dropping middle content.
-- Segment summaries are recursively reduced in bounded batches.
-- The final synthesis is instructed to name and distinguish every source rather than conflating their scopes.
-- Canonical requirements, stories, and all open questions are included without the previous 40-item digest limit.
-- Clarification questions from pipeline warnings are appended when the model omits them.
-
-### 13.7 Prompt safety and consistency
-
-Updated prompt templates explicitly state that source text, evidence, and intermediate summaries are untrusted data and must never be followed as instructions.
-
-Prompt examples that previously encouraged invented invalid-email behavior were replaced with source-bounded examples. Prompt snapshots were updated for every intentional template change.
-
-### 13.8 Contract impact
-
-- No new graph nodes.
-- No endpoint changes.
-- No request-payload changes.
-- No final response field additions, removals, or renames.
-- All new fact-ledger and support metadata remains internal.
-
-### 13.9 Verification
-
-Focused response-quality suite:
-
-```text
-53 passed
-```
-
-Full repository suite:
-
-```text
-351 passed, 1 skipped, 1 warning
-```
-
-The warning is the existing Starlette/TestClient `httpx2` deprecation warning.
-
-New or expanded regressions cover:
-- Exact duplicates with inconsistent actors.
-- Atomic/composite canonicalization.
-- The deterministic 27-to-16 two-document golden requirement set.
-- Unsupported non-numeric acceptance behavior.
-- Wrong declared requirement/story mappings.
-- Automatic replacement of unsupported or incomplete criteria.
-- Enumerated clause coverage.
-- Fibonacci story-point normalization.
-- Non-inflated priority for `shall` requirements.
-- Meaningful requirement categories.
-- Multi-document summary scope preservation.
-- Updated end-to-end canonicalization expectations.
-
-### 13.10 Remaining limitations and rollout
-
-- Lexical and fact-token checks are conservative deterministic guards, not full natural-language entailment. Ambiguous paraphrases should later use a batched NLI/LLM adjudicator.
-- The behavioral fact vocabulary is English-oriented and should be extended for multilingual output.
-- Deterministic fallback acceptance criteria prioritize fidelity over natural phrasing.
-- Category inference is keyword-based and may require a project-specific taxonomy.
-- `response.json` predates this implementation and has not been regenerated. Re-run the same two-file job before judging the new end-to-end output.
-- Before release, manually verify the regenerated fixture has 16 canonical requirements, zero unrelated citations, zero unsupported facts, correct mappings, both source scopes in the summary, and no High-severity issue.
-
-Rollback:
-- Revert this implementation as one unit. The public contract requires no data migration.
-
-## 14. How to add the next enhancement
-
-For every future enhancement, append a changelog entry using this template:
-
-```markdown
-### YYYY-MM-DD - Enhancement name
-
-Problem:
-- What failure or production risk was observed?
-
-Decision:
-- What behavior changed and why?
-
-Implementation:
-- Files changed.
-- Algorithms, thresholds, or prompts added.
-
-Contract impact:
-- None, or explicitly describe the approved change.
-
-Tests:
-- Regression cases added.
-- Full-suite result.
-
-Operational notes:
-- Metrics, alerts, rollout flags, or rollback instructions.
-
-Known limitations:
-- What remains intentionally unsolved?
-```
-
-## 15. Changelog
-
-### 2026-07-24 - Post-Grounding Warning Reconciliation
-
-Problem:
-- Extraction emitted one aggregate `EXTRACT_WEAK_EVIDENCE` warning whenever it
-  substituted source snippets.
-- The warning survived after authoritative grounding verified those snippets,
-  leaving a completed response that incorrectly said requirements still needed
-  evidence review.
-
-Decision:
-- Make evidence grounding the authority for the final lifecycle of extraction
-  evidence warnings.
-- Remove only resolved extraction warnings and preserve unrelated warnings.
-- Retain an accurate warning when fallback evidence genuinely remains unresolved.
-
-Implementation:
-- Updated `evidence_grounding.py`:
-  - Recorded which requirements entered grounding with fallback evidence.
-  - Removed the upstream aggregate warning when those requirements finished with
-    verified evidence.
-  - Replaced it with an evidence-grounding warning containing the exact unresolved
-    fallback count when verification still failed.
-  - Preserved all unrelated warning objects and dictionaries.
-
-Contract impact:
-- None.
-- The existing warning list and `EXTRACT_WEAK_EVIDENCE` code are reused.
-- No endpoint, payload, graph node, response field, or field type changed.
-
-Tests:
-- Added resolved-warning, unresolved-warning, and unrelated-warning preservation
-  regressions.
-- Focused grounding and end-to-end suite: `40 passed`.
-- Full AI-service suite: `385 passed, 1 skipped, 1 warning`.
-- The warning is the existing Starlette `httpx`/`httpx2` deprecation warning.
-
-Operational notes:
-- Regenerate `response.json`; a fully grounded run should no longer contain
-  `EXTRACT_WEAK_EVIDENCE`.
-- A run with rejected fallback evidence will still expose the warning with its
-  post-grounding unresolved count.
-
-### 2026-07-24 - Post-Regeneration Evidence and Status Closure
-
-Problem:
-- A verbatim requirement containing `without` was split into positive and
-  negative clauses and falsely classified as `CONTRADICTED`.
-- Composite requirements separated by semicolons selected an entire multi-page
-  chunk because the complete source sentence was not retained as a candidate.
-- Canonical evidence unions exposed repeated identical references.
-- Stale extraction/retrieval diagnostics and informational `COMPLEMENTARY`
-  warnings forced otherwise complete results to `partial`.
-
-Decision:
-- Preserve exact and safely contained propositions before clause polarity logic.
-- Select the shortest exact span that supports the complete requirement.
-- Deduplicate public document citations without changing `source_refs`.
-- Let user-facing quality defects and operational failures own final status;
-  diagnostics remain visible but non-blocking.
-
-Implementation:
-- Updated `semantic_quality.py`:
-  - Added normalized exact/contained entailment with matching negation.
-  - Preserved full sentence candidates before semicolon splitting.
-  - Added bounded adjacent sentence windows for cross-sentence composites.
-  - Preferred the shortest candidate when support scores are equal.
-- Updated `format.py`:
-  - Deduplicated identical document citations and retained the strongest support.
-  - Preserved separate audio chunks.
-  - Classified known extraction, retrieval, canonicalization, and complementary
-    warning codes as non-blocking diagnostics.
-
-Contract impact:
-- None.
-- Endpoints, payloads, graph topology, response fields, and field types remain
-  unchanged.
-
-Tests:
-- Added regressions for exact negative polarity, grounding of `without` clauses,
-  minimal composite citations, public citation deduplication, and diagnostic
-  warning status behavior.
-- Focused closure suite: `53 passed`.
-- Full AI-service suite: `383 passed, 1 skipped, 1 warning`.
-- Critical Ruff checks passed.
-- The warning is the existing Starlette `httpx`/`httpx2` deprecation warning.
-
-Operational notes:
-- Regenerate `response.json` again to validate the corrected status and citation
-  spans; existing JSON artifacts are not rewritten.
-- No requirement IDs, document names, or fixture sentences are hard-coded in
-  production logic.
-
-Known limitations:
-- Cross-language entailment still requires review while NLI remains disabled.
-- Warning-code ownership should remain covered by tests whenever a new warning
-  type is introduced.
-
-### 2026-07-24 - MVP P0 Citation and Validator Adjudication
-
-Problem:
-- Ambiguous retrieval candidates between `0.25` and `0.60` could still be
-  serialized into `source_refs`.
-- Grounding compared requirements with one proposed quote instead of the best
-  supporting clause in the declared chunk, causing valid PDF requirements to
-  lose evidence.
-- Given/When facts were discarded before acceptance-criteria coverage was
-  calculated.
-- `deny` was treated as invented behavior even when it was logically implied by
-  an exclusive access rule.
-- Any low lexical story alignment could become a High mapping defect.
-
-Decision:
-- Keep the current graph, endpoints, request payloads, and public response
-  structure unchanged.
-- Treat retrieval as candidate generation and publish only deterministically
-  verified citations.
-- Use normalized proposition and clause semantics consistently in retrieval,
-  grounding, generation, validation, and scoring.
-- Prefer Medium review over a false High defect when low alignment is the only
-  negative signal.
-
-Implementation:
-- Updated `semantic_quality.py`:
-  - Added normalized proposition support and exact source-clause selection.
-  - Added safe aliases for MFA, invitations, administrator roles, retrieval,
-    retention/preservation, and account recovery/reset.
-  - Preserved complete Given/When/Then context for coverage.
-  - Added general role/action access-control entailment for exclusive
-    permissions.
-  - Added a shared `0.40` story-alignment policy and a clear-mismatch decision
-    requiring evidence beyond a low score.
-- Updated `retrieve_evidence.py` and `evidence_grounding.py`:
-  - Selected the best exact sentence or paragraph from the declared chunk.
-  - Applied score, numeric, behavior, and polarity checks to that same clause.
-  - Promoted only support of at least `0.60`.
-  - Kept ambiguous and cross-language candidates out of public evidence.
-  - Retained semantically verified low-ASR evidence with an explicit review
-    warning.
-- Updated `generate.py`, `story_validator.py`, `quality_gate.py`, and
-  `quality_scoring.py`:
-  - Included acceptance criteria in mapping alignment.
-  - Used normalized proposition support for criteria.
-  - Classified low alignment alone as Medium review.
-  - Preserved High mapping severity for independently demonstrated conflicts.
-- Updated `format.py` with a final defensive filter for calculated ambiguous
-  support scores.
-
-Contract impact:
-- None.
-- No endpoint, request field, response field, field type, graph node, or final
-  response structure changed.
-
-Tests:
-- Added regressions for ambiguous citation suppression, cross-language
-  suppression, best-clause grounding, full Given/When/Then coverage, exclusive
-  access entailment, valid paraphrased mappings, and review-only low alignment.
-- Focused semantic and contract suite: `66 passed`.
-- Full AI-service suite: `378 passed, 1 skipped, 1 warning`.
-- The warning is the existing Starlette `httpx`/`httpx2` deprecation warning.
-
-Operational notes:
-- Regenerate `response.json`; previous outputs are immutable artifacts and do not
-  change automatically.
-- NLI remains disabled. Cross-language semantic evidence requires review instead
-  of automatic citation.
-- No fixture IDs, filenames, or exact test-document statements are hard-coded in
-  production logic.
-
-Known limitations:
-- Deterministic aliases and clause matching are not full multilingual
-  entailment.
-- A cross-language transcript can preserve provenance internally, but it cannot
-  become an automatically verified citation until a trusted adjudicator is
-  enabled.
-
-### 2026-07-23 - Generalized MVP P0 Quality Completion
-
-Problem:
-- The revised quality score still fell from a raw component score of about `0.90` to `0.35`.
-- Duplicate requirements were represented by `duplicate_risk` but were also penalized through both `duplicate_requirement` and `semantic_conflict_duplicate`.
-- Story behavior checks treated nouns and safe synonyms such as `audit logs`, `record`, `alert`, and `notify` as invented High-severity behavior.
-- Every story issue used `item_id=0`, so unrelated story defects collapsed into one unstable scoring identity.
-- The first three-state polarity implementation could still interpret an omitted negative clause as a contradiction.
-- Audio chunks preserved speakers and timestamps but did not consistently retain language or provider confidence.
-
-Decision:
-- Keep the graph, endpoints, request payloads, and V1 response models unchanged.
-- Make each quality component own its corresponding defect family. Component-owned problems affect the component once and never receive an additional penalty or severity cap.
-- Run a final deterministic canonicalization pass inside the existing `generate` node before stories are created.
-- Prefer conservative review over false High defects or unsupported automatic citations.
-- Keep DOCX pages null for MVP and defer rendered pagination.
-
-Implementation:
-- Updated `quality_scoring.py`:
-  - Added internal root-cause normalization for evidence, duplicate content, acceptance-criteria quality, story traceability, and story completeness.
-  - Grouped scoring identities by `(item_type, item_id, normalized_root_cause)`.
-  - Excluded component-owned defects, diagnostics, and `COMPLEMENTARY` relationships from additive penalties and caps.
-  - Made story traceability reject clear unsupported facts or real polarity contradictions.
-- Updated `dedupe_requirements.py` and `generate.py`:
-  - Extracted reusable `canonicalize_requirements`.
-  - Added synonym-aware fact tokens, technical-actor normalization, `and`/`or`/comma composite containment, evidence union, label union, and stable ID remapping.
-  - Added a final pre-generation canonicalization pass without adding a graph node.
-  - Reconciled requirement quality issues after a merge and removed resolved duplicate issues.
-  - Required at least four fact tokens for near-duplicate merging, preventing low-information statements such as `Req 1`, `Req 2`, and `Req 3` from collapsing.
-- Updated `semantic_quality.py` and `quality_gate.py`:
-  - Canonicalized `alert`/`notify`/`notification` and `record`/`capture`/`log` fact families.
-  - Kept clear invented behavior, numbers, permissions, deletion, retention, and polarity problems High severity.
-  - Made uncertain action-position behavior a Medium review event.
-  - Assigned stable one-based story item IDs.
-  - Compared source and candidate clauses, including explicit `without` clauses.
-  - Returned `NOT_COVERED` for omission and `CONTRADICTED` only when the same predicate/object proposition is explicitly reversed.
-  - Made clause coverage require `ENTAILED`.
-- Updated `retrieve_evidence.py` and `evidence_grounding.py`:
-  - Kept retrieval as candidate generation only.
-  - Required exact chunk membership, document identity, numeric consistency, behavioral consistency, polarity consistency, and configured support thresholds before automatic acceptance.
-  - Retained ambiguous, cross-language, or low-ASR-confidence evidence only as review/partial evidence.
-  - Corrected internal source-document language lookup to accept `document_id` or `source_id`.
-- Updated `items.py`, `transcribe.py`, `ingest.py`, `parse_to_chunks.py`, and `format.py`:
-  - Added internal-only chunk language and ASR-confidence fields.
-  - Preserved provider language, confidence, speaker, and timestamps when available.
-  - Preserved DOCX paragraph index, heading, section, document identity, and exact quotes.
-  - Kept DOCX `page=null`; `_extract_docx` does not invoke rendering in the MVP.
-  - Preserved known source language in the existing public `language` field without adding a field.
-
-Contract impact:
-- None.
-- No endpoint, payload, response field, field type, graph node, or final response structure changed.
-
-Tests:
-- Added regressions for component-owned score defects, duplicate aliases, stable story identities, synonym false positives, explicit versus omitted polarity, technical-actor paraphrases, `or` composites, pre-generation canonicalization, low-ASR evidence, transcription metadata, and DOCX non-rendering fallback.
-- Focused MVP suite: `68 passed`.
-- Full service suite: `371 passed, 1 skipped, 1 warning`.
-- Scoped Ruff validation for the new scoring, semantic, canonicalization, evidence, schema, and regression-test core: all checks passed.
-- The remaining warning is the existing Starlette `httpx`/`httpx2` deprecation warning.
-
-Operational notes:
-- NLI remains disabled and is not an MVP dependency.
-- Cross-language or uncertain evidence produces review/partial output rather than an automatic citation decision.
-- Thresholds are source-independent and no fixture requirement IDs, filenames, or exact fixture statements are hard-coded.
-
-Known limitations:
-- Metadata plus script checks are not a full language-identification system.
-- Deterministic validation is not full multilingual entailment.
-- DOCX page numbers remain null until a controlled renderer is approved and deployed.
-
-### 2026-07-23 - MVP DOCX Paragraph Traceability (Rendering Deferred)
-
-Problem:
-- DOCX documents lacked reliable page numbers for source reference citations (unlike PDF files which have distinct page divisions), making page traceability difficult.
-- In headless production settings, we need a controlled way to render DOCX files to PDF to extract actual visual page boundaries while preserving paragraph structure, headings, and sections when rendering is not possible.
-
-Decision:
-- Use paragraph-level chunking and metadata preservation for the MVP.
-- Keep the page parameter null and never fabricate page numbers.
-- Defer DOCX-to-PDF rendering until the runtime dependency, sandboxing, resource limits, and operational ownership are approved.
-
-Implementation:
-- Modified [items.py](file:///D:/ITI/GP/ai-pipeline/ai-service/app/schemas/items.py):
-  - Added internal fields `paragraph_index`, `heading`, and `section` to the `SourceChunk` class.
-- Modified [ingest.py](file:///D:/ITI/GP/ai-pipeline/ai-service/app/nodes/ingest.py):
-  - Implemented `_extract_docx` returning the full text and parsed paragraph/section metadata.
-  - Passed `docx_paragraphs` in the returned state's `source_documents` list.
-  - Kept the conversion helper as deferred prototype code, but `_extract_docx` does not invoke it in the MVP path.
-- Modified [parse_to_chunks.py](file:///D:/ITI/GP/ai-pipeline/ai-service/app/nodes/parse_to_chunks.py):
-  - Implemented `_chunk_docx_paragraphs` to split fallback text paragraph-by-paragraph up to character limits while attaching start paragraph index, current heading style, and active section header internally on the chunk.
-
-Contract impact:
-- None. The public response contract for `SourceRefV1.page` is unchanged as it already supports optional/null page values.
-
-Tests:
-- Created [test_docx_traceability.py](file:///D:/ITI/GP/ai-pipeline/ai-service/tests/nodes/test_docx_traceability.py) with unit and E2E node tests verifying fallback chunking metadata and page nullability.
-- Added a regression that fails if DOCX conversion is invoked by the MVP ingestion path.
-- Current full-suite result: `371 passed, 1 skipped, 1 warning`.
-
-Operational notes:
-- Reliable page numbers require a future controlled renderer. Paragraph, heading, section, chunk, document, and quote metadata provide honest fallback traceability meanwhile.
-
-### 2026-07-23 - Strengthened Deterministic Evidence Validation
-
-Problem:
-- High lexical scores could bypass validation rules (e.g. numeric mismatches, polarity contradictions, or semantic fact mismatches), resulting in incorrect or weak citations being accepted.
-- Unrelated top-ranked chunks could be incorrectly published as verified evidence, and different source vs requirement languages were not cleanly caught or flagged.
-
-Decision:
-- Strengthen the validation pipeline: evaluate support against specific decision gates (support >= 0.60 must pass all validation checks; support < 0.25 is rejected; support between 0.25 and 0.60 or different languages triggers Review/partial status).
-- Ambiguous or partial evidence is retained (producing an honest partial groundedness result) but flagged for user review, ensuring the pipeline continues smoothly without failing.
-
-Implementation:
-- Modified [semantic_quality.py](file:///D:/ITI/GP/ai-pipeline/ai-service/app/services/semantic_quality.py):
-  - Defined `check_different_languages` to detect language mismatches using primary tags (metadata) or script checks (Arabic characters).
-- Modified [retrieve_evidence.py](file:///D:/ITI/GP/ai-pipeline/ai-service/app/nodes/retrieve_evidence.py):
-  - Refactored `_quote_support_score` and candidate loop to filter snippets and enforce numeric, behavior, polarity, and language check decision flows.
-- Modified [evidence_grounding.py](file:///D:/ITI/GP/ai-pipeline/ai-service/app/nodes/evidence_grounding.py):
-  - Refactored `evidence_grounding_node` to execute the identical decision flow, flagging partial support and different languages while keeping the evidence to calculate the partial score.
-
-Contract impact:
-- None.
-
-Tests:
-- Added `test_evidence_grounding_decision_flow_accept()`, `test_evidence_grounding_decision_flow_reject_mismatch()`, `test_evidence_grounding_decision_flow_partial_support()`, and `test_evidence_grounding_decision_flow_different_languages()`.
-- Full-suite result: `358 passed, 1 skipped, 1 warning`.
-
-Operational notes:
-- Resolves false-positive citations while preserving ambiguous matches for review under `Review / partial` status.
-
-Known limitations:
-- Language detection is limited to metadata comparison and Arabic script regex.
-
-### 2026-07-23 - Scoring Correctness and Three-State Polarity Hardening
-
-Problem:
-- Evidence issues (like missing or unverified evidence) applied duplicate penalties and caps, double-penalizing requirements whose groundedness component score had already taken a hit.
-- Omissions of facts or unrelated acceptance criteria were incorrectly treated as contradictions (polarity reversals) rather than omission (not covered), resulting in false-positive quality issues and severe overall score drops (e.g. from 0.91 to 0.21).
-
-Decision:
-- Avoid double-penalization: exclude quality issues already represented by component scores (especially evidence grounding issues) from overall score penalties and caps.
-- Introduce three polarity states: ENTAILED, CONTRADICTED, and NOT_COVERED, and treat omission or unrelated acceptance criteria as NOT_COVERED rather than a polarity conflict. Let NOT_COVERED reduce clause coverage rather than create a contradiction.
-
-Implementation:
-- Modified [semantic_quality.py](file:///D:/ITI/GP/ai-pipeline/ai-service/app/services/semantic_quality.py):
-  - Added `evaluate_polarity(text, sources) -> str` returning "ENTAILED", "CONTRADICTED", or "NOT_COVERED".
-  - Redefined `has_polarity_conflict(text, sources) -> bool` to return True only on "CONTRADICTED".
-  - Updated `clause_coverage` to check that the matched criterion does not contradict the clause.
-- Modified [quality_scoring.py](file:///D:/ITI/GP/ai-pipeline/ai-service/app/services/quality_scoring.py):
-  - Normalized issues into root-cause families (grouping `missing_evidence`, `missing_verified_evidence`, and `evidence_semantic_mismatch` into `EVIDENCE_NOT_GROUNDED`).
-  - Grouped issues by `(item_id, root_cause)` so multiple warnings count once.
-  - Excluded represented grounding issues (`EVIDENCE_NOT_GROUNDED`, `evidence_not_grounded`, `evidence_chunk_mismatch`, `evidence_document_mismatch`), diagnostic events, and informational relationships (`COMPLEMENTARY`) from penalties and score caps.
-
-Contract impact:
-- None.
-
-Tests:
-- Added `test_three_state_polarity()`, `test_clause_coverage_with_contradiction()`, and `test_quality_scoring_deduplication_and_exclusions()`.
-- Full-suite result: `354 passed, 1 skipped, 1 warning`.
-
-Operational notes:
-- The updated logic ensures that regenerated pipeline outputs like `response.json` do not suffer from false-positive score drops.
-
-Known limitations:
-- Number words (e.g. "three") are not normalized. Negation words are matched via simple regex.
-
-### 2026-07-22 - MVP response-quality hardening
-
-Problem:
-- The response retained actor-dependent exact duplicates and atomic/composite duplicates.
-- Stories and acceptance criteria could introduce unsupported non-numeric behavior.
-- Traceability and acceptance-criteria sub-scores could remain perfect despite incomplete fact coverage.
-- Priorities were inflated by normative words, categories were always General, and long multi-document summaries lost or conflated context.
-
-Decision:
-- Keep the current graph and public contracts.
-- Make canonical source propositions and verified source facts authoritative for generation, validation, scoring, and summarization.
-
-Implementation:
-- Added connected-component canonicalization with source-level composite selection.
-- Added internal fact-token, clause-coverage, polarity, category, priority, and Fibonacci-estimation helpers.
-- Sanitized mappings and acceptance criteria before coverage is finalized.
-- Added fact-aware scoring and hierarchical per-document summaries.
-- Hardened extraction, generation, repair, and summary prompts against unsupported facts and embedded instructions.
-
-Contract impact:
-- None.
-
-Tests:
-- Focused suite: `53 passed`.
-- Full suite: `351 passed, 1 skipped, 1 warning`.
-- Golden canonicalization: 27 raw fixture requirements become 16 canonical source-level requirements.
-
-Operational notes:
-- Regenerate the two-file response before release and compare it with the gates in Section 13.10.
-
-Known limitations:
-- Deterministic lexical/fact checks are not full entailment and remain English-oriented.
-
-### 2026-07-22 - Evidence and quality-score hardening
-
-Problem:
-- Retrieval hits contaminated public traceability.
-- Grounding accepted quotes found in any chunk.
-- Evidence presence could produce perfect groundedness.
-- Story IDs counted as traceability without content alignment.
-- Unsupported acceptance-criteria numbers and near-duplicate stories were missed.
-
-Decision:
-- Keep the existing graph and API contract.
-- Introduce internal evidence provenance and deterministic support scoring.
-- Make grounding authoritative and remove invalid evidence before formatting.
-- Penalize semantic problems in the existing quality report.
-
-Implementation:
-- Added `semantic_quality.py`.
-- Hardened extraction provenance, retrieval, grounding, story validation, quality gate, scoring, and formatting.
-- Added focused semantic-quality regressions.
-
-Contract impact:
-- None.
-
-Tests:
-- `340 passed, 1 skipped, 1 warning`.
-
-Known limitations:
-- Deterministic lexical support is not full entailment; ambiguous cases should later use batched NLI adjudication.
-
-### 2026-07-18 - Priority, story-point, and conflict-guidance enhancements
-
-Commits:
-- `9c3c632` added keyword-based priority upgrades during extraction.
-- `2e0d6b1` preserved priority through all classification paths.
-- `f31c632` generated and propagated Fibonacci story points into existing Jira fields.
-- `121ae1e` generated actionable conflict-resolution choices inside existing warnings.
-
-Contract impact:
-- None. Existing nodes, endpoints, request payloads, and final response structure were retained.
-
-Details and follow-up recommendations:
-- See Section 12.
+| Extraction and evidence diagnostics | [extract.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/extract.py) | [test_extract.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/nodes/test_extract.py), [test_extract_grounding.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/nodes/test_extract_grounding.py), [test_extract_normalization.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/nodes/test_extract_normalization.py) |
+| Priority and category | [classify.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/classify.py), [semantic_quality.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/services/semantic_quality.py) | [test_classify.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/nodes/test_classify.py) |
+| Requirement canonicalization and conflicts | [dedupe_requirements.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/dedupe_requirements.py) | [test_dedupe_requirements.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/nodes/test_dedupe_requirements.py), [test_semantic_conflict.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/nodes/test_semantic_conflict.py) |
+| Retrieval candidates | [retrieve_evidence.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/retrieve_evidence.py) | [test_retrieve_evidence.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/nodes/test_retrieve_evidence.py) |
+| Authoritative grounding and warning reconciliation | [evidence_grounding.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/evidence_grounding.py) | [test_evidence_grounding.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/nodes/test_evidence_grounding.py) |
+| Shared semantic decisions | [semantic_quality.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/services/semantic_quality.py) | [test_semantic_quality_hardening.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/services/test_semantic_quality_hardening.py) |
+| Story generation and fallback | [generate.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/generate.py) | [test_generate_quality.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/nodes/test_generate_quality.py) |
+| Story repair | [repair_stories.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/repair_stories.py) | [test_repair_stories.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/nodes/test_repair_stories.py) |
+| Story validation | [story_validator.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/validators/story_validator.py) | [test_story_validator.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/validators/test_story_validator.py) |
+| Quality gate | [quality_gate.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/quality_gate.py) | [test_quality_gate.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/nodes/test_quality_gate.py) |
+| Quality scoring | [quality_scoring.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/services/quality_scoring.py) | [test_quality_scoring.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/services/test_quality_scoring.py) |
+| Hierarchical summary | [summarize.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/summarize.py) | [test_summarize.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/nodes/test_summarize.py), [test_summarize_digest.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/nodes/test_summarize_digest.py) |
+| DOCX ingestion and chunking | [ingest.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/ingest.py), [parse_to_chunks.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/parse_to_chunks.py) | [test_docx_traceability.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/nodes/test_docx_traceability.py), [test_ingest.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/nodes/test_ingest.py) |
+| Audio metadata | [transcribe.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/transcribe.py) | [test_transcribe.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/nodes/test_transcribe.py) |
+| Final output and status | [format.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/format.py) | [test_format.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/nodes/test_format.py), [test_format_exports.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/nodes/test_format_exports.py) |
+| Contract compatibility | API and schema layers | [test_contract_v1.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/test_contract_v1.py), [test_direct_contract.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/test_direct_contract.py) |
+| Full MVP behavior | Complete graph | [test_mvp_quality.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/test_mvp_quality.py), [test_e2e_mocked.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/test_e2e_mocked.py), [test_pipeline.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/test_pipeline.py) |
+
+Paths in this appendix are absolute IDE URLs mapping to local codebase paths.
+
+## Appendix C. Reviewer glossary
+
+| Term | Meaning |
+|---|---|
+| Candidate evidence | A retrieved chunk that has not yet passed grounding. |
+| Verified evidence | Evidence that passed provenance, quote, semantic, numeric, behavior, and polarity checks. |
+| Review evidence | A plausible but insufficiently certain match that is not published as a citation. |
+| Clause coverage | The portion of distinct source requirement facts represented by a story or its criteria. |
+| Component-owned defect | A defect already represented by one of the five score components. |
+| Diagnostic event | Internal processing information that helps debugging but is not a user-facing quality defect. |
+| Informational relationship | A valid relationship such as `COMPLEMENTARY` that does not indicate poor quality. |
+| Fact ledger | The set of source-supported facts supplied to generation or repair. |
+| Canonical requirement | The stable requirement produced after exact, paraphrase, and composite duplicate merging. |
