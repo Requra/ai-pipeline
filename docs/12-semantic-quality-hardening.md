@@ -8,7 +8,7 @@
 >
 > **Implementation status:** MVP implemented
 >
-> **Last verified:** 24 July 2026
+> **Last verified:** 26 July 2026
 >
 > **Compatibility guarantee:** no API endpoint, request payload, or final response structure was changed
 
@@ -57,6 +57,8 @@ The main outcomes are:
     normalized from source facts, and conflict warnings include actionable
     resolution options.
 12. Resolved extraction warnings are removed after authoritative grounding.
+13. All reasoning-model calls share bounded concurrency, provider timeouts, and
+    rate-limit-aware retries without removing any quality-generation step.
 
 The branch uses deterministic semantic checks for the MVP. It does not require
 an NLI service or an additional LLM call for evidence adjudication.
@@ -219,12 +221,13 @@ Primary implementation:
 Configuration:
 
 ```text
-ENABLE_QUALITY_REPAIR=false
+ENABLE_QUALITY_REPAIR=true
 MAX_REPAIR_ATTEMPTS=1
 ```
 
-Repair is disabled by default for MVP predictability. It can be enabled without
-changing the API contract.
+Repair is enabled for the MVP, but it runs only when the quality gate finds a
+repairable story defect. The single-attempt limit prevents uncontrolled latency
+or loops.
 
 Primary implementation:
 
@@ -382,6 +385,46 @@ prints:
 
 It is a developer utility and does not affect the API or pipeline result.
 
+### 5.12 LLM request reliability
+
+All existing reasoning-model calls now pass through one resilient internal
+client, even when no fallback provider is configured.
+
+| Control | MVP default | Behavior |
+|---|---:|---|
+| `LLM_MAX_CONCURRENCY` | `2` | Limits simultaneous LLM requests per service process. |
+| `LLM_MAX_RETRIES` | `2` | Allows two retries after the initial request. |
+| `LLM_RETRY_BASE_SECONDS` | `1.0` | Starts exponential retry delay at one second. |
+| `LLM_RETRY_MAX_SECONDS` | `30.0` | Bounds retry delay and provider `Retry-After` handling. |
+| `PROVIDER_TIMEOUT_SECONDS` | `120` | Applies a timeout to every reasoning-provider request. |
+
+Retry delays use exponential backoff with jitter and honor a valid
+`Retry-After` header up to the configured maximum. The underlying provider
+client has its own retries disabled so requests are not multiplied by nested
+retry layers.
+
+This change controls request bursts from parallel extraction chunks and
+concurrent jobs. It does not skip extraction, classification, generation,
+summarization, grounding, validation, or scoring, and it does not change the
+public API contract.
+
+Conflict detection and quality repair are enabled for the MVP:
+
+```text
+ENABLE_CONFLICT_DETECTION=true
+ENABLE_QUALITY_REPAIR=true
+```
+
+Conflict adjudication calls the LLM only when deterministic candidate selection
+finds related requirement pairs. Repair calls the LLM only when a repairable
+story defect remains after the quality gate, and it is limited to one attempt.
+
+Primary implementation:
+
+- [llm.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/llm.py)
+- [config.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/config.py)
+- [.env.example](file:///d:/ITI/GP/ai-pipeline/ai-service/.env.example)
+
 ## 6. Decision rules and thresholds
 
 ### 6.1 Evidence publication matrix
@@ -461,6 +504,10 @@ The response-quality changes also improve production safety:
 - Repair loops are bounded.
 - Summary input sizes are bounded.
 - Model failures have deterministic fallbacks.
+- Parallel LLM calls are bounded by one shared per-process concurrency gate.
+- Retryable provider errors use bounded exponential backoff with jitter.
+- Valid provider `Retry-After` guidance is used when calculating retry delay.
+- Every reasoning request uses the configured provider timeout.
 - Ambiguity degrades to review/partial rather than failing the whole pipeline.
 - No external NLI dependency or per-pair LLM adjudication cost is required.
 
@@ -479,10 +526,14 @@ budgets, metrics, tracing, and deployment health checks.
    domain vocabulary appears.
 5. **LLM variability:** free or changing providers may affect extraction count,
    latency, and structure despite normalization and fallbacks.
-6. **Repair disabled by default:** enabling repair improves some artifacts but
-   adds latency and another model interaction.
+6. **Conditional conflict and repair cost:** both features are enabled, but
+   their LLM calls occur only when conflict candidates or repairable story
+   defects exist.
 7. **Operational latency:** semantic quality is improved, but provider response
    time and large-document processing still require production SLO monitoring.
+8. **Per-process concurrency:** the LLM concurrency gate is shared inside one
+   service process. Multiple worker processes multiply the effective provider
+   concurrency and must be sized together.
 
 Recommended post-MVP work:
 
@@ -501,7 +552,7 @@ Recommended post-MVP work:
 
 The branch was last verified with:
 
-- `385 passed`
+- `389 passed`
 - `1 skipped`
 - `1 existing Starlette/httpx deprecation warning`
 - Ruff critical checks passed
@@ -630,6 +681,7 @@ represented below.
 | Final output and status | [format.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/format.py) | [test_format.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/nodes/test_format.py), [test_format_exports.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/nodes/test_format_exports.py) |
 | Contract compatibility | API and schema layers | [test_contract_v1.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/test_contract_v1.py), [test_direct_contract.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/test_direct_contract.py) |
 | Full MVP behavior | Complete graph | [test_mvp_quality.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/test_mvp_quality.py), [test_e2e_mocked.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/test_e2e_mocked.py), [test_pipeline.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/test_pipeline.py) |
+| LLM concurrency, retry, timeout, and fallback | `app/llm.py`, `app/config.py` | `tests/test_llm_fallback.py`, `tests/test_llm_provider.py` |
 
 Paths in this appendix are absolute IDE URLs mapping to local codebase paths.
 

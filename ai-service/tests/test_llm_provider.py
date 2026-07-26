@@ -15,6 +15,7 @@ def _inject_fake_langchain_openai():
             self.api_key = api_key
             self.base_url = base_url
             self.default_headers = default_headers
+            self.kwargs = kwargs
 
     fake_mod = types.ModuleType("langchain_openai")
     setattr(fake_mod, "ChatOpenAI", FakeChatOpenAI)
@@ -37,10 +38,14 @@ def test_get_llm_openrouter(monkeypatch):
     from app.llm import get_llm
 
     llm = get_llm()
-    assert llm.model == "test-model"
-    assert llm.api_key == "test-openrouter-key"
-    assert llm.base_url == "https://openrouter.test/api/v1"
-    assert llm.default_headers["X-OpenRouter-Title"] == "Test App"
+    provider_client = llm._instantiate_client("openrouter", "test-model")
+    assert llm.providers == [{"provider": "openrouter", "model": "test-model"}]
+    assert provider_client.model == "test-model"
+    assert provider_client.api_key == "test-openrouter-key"
+    assert provider_client.base_url == "https://openrouter.test/api/v1"
+    assert provider_client.default_headers["X-OpenRouter-Title"] == "Test App"
+    assert provider_client.kwargs["timeout"] == settings.PROVIDER_TIMEOUT_SECONDS
+    assert provider_client.kwargs["max_retries"] == 0
 
 
 def test_get_llm_openai(monkeypatch):
@@ -52,8 +57,10 @@ def test_get_llm_openai(monkeypatch):
     from app.llm import get_llm
 
     llm = get_llm()
-    assert llm.model == "gpt-4o-mini"
-    assert llm.api_key == "test-openai-key"
+    provider_client = llm._instantiate_client("openai", "gpt-4o-mini")
+    assert llm.providers == [{"provider": "openai", "model": "gpt-4o-mini"}]
+    assert provider_client.model == "gpt-4o-mini"
+    assert provider_client.api_key == "test-openai-key"
 
 
 def test_get_llm_groq(monkeypatch):
@@ -65,9 +72,11 @@ def test_get_llm_groq(monkeypatch):
     from app.llm import get_llm
 
     llm = get_llm()
-    assert llm.model == "llama-3.3-70b-versatile"
-    assert llm.api_key == "test-groq-key"
-    assert llm.base_url == "https://api.groq.com/openai/v1"
+    provider_client = llm._instantiate_client("groq", "llama-3.3-70b-versatile")
+    assert llm.providers == [{"provider": "groq", "model": "llama-3.3-70b-versatile"}]
+    assert provider_client.model == "llama-3.3-70b-versatile"
+    assert provider_client.api_key == "test-groq-key"
+    assert provider_client.base_url == "https://api.groq.com/openai/v1"
 
 
 def test_get_llm_unsupported(monkeypatch):
