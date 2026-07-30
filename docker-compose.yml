@@ -12,7 +12,6 @@ x-ai-env: &ai-env
   ENV: ${ENV:-development}
   PYTHONUNBUFFERED: "1"
   ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:5173,http://localhost:3000}
-  AI_INTERNAL_SERVICE_TOKEN: ${AI_INTERNAL_SERVICE_TOKEN:-dev-internal-token}
   DATABASE_URL: postgresql+asyncpg://ai:ai@postgres:5432/ai_pipeline
   REDIS_URL: redis://redis:6379/0
   QUEUE_NAME: ${QUEUE_NAME:-ai_jobs}
