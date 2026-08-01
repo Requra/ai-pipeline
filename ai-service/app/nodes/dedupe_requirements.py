@@ -95,6 +95,39 @@ def _actors_conflict(a: ExtractedRequirement, b: ExtractedRequirement) -> bool:
     return False
 
 
+def _numeric_constraint_context(text: str) -> set[str]:
+    """Return the measurement concepts surrounding numeric constraints."""
+    token_matches = list(re.finditer(r"[$€£]?\d[\d,]*(?:\.\d+)?|[a-z]+", (text or "").lower()))
+    numeric_positions = [
+        index for index, match in enumerate(token_matches)
+        if re.fullmatch(r"[$€£]?\d[\d,]*(?:\.\d+)?", match.group(0))
+    ]
+    context: set[str] = set()
+    for index in numeric_positions:
+        start = max(0, index - 6)
+        end = min(len(token_matches), index + 7)
+        window = " ".join(match.group(0) for match in token_matches[start:end])
+        context.update(fact_tokens(window))
+    return context - {
+        "asset", "standard", "system", "user", "shall", "must", "allow",
+        "requirement", "request", "number", "value", "than", "under", "over",
+    }
+
+
+def _orthogonal_numeric_constraints(a: ExtractedRequirement, b: ExtractedRequirement) -> bool:
+    """True when two numeric rules constrain different workflow dimensions.
+
+    Sharing an entity or workflow does not make a monetary threshold conflict
+    with a quantity, duration, availability, or performance limit. An LLM may
+    propose a conflict only when the measurement contexts materially overlap.
+    """
+    a_context = _numeric_constraint_context(a.text)
+    b_context = _numeric_constraint_context(b.text)
+    if not a_context or not b_context:
+        return False
+    return len(a_context & b_context) < 2
+
+
 def _higher_priority(p1: str, p2: str) -> str:
     return p1 if _PRIORITY_RANK.get(p1, 1) >= _PRIORITY_RANK.get(p2, 1) else p2
 
@@ -341,7 +374,7 @@ def _format_req_id(req_id: int) -> str:
 
 
 def _parse_req_int_id(req_str_id: str) -> Optional[int]:
-    match = re.search(r"\d+", req_str_id)
+    match = re.search(r"\d+", str(req_str_id))
     return int(match.group(0)) if match else None
 
 
@@ -555,21 +588,43 @@ async def dedupe_requirements_node(state: PipelineState) -> dict:
                         continue
                     if classification not in valid_classifications:
                         continue
-                    
+
                     req_a_int = _parse_req_int_id(req_a_id)
+                    req_b_int = _parse_req_int_id(req_b_id)
+                    req_a = next((req for req in deduped if req.id == req_a_int), None)
+                    req_b = next((req for req in deduped if req.id == req_b_int), None)
+                    if (
+                        classification == "CONSTRAINT_CONFLICT"
+                        and req_a is not None
+                        and req_b is not None
+                        and _orthogonal_numeric_constraints(req_a, req_b)
+                    ):
+                        classification = "COMPLEMENTARY"
+                        reason = (
+                            "The requirements constrain different measurable "
+                            "dimensions of the same workflow and can both apply."
+                        )
+                        question = ""
+                        resolution_options = []
                     
                     options_str = ""
-                    if resolution_options:
+                    if resolution_options and classification != "COMPLEMENTARY":
                         options_str = "\n  - Proposed Resolutions:\n" + "\n".join(f"    {idx}. {opt}" for idx, opt in enumerate(resolution_options, start=1))
 
-                    # Formatting warning and issues text cleanly
-                    details = (
-                        f"Conflict detected between {req_a_id} and {req_b_id}:\n"
-                        f"  - Category: {classification}\n"
-                        f"  - Reason: {reason}\n"
-                        f"  - Clarification Question: {question}"
-                        f"{options_str}"
-                    )
+                    if classification == "COMPLEMENTARY":
+                        details = (
+                            f"Related requirements {req_a_id} and {req_b_id} are complementary:\n"
+                            f"  - Reason: {reason}"
+                        )
+                    else:
+                        # Formatting warning and issues text cleanly
+                        details = (
+                            f"Conflict detected between {req_a_id} and {req_b_id}:\n"
+                            f"  - Category: {classification}\n"
+                            f"  - Reason: {reason}\n"
+                            f"  - Clarification Question: {question}"
+                            f"{options_str}"
+                        )
                     
                     conflict_warnings.append(PipelineWarning(
                         node_name="dedupe_requirements",
@@ -577,7 +632,9 @@ async def dedupe_requirements_node(state: PipelineState) -> dict:
                         message=details
                     ))
                     
-                    if req_a_int is not None:
+                    # Complementary relationships are useful context, not a
+                    # quality defect and do not require conflict resolution.
+                    if req_a_int is not None and classification != "COMPLEMENTARY":
                         severity = "high" if classification in ("CONTRADICTION", "PERMISSION_CONFLICT") else "medium"
                         conflict_issues.append(QualityIssue(
                             item_id=req_a_int,
