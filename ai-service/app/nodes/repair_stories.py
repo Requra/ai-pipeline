@@ -11,6 +11,10 @@ from app.llm import get_llm
 from app.prompts.loader import load_prompt
 from app.prompts.registry import PromptId
 from app.progress import update_progress
+from app.nodes.generate import (
+    _sanitize_generated_story,
+    rebuild_requirement_coverages,
+)
 
 logger = logging.getLogger("app.nodes.repair_stories")
 
@@ -19,6 +23,7 @@ REPAIRABLE_RULES = {
     "story_description_shape",
     "story_empty_title",
     "generic_acceptance_criteria",
+    "duplicate_acceptance_criterion",
     "insufficient_acceptance_criteria",
     "all_generic_acceptance_criteria",
     "weak_description",
@@ -193,6 +198,20 @@ async def repair_stories_node(state: PipelineState) -> dict:
                 # Good stories are kept exactly identical (same object reference)
                 updated_stories.append(s)
 
+        # LLM repair is never authoritative. Reapply the same deterministic
+        # source-bound sanitation used after generation so repair cannot
+        # reintroduce unsupported behavior, duplicate criteria, bad labels, or
+        # technical personas.
+        updated_stories = [
+            _sanitize_generated_story(story, req_map)
+            for story in updated_stories
+        ]
+        final_coverages = rebuild_requirement_coverages(
+            reqs,
+            updated_stories,
+            state.get("requirement_coverages", []) or [],
+        )
+
         # Track resolved issues
         resolved_issues = []
         remaining_issues = []
@@ -218,6 +237,7 @@ async def repair_stories_node(state: PipelineState) -> dict:
         
         return {
             "user_stories": updated_stories,
+            "requirement_coverages": final_coverages,
             "quality_issues": remaining_issues,
             "resolved_quality_issues": (state.get("resolved_quality_issues", []) or []) + resolved_issues,
             "repair_attempts": attempts + 1
