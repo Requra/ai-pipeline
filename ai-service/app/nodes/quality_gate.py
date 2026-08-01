@@ -8,7 +8,11 @@ from app.schemas.items import (
 )
 from app.progress import update_progress
 from app.services.quality_scoring import compute_quality_scores
-from app.validators.story_validator import find_duplicate_story_ids, is_generic_ac
+from app.validators.story_validator import (
+    find_duplicate_acceptance_criterion_ids,
+    find_duplicate_story_ids,
+    is_generic_ac,
+)
 from app.services.semantic_quality import (
     clause_coverage,
     clear_story_mapping_mismatch,
@@ -359,17 +363,41 @@ async def quality_gate_node(state: PipelineState) -> dict:
                 details=f"Requirement {r.id} classified with low confidence ({conf:.2f}); review recommended.",
             ))
 
-    # Stories whose acceptance criteria are all generic / boilerplate.
+    # Generic or redundant criteria are not counted as fully testable merely
+    # because a story has two strings in Given/When/Then form.
     for s in stories:
         story_index = story_item_ids[id(s)]
         acs = getattr(s, "acceptance_criteria", []) or []
-        if acs and all(is_generic_ac(getattr(ac, "text", "")) for ac in acs):
+        generic_count = sum(
+            1 for ac in acs if is_generic_ac(getattr(ac, "text", ""))
+        )
+        if generic_count:
             new_issues.append(QualityIssue(
                 item_id=story_index,
                 item_type="story",
                 severity="medium",
                 rule_violated="generic_acceptance_criteria",
-                details=f"Story {s.id} has only generic acceptance criteria; they should be specific and testable.",
+                details=(
+                    f"Story {s.id} has {generic_count} generic acceptance "
+                    "criterion/criteria; replace boilerplate with observable outcomes."
+                ),
+            ))
+        linked = [
+            req_map[req_id]
+            for req_id in (getattr(s, "source_requirement_ids", []) or [])
+            if req_id in req_map
+        ]
+        duplicate_ac_ids = find_duplicate_acceptance_criterion_ids(s, linked)
+        if duplicate_ac_ids:
+            new_issues.append(QualityIssue(
+                item_id=story_index,
+                item_type="story",
+                severity="medium",
+                rule_violated="duplicate_acceptance_criterion",
+                details=(
+                    f"Story {s.id} has redundant acceptance criteria: "
+                    f"{', '.join(duplicate_ac_ids)}."
+                ),
             ))
 
     # Duplicate stories.
