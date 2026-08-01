@@ -8,6 +8,7 @@ from app.llm import get_llm
 from app.prompts.loader import load_prompt
 from app.prompts.registry import PromptId
 from app.progress import update_progress
+from app.services.semantic_quality import proposition_support
 
 logger = logging.getLogger(__name__)
 
@@ -46,8 +47,20 @@ def _safe_str_list(value) -> list[str]:
     if not value:
         return []
     if isinstance(value, str):
-        return [value]
-    return [str(v) for v in value if v]
+        value = [value]
+    elif not isinstance(value, (list, tuple, set)):
+        value = [value]
+    result: list[str] = []
+    null_sentinels = {
+        "none", "none.", "n/a", "na", "null", "no", "not applicable",
+        "no open questions", "no open questions.",
+    }
+    for item in value:
+        text = str(item or "").strip()
+        if not text or text.lower() in null_sentinels or text in result:
+            continue
+        result.append(text)
+    return result
 
 
 def _parse_summary(content: str) -> StructuredSummary:
@@ -240,14 +253,130 @@ async def _synthesize_summaries(
 
 
 def _append_pipeline_questions(summary: StructuredSummary, state: PipelineState) -> StructuredSummary:
-    questions = list(summary.open_questions)
+    questions = _safe_str_list(summary.open_questions)
     for warning in state.get("warnings", []) or []:
         message = warning.get("message", "") if isinstance(warning, dict) else getattr(warning, "message", "")
         match = re.search(r"Clarification Question:\s*(.+?)(?:\n|$)", message or "")
-        if match and match.group(1).strip() and match.group(1).strip() not in questions:
-            questions.append(match.group(1).strip())
+        if match:
+            questions.extend(_safe_str_list(match.group(1).strip()))
+            questions = list(dict.fromkeys(questions))
     summary.open_questions = questions
     return summary
+
+
+def _ensure_requirement_summary_coverage(
+    summary: StructuredSummary,
+    state: PipelineState,
+) -> StructuredSummary:
+    """Ensure every canonical fact appears in one structured summary field.
+
+    The LLM remains responsible for concise prose. This deterministic pass only
+    restores omitted source facts; it never invents a risk, decision, or scope.
+    """
+    reqs = state.get("classified_requirements") or state.get("extracted_requirements") or []
+    fields = (
+        summary.executive_summary,
+        *summary.key_decisions,
+        *summary.open_questions,
+        *summary.risks,
+        *summary.assumptions,
+        *summary.action_items,
+        *summary.scope,
+        *summary.out_of_scope,
+    )
+    represented_text = " ".join(fields)
+    for req in reqs:
+        text = (getattr(req, "text", "") or "").strip()
+        if not text or proposition_support(text, represented_text) >= 0.55:
+            continue
+        labels = set(
+            getattr(req, "labels", None)
+            or getattr(req, "candidate_labels", None)
+            or []
+        )
+        if "Open Question" in labels:
+            target = summary.open_questions
+        elif "Out-of-Scope" in labels:
+            target = summary.out_of_scope
+        elif "Assumption" in labels:
+            target = summary.assumptions
+        else:
+            target = summary.scope
+        if text not in target:
+            target.append(text)
+        represented_text = f"{represented_text} {text}"
+    summary.open_questions = _safe_str_list(summary.open_questions)
+    return summary
+
+
+def _ensure_summary_stakeholders_and_constraints(
+    summary: StructuredSummary,
+    state: PipelineState,
+) -> StructuredSummary:
+    """Recover explicit actors and key quality constraints deterministically."""
+    reqs = state.get("classified_requirements") or state.get("extracted_requirements") or []
+    technical_actors = {
+        "system", "service", "application", "portal", "workspace", "database", "api",
+    }
+    stakeholder_map = {
+        "administrator": "Administrators",
+        "admin": "Administrators",
+        "user": "Users",
+        "manager": "Managers",
+        "customer": "Customers",
+        "analyst": "Analysts",
+        "operator": "Operators",
+        "supervisor": "Supervisors",
+    }
+    stakeholders = _safe_str_list(summary.stakeholders)
+    for req in reqs:
+        actor = re.sub(r"^(?:a|an|the)\s+", "", (getattr(req, "actor", "") or "").strip(), flags=re.I)
+        lowered = actor.lower().rstrip("s")
+        if not actor or lowered in technical_actors:
+            continue
+        stakeholder = stakeholder_map.get(lowered, actor.title())
+        if stakeholder not in stakeholders:
+            stakeholders.append(stakeholder)
+    summary.stakeholders = stakeholders
+
+    key_constraints = []
+    for req in reqs:
+        text = (getattr(req, "text", "") or "").strip()
+        labels = set(getattr(req, "labels", None) or [])
+        if not text:
+            continue
+        if (
+            labels.intersection({"NFR", "Constraint"})
+            or re.search(
+                r"\b(?:tls|encrypt|uptime|availability|latency|response time|"
+                r"concurrent|sessions?|seconds?|milliseconds?|percent|%)\b",
+                text,
+                re.I,
+            )
+        ):
+            key_constraints.append(text)
+
+    missing_constraints = [
+        text
+        for text in key_constraints
+        if proposition_support(text, summary.executive_summary) < 0.45
+    ][:4]
+    if missing_constraints:
+        suffix = " Key constraints include: " + "; ".join(
+            text.rstrip(".") for text in missing_constraints
+        ) + "."
+        summary.executive_summary = (summary.executive_summary.rstrip() + suffix).strip()
+    return summary
+
+
+def _finalize_summary(summary: StructuredSummary, state: PipelineState) -> StructuredSummary:
+    return _ensure_summary_stakeholders_and_constraints(
+        _ensure_requirement_summary_coverage(
+            _append_pipeline_questions(summary, state),
+            state,
+        ),
+        state,
+    )
 
 
 async def summarize_node(state: PipelineState) -> dict:
@@ -285,7 +414,7 @@ async def summarize_node(state: PipelineState) -> dict:
                 + (f"\n\nStructured analysis extracted so far:\n{digest}" if digest else "")
             )
             summary = await _invoke_summary(llm, system_prompt, user_message)
-            return {"summary": _append_pipeline_questions(summary, state)}
+            return {"summary": _finalize_summary(summary, state)}
 
         partials: list[tuple[str, StructuredSummary]] = []
         for label, part_number, part_count, source_text in segments:
@@ -297,11 +426,11 @@ async def summarize_node(state: PipelineState) -> dict:
             partials.append((label, await _invoke_summary(llm, system_prompt, message)))
 
         summary = await _synthesize_summaries(llm, system_prompt, partials, digest)
-        return {"summary": _append_pipeline_questions(summary, state)}
+        return {"summary": _finalize_summary(summary, state)}
 
     except Exception:
         logger.exception("Summarize node LLM failure")
-        return {"summary": StructuredSummary(
+        summary = StructuredSummary(
             executive_summary=(
                 "; ".join(f"{label}: {text[:180]}" for label, text in units)
                 if units else (raw_text[:300] + "..." if raw_text else "")
@@ -314,4 +443,5 @@ async def summarize_node(state: PipelineState) -> dict:
             stakeholders=[],
             scope=[],
             out_of_scope=[],
-        )}
+        )
+        return {"summary": _finalize_summary(summary, state)}
