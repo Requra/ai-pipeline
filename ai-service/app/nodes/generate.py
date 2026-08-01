@@ -6,7 +6,11 @@ from app.prompts.registry import PromptId
 from app.progress import update_progress
 from app.nodes.dedupe_requirements import canonicalize_requirements
 from app.nodes.extract import project_legacy_requirements
-from app.validators.story_validator import find_duplicate_story_ids, validate_stories
+from app.validators.story_validator import (
+    find_duplicate_acceptance_criterion_ids,
+    find_duplicate_story_ids,
+    validate_stories,
+)
 from app.services.semantic_quality import (
     clause_coverage,
     fact_tokens,
@@ -20,6 +24,7 @@ from app.services.semantic_quality import (
     story_alignment,
     unsupported_fact_terms,
     unsupported_numeric_claims,
+    unsupported_review_terms,
 )
 from pydantic import BaseModel, Field
 from typing import List, Any, Optional
@@ -98,6 +103,19 @@ def normalize_actor_to_agile_role(actor: Optional[str]) -> str:
             
     return actor_lower
 
+
+def normalize_story_persona(description: str) -> str:
+    """Replace technical-component personas with a valid operational role."""
+    text = (description or "").strip()
+    technical_persona = re.compile(
+        r"^As\s+(?:a|an|the)\s+"
+        r"(?:system|service|application|portal|workspace|database|api)\s*,",
+        re.IGNORECASE,
+    )
+    if technical_persona.search(text):
+        return technical_persona.sub("As a system operator,", text, count=1)
+    return text
+
 def normalize_generation_payload(parsed: Any) -> dict:
     if isinstance(parsed, list):
         return {"stories": parsed}
@@ -158,30 +176,70 @@ def build_specific_acceptance_criteria(req, story_id: str, agile_actor: str) -> 
     """Deterministic, requirement-specific acceptance criteria for fallbacks.
 
     Embeds the requirement text so the criteria are concrete and testable rather
-    than generic boilerplate. Always returns at least two Given-When-Then items.
+    than generic boilerplate. Atomic requirements may correctly produce one
+    criterion; composite requirements produce one per independent clause.
     """
     return build_source_bound_acceptance_criteria([req], story_id)
 
 
+def _observable_outcome(clause: str) -> str:
+    """Convert common requirement modals into readable observable outcomes."""
+    text = (clause or "").strip().rstrip(".")
+    modal = re.match(
+        r"^(?P<subject>.+?)\s+(?:shall|must|will|should)\s+"
+        r"(?P<negative>not\s+)?(?P<be>be\s+)?(?P<predicate>.+)$",
+        text,
+        re.IGNORECASE,
+    )
+    if not modal:
+        return text[:1].lower() + text[1:] if text else text
+
+    subject = modal.group("subject").strip()
+    predicate = modal.group("predicate").strip()
+    negative = bool(modal.group("negative"))
+    is_plural = (
+        subject.lower() == "they"
+        or subject.lower().endswith((" users", " records", " assets", " requests", " codes"))
+    )
+    if modal.group("be"):
+        verb = "are" if is_plural else "is"
+        outcome = f"{subject} {verb}{' not' if negative else ''} {predicate}"
+    else:
+        words = predicate.split(maxsplit=1)
+        action = words[0]
+        remainder = f" {words[1]}" if len(words) > 1 else ""
+        if not is_plural and not negative:
+            action = action + ("s" if action.endswith("e") else "es" if action.endswith(("s", "x", "z", "ch", "sh")) else "s")
+        auxiliary = "do not " if negative and is_plural else "does not " if negative else ""
+        outcome = f"{subject} {auxiliary}{action}{remainder}"
+    return outcome[:1].lower() + outcome[1:]
+
+
 def build_source_bound_acceptance_criteria(requirements, story_id: str) -> List[AcceptanceCriterion]:
-    """Create criteria that restate only facts present in canonical requirements."""
-    clauses = [
-        clause
+    """Create one readable, source-bound criterion per canonical clause."""
+    clause_contexts = [
+        (req, clause)
         for req in requirements
         for clause in split_requirement_clauses(getattr(req, "text", "") or "")
     ]
-    if not clauses:
-        clauses = ["the linked source requirement"]
+    if not clause_contexts:
+        clause_contexts = [(None, "The linked source requirement is satisfied")]
 
-    criteria = [
-        f"Given the documented preconditions apply, when the capability is exercised, then {clause.rstrip('.')} ."
-        for clause in clauses
-    ]
-    if len(criteria) == 1:
-        clause = clauses[0].rstrip(".")
-        criteria.append(
-            f"Given the capability has been exercised, when its result is evaluated, then the observed outcome conforms to: {clause}."
+    criteria = []
+    for req, clause in clause_contexts:
+        actor = (getattr(req, "actor", None) or "system").strip() if req else "system"
+        goal = (getattr(req, "goal", None) or "the specified behavior").strip() if req else "the specified behavior"
+        clause = clause.rstrip(".")
+        performer = "the system" if actor.lower() == "system" else actor
+        activity = goal.strip().rstrip(".")
+        activity = activity[:1].lower() + activity[1:] if activity else "perform the operation"
+        activity = re.sub(r"^to\s+", "", activity, flags=re.IGNORECASE)
+        outcome = _observable_outcome(clause)
+        text = (
+            f"Given the required preconditions are satisfied, when {performer} "
+            f"attempts to {activity}, then {outcome}."
         )
+        criteria.append(text)
     return [
         AcceptanceCriterion(
             id=f"{story_id}_ac_{index + 1}",
@@ -199,6 +257,8 @@ def _criterion_supported(text: str, requirements) -> bool:
     if unsupported_numeric_claims(text, sources):
         return False
     if unsupported_fact_terms(text, sources):
+        return False
+    if unsupported_review_terms(text, sources):
         return False
     if has_polarity_conflict(text, sources):
         return False
@@ -222,6 +282,7 @@ def _mapping_supported(requirement, story_text: str) -> bool:
 
 def _sanitize_generated_story(story: UserStory, req_map: dict[int, Any]) -> UserStory:
     """Remove unsupported mappings/facts and constrain estimates before output."""
+    story.description = normalize_story_persona(story.description)
     story_text = " ".join([
         story.title,
         story.description,
@@ -258,8 +319,17 @@ def _sanitize_generated_story(story: UserStory, req_map: dict[int, Any]) -> User
         criterion for criterion in story.acceptance_criteria
         if _criterion_supported(criterion.text, linked)
     ]
+    story.acceptance_criteria = supported_criteria
+    duplicate_criterion_ids = set(
+        find_duplicate_acceptance_criterion_ids(story, linked)
+    )
+    supported_criteria = [
+        criterion
+        for criterion in supported_criteria
+        if criterion.id not in duplicate_criterion_ids
+    ]
     criterion_texts = [criterion.text for criterion in supported_criteria]
-    if len(supported_criteria) < 2 or clause_coverage(linked, criterion_texts) < 1.0:
+    if not supported_criteria or clause_coverage(linked, criterion_texts) < 1.0:
         story.acceptance_criteria = build_source_bound_acceptance_criteria(linked, story.id)
     else:
         for index, criterion in enumerate(supported_criteria, start=1):
@@ -275,6 +345,56 @@ def _sanitize_generated_story(story: UserStory, req_map: dict[int, Any]) -> User
         evidence for req in linked for evidence in (getattr(req, "evidence", []) or [])
     ]
     return story
+
+
+def rebuild_requirement_coverages(
+    requirements: List[Any],
+    stories: List[UserStory],
+    existing_coverages: List[RequirementCoverage] | None = None,
+) -> List[RequirementCoverage]:
+    """Build coverage from the final story objects after generation or repair."""
+    existing_coverages = existing_coverages or []
+    preserved_non_story = {
+        coverage.requirement_id: coverage
+        for coverage in existing_coverages
+        if coverage.coverage_type == "non_story"
+    }
+    coverages: List[RequirementCoverage] = []
+    for requirement in requirements:
+        if requirement.id in preserved_non_story:
+            coverages.append(preserved_non_story[requirement.id])
+            continue
+        linked_story = next(
+            (
+                story
+                for story in stories
+                if requirement.id in (story.source_requirement_ids or [])
+            ),
+            None,
+        )
+        if linked_story is None:
+            coverages.append(RequirementCoverage(
+                requirement_id=requirement.id,
+                coverage_type="needs_review",
+                story_ids=[],
+                acceptance_criteria_ids=[],
+                reason="No semantically aligned generated story remained after validation.",
+            ))
+            continue
+        coverages.append(RequirementCoverage(
+            requirement_id=requirement.id,
+            coverage_type=(
+                "merged_into_story"
+                if len(linked_story.source_requirement_ids) > 1
+                else "covered_by_story"
+            ),
+            story_ids=[linked_story.id],
+            acceptance_criteria_ids=[
+                criterion.id for criterion in linked_story.acceptance_criteria
+            ],
+            reason=None,
+        ))
+    return coverages
 
 
 def _dedupe_generated_stories(stories: List[UserStory]) -> List[UserStory]:
@@ -648,20 +768,29 @@ async def generate_node(state: PipelineState) -> dict:
                 
                 if not actor:
                     req_text_lower = req.text.lower()
-                    if "admin" in req_text_lower: actor = "admin"
-                    elif "sales representative" in req_text_lower: actor = "sales representative"
-                    elif "viewer" in req_text_lower: actor = "viewer"
-                    elif set(_normalize_labels(getattr(req, "labels", None))).issubset({"NFR", "BR"}): actor = "system"
-                    else: actor = "user"
+                    if "admin" in req_text_lower:
+                        actor = "admin"
+                    elif "sales representative" in req_text_lower:
+                        actor = "sales representative"
+                    elif "viewer" in req_text_lower:
+                        actor = "viewer"
+                    elif set(_normalize_labels(getattr(req, "labels", None))).issubset({"NFR", "BR"}):
+                        actor = "system"
+                    else:
+                        actor = "user"
                 
-                if not goal: goal = "satisfy this requirement"
+                if not goal:
+                    goal = "satisfy this requirement"
 
                 agile_actor = normalize_actor_to_agile_role(actor)
                 
                 user_story = UserStory(
                     id=story_id,
                     title=f"Story for requirement {req.id}",
-                    description=f"As {agile_actor}, I want {goal}, so that: {req.text}",
+                    description=(
+                        f"As {agile_actor}, I want {goal}, so that the documented "
+                        "requirement is fulfilled."
+                    ),
                     acceptance_criteria=build_specific_acceptance_criteria(req, story_id, agile_actor),
                     source_requirement_ids=[req.id],
                     labels=_normalize_labels(getattr(req, "labels", None)),
@@ -687,35 +816,15 @@ async def generate_node(state: PipelineState) -> dict:
 
         # Rebuild actionable coverage after mapping validation and story
         # deduplication so it can never point to a removed or unrelated story.
-        requirement_coverages = [coverage for coverage in requirement_coverages if coverage.coverage_type == "non_story"]
-        for req in to_generate:
-            linked_story = next(
-                (story for story in final_stories if req.id in story.source_requirement_ids),
-                None,
-            )
-            if linked_story is None:
-                requirement_coverages.append(RequirementCoverage(
-                    requirement_id=req.id,
-                    coverage_type="needs_review",
-                    story_ids=[],
-                    acceptance_criteria_ids=[],
-                    reason="No semantically aligned generated story remained after validation.",
-                ))
-            else:
-                requirement_coverages.append(RequirementCoverage(
-                    requirement_id=req.id,
-                    coverage_type=(
-                        "merged_into_story" if len(linked_story.source_requirement_ids) > 1
-                        else "covered_by_story"
-                    ),
-                    story_ids=[linked_story.id],
-                    acceptance_criteria_ids=[criterion.id for criterion in linked_story.acceptance_criteria],
-                    reason=None,
-                ))
+        requirement_coverages = rebuild_requirement_coverages(
+            classified,
+            final_stories,
+            requirement_coverages,
+        )
 
         # Validate generated stories and surface an aggregate quality warning.
         # We flag (not mutate) LLM stories so coverage stays consistent; the
-        # fallback path already emits >=2 specific criteria.
+        # fallback path already emits source-specific criteria.
         result_payload: dict = {
             "user_stories": final_stories,
             "requirement_coverages": requirement_coverages,
@@ -753,20 +862,29 @@ async def generate_node(state: PipelineState) -> dict:
             
             if not actor:
                 req_text_lower = req.text.lower()
-                if "admin" in req_text_lower: actor = "admin"
-                elif "sales representative" in req_text_lower: actor = "sales representative"
-                elif "viewer" in req_text_lower: actor = "viewer"
-                elif set(_normalize_labels(getattr(req, "labels", None))).issubset({"NFR", "BR"}): actor = "system"
-                else: actor = "user"
+                if "admin" in req_text_lower:
+                    actor = "admin"
+                elif "sales representative" in req_text_lower:
+                    actor = "sales representative"
+                elif "viewer" in req_text_lower:
+                    actor = "viewer"
+                elif set(_normalize_labels(getattr(req, "labels", None))).issubset({"NFR", "BR"}):
+                    actor = "system"
+                else:
+                    actor = "user"
             
-            if not goal: goal = "satisfy this requirement"
+            if not goal:
+                goal = "satisfy this requirement"
 
             agile_actor = normalize_actor_to_agile_role(actor)
 
             user_story = UserStory(
                 id=story_id,
                 title=f"Story for requirement {req.id}",
-                description=f"As {agile_actor}, I want {goal}, so that: {req.text}",
+                description=(
+                    f"As {agile_actor}, I want {goal}, so that the documented "
+                    "requirement is fulfilled."
+                ),
                 acceptance_criteria=build_specific_acceptance_criteria(req, story_id, agile_actor),
                 source_requirement_ids=[req.id],
                 labels=_normalize_labels(getattr(req, "labels", None)),
