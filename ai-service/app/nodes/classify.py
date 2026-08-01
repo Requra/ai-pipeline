@@ -4,6 +4,8 @@ from app.schemas.items import ClassifiedRequirement
 from app.llm import get_llm
 from app.prompts.loader import load_prompt
 from app.prompts.registry import PromptId
+from app.services.semantic_quality import normalize_requirement_labels
+from app.progress import update_progress
 from pydantic import BaseModel
 from typing import List, Literal, Dict
 from collections import defaultdict
@@ -51,7 +53,7 @@ def _chunk_requirements(requirements, batch_size: int = 5):
 def _clamp_confidence(value: float) -> float:
     try:
         value = float(value)
-    except:
+    except (TypeError, ValueError):
         return 0.5
     return max(0.0, min(1.0, value))
 
@@ -92,8 +94,6 @@ async def _classify_batch(llm, batch):
 
 
 # ---------------- MAIN NODE ----------------
-
-from app.progress import update_progress
 
 async def classify_node(state: PipelineState) -> dict:
     print("--- CLASSIFY NODE (MULTI-LABEL) ---")
@@ -182,7 +182,10 @@ async def classify_node(state: PipelineState) -> dict:
             classified.append(
                 ClassifiedRequirement(
                     **base_kwargs,
-                    labels=list(data["labels"]) or ["FR"],
+                    labels=normalize_requirement_labels(
+                        base_kwargs["text"],
+                        list(data["labels"]) or ["FR"],
+                    ),
                     classification_confidence=_clamp_confidence(data["confidence"]),
                 )
             )
