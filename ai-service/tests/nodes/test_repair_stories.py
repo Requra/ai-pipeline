@@ -8,7 +8,6 @@ from app.nodes.repair_stories import repair_stories_node
 from app.graph.router import route_after_quality_gate
 from app.config import settings
 from app.schemas.items import UserStory, AcceptanceCriterion, QualityIssue, ClassifiedRequirement
-from app.schemas.pipeline_state import PipelineState
 
 
 def _story(sid, title="title", description="As a user, I want X, so that Y.", acs=None):
@@ -160,7 +159,12 @@ async def test_repair_replaces_only_failed_stories(base_state_repair):
         assert updated[1] is not s2
         assert updated[1].id == "story_2"
         assert updated[1].title == "repaired title"
-        assert len(updated[1].acceptance_criteria) == 2
+        assert len(updated[1].acceptance_criteria) == 1
+        coverage = out["requirement_coverages"][0]
+        covered_story = next(story for story in updated if story.id in coverage.story_ids)
+        assert coverage.acceptance_criteria_ids == [
+            criterion.id for criterion in covered_story.acceptance_criteria
+        ]
 
 
 @pytest.mark.asyncio
@@ -241,3 +245,56 @@ async def test_repair_preserves_resolved_issues(base_state_repair):
         assert out["quality_issues"][0].rule_violated == "semantic_conflict_contradiction"
         
         assert out["repair_attempts"] == 1
+
+
+@pytest.mark.asyncio
+async def test_repair_cannot_reintroduce_persona_or_duplicate_criteria(base_state_repair):
+    source = "The system shall generate a unique QR code for every registered asset."
+    state = base_state_repair.copy()
+    state["classified_requirements"] = [
+        ClassifiedRequirement(
+            id=1,
+            text=source,
+            actor="System",
+            goal="generate a unique QR code",
+            labels=["FR"],
+            confidence=1.0,
+            classification_confidence=1.0,
+            evidence=[],
+        )
+    ]
+    story = _story(
+        "story_1",
+        description=(
+            "As the system, I want to generate a unique QR code for every asset, "
+            "so that each asset is identifiable."
+        ),
+    )
+    state["user_stories"] = [story]
+    state["quality_issues"] = [
+        _issue("non_human_story_persona", "Story story_1 uses a technical component.")
+    ]
+    mock_llm = MagicMock()
+    mock_llm.ainvoke = AsyncMock(return_value=MagicMock(content=json.dumps({"stories": [{
+        "id": "story_1",
+        "title": "Generate asset QR code",
+        "description": (
+            "As the system, I want to generate a unique QR code for every asset, "
+            "so that each asset is identifiable."
+        ),
+        "acceptance_criteria": [
+            "Given an asset, when its QR code is generated, then the code is unique.",
+            "Given two assets, when QR codes are generated, then the codes are distinct.",
+        ],
+        "labels": ["FR"],
+    }]})))
+
+    with patch("app.nodes.repair_stories.get_llm", return_value=mock_llm):
+        out = await repair_stories_node(state)
+
+    repaired = out["user_stories"][0]
+    assert repaired.description.startswith("As a system operator,")
+    assert len(repaired.acceptance_criteria) == 1
+    assert out["requirement_coverages"][0].acceptance_criteria_ids == [
+        repaired.acceptance_criteria[0].id
+    ]

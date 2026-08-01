@@ -17,7 +17,11 @@ from app.services.semantic_quality import (
     unsupported_fact_terms,
     unsupported_numeric_claims,
 )
-from app.validators.story_validator import find_duplicate_story_ids, is_generic_ac
+from app.validators.story_validator import (
+    find_duplicate_acceptance_criterion_ids,
+    find_duplicate_story_ids,
+    is_generic_ac,
+)
 
 
 @dataclass
@@ -62,7 +66,7 @@ def _req_groundedness(req) -> float:
 def _story_is_complete(story) -> bool:
     return bool((getattr(story, "title", "") or "").strip()) and len(
         getattr(story, "acceptance_criteria", []) or []
-    ) >= 2 and bool(getattr(story, "source_requirement_ids", []) or [])
+    ) >= 1 and bool(getattr(story, "source_requirement_ids", []) or [])
 
 
 def _severity(issue) -> str:
@@ -114,6 +118,7 @@ _ROOT_CAUSE_MAP = {
     "acceptance_criterion_not_source_aligned": "AC_QUALITY",
     "acceptance_criteria_missing_source_clause": "AC_QUALITY",
     "generic_acceptance_criteria": "AC_QUALITY",
+    "duplicate_acceptance_criterion": "AC_QUALITY",
     # Story traceability
     "incorrect_story_requirement_mapping": "STORY_TRACEABILITY",
     "story_missing_source_ids": "STORY_TRACEABILITY",
@@ -151,7 +156,8 @@ def _issue_value(issue, field: str, default=None):
     return issue.get(field, default) if isinstance(issue, dict) else getattr(issue, field, default)
 
 
-def _root_cause(rule: str) -> str:
+def normalize_issue_root_cause(rule: str) -> str:
+    """Return the stable defect family used by scoring and public formatting."""
     normalized = str(rule or "")
     if "complementary" in normalized.lower():
         return "COMPLEMENTARY"
@@ -226,7 +232,23 @@ def compute_quality_scores(requirements: Sequence, stories: Sequence, quality_is
             len(aligned_requirement_ids & actionable_ids) / len(actionable_ids)
             if actionable_ids else 1.0
         )
-        traceability = (mapping_precision + requirement_coverage) / 2
+        verified_evidence_coverage = (
+            sum(
+                1
+                for req_id in actionable_ids
+                if (getattr(requirements_by_id[req_id], "evidence", None) or [])
+            ) / len(actionable_ids)
+            if actionable_ids else 1.0
+        )
+        # End-to-end traceability is only as strong as its weakest link: a
+        # valid story mapping, actionable requirement coverage, and a verified
+        # source reference must all exist. Averaging could report a high value
+        # even when one link is completely absent.
+        traceability = min(
+            mapping_precision,
+            requirement_coverage,
+            verified_evidence_coverage,
+        )
     else:
         traceability = 1.0 if not requirements else 0.0
     completeness = (
@@ -264,7 +286,22 @@ def compute_quality_scores(requirements: Sequence, stories: Sequence, quality_is
                 [getattr(ac, "text", "") or "" for ac in (getattr(story, "acceptance_criteria", []) or [])],
             ))
         fact_coverage = sum(coverage_scores) / len(coverage_scores) if coverage_scores else 0.0
-        ac_quality = min(criterion_precision, fact_coverage)
+        duplicate_criterion_count = sum(
+            len(find_duplicate_acceptance_criterion_ids(
+                story,
+                [
+                    requirements_by_id[rid]
+                    for rid in (getattr(story, "source_requirement_ids", []) or [])
+                    if rid in requirements_by_id
+                ],
+            ))
+            for story in stories
+        )
+        criterion_uniqueness = max(
+            0.0,
+            (len(criteria) - duplicate_criterion_count) / len(criteria),
+        )
+        ac_quality = min(criterion_precision, fact_coverage, criterion_uniqueness)
 
     story_duplicate_risk = len(find_duplicate_story_ids(stories)) / story_count if story_count else 0.0
     requirement_duplicate_risk = _duplicate_requirement_count(requirements) / req_count if req_count else 0.0
@@ -278,7 +315,7 @@ def compute_quality_scores(requirements: Sequence, stories: Sequence, quality_is
         if not rule:
             rule = _issue_value(issue, "rule", "")
         rule = str(rule or "")
-        root_cause = _root_cause(rule)
+        root_cause = normalize_issue_root_cause(rule)
         item_id = _issue_value(issue, "item_id")
         item_type = str(_issue_value(issue, "item_type", "") or "")
         severity = _issue_value(issue, "severity", "")

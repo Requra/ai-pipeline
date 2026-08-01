@@ -21,6 +21,7 @@ def test_v1_type_from_labels():
     assert v1_type_from_labels(["Constraint"]) == "Non-Functional"
     assert v1_type_from_labels(["BR"]) == "Business"
     assert v1_type_from_labels([]) == "Functional"
+    assert v1_type_from_labels(["FR", "NFR"]) == "Non-Functional"
 
 
 def _req(rid, labels, conf=0.9):
@@ -178,3 +179,26 @@ async def test_diagnostic_warnings_do_not_force_partial_status(base_state):
     result = await format_node(state)
 
     assert result["job_result"].status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_format_consolidates_evidence_aliases_and_filters_complementary_issue(base_state):
+    state = base_state.copy()
+    requirement = _req(1, ["FR"])
+    requirement.evidence = []
+    state["classified_requirements"] = [requirement]
+    state["user_stories"] = [_story("s1", 1, ["FR"])]
+    state["quality_issues"] = [
+        QualityIssue(item_id=1, item_type="requirement", severity="medium", rule_violated="evidence_semantic_mismatch", details="Candidate did not match."),
+        QualityIssue(item_id=1, item_type="requirement", severity="high", rule_violated="missing_verified_evidence", details="No candidate was verified."),
+        QualityIssue(item_id=1, item_type="requirement", severity="high", rule_violated="missing_evidence", details="Evidence is missing."),
+        QualityIssue(item_id=1, item_type="requirement", severity="medium", rule_violated="semantic_conflict_complementary", details="Related requirement."),
+    ]
+
+    result = await format_node(state)
+    job = result["job_result"]
+
+    assert len(job.quality_issues) == 1
+    assert job.quality_issues[0].rule_violated == "missing_verified_evidence"
+    assert job.requirements[0].quality.score == 0.85
+    assert job.user_stories[0].quality.score == 0.85

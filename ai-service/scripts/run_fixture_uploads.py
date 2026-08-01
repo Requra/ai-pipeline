@@ -14,7 +14,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import sys
 import time
 import uuid
 from pathlib import Path
@@ -73,10 +72,10 @@ def _validate_result(group: str, result: dict[str, Any]) -> list[str]:
 
     missing_acceptance = [
         story for story in stories
-        if len(story.get("acceptance_criteria") or []) < 2
+        if not story.get("acceptance_criteria")
     ]
     if missing_acceptance:
-        failures.append(f"{len(missing_acceptance)} user stories have fewer than two acceptance criteria")
+        failures.append(f"{len(missing_acceptance)} user stories have no acceptance criteria")
 
     missing_refs = [req for req in requirements if not req.get("source_refs")]
     if missing_refs:

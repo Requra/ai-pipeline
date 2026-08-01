@@ -44,30 +44,41 @@ _FACT_SCAFFOLDING = {
 # absent from every linked source fact, it must not silently appear in a story
 # or acceptance criterion.
 _ASSERTIVE_FACT_TERMS = {
-    "automatic", "automatically", "authorize", "authorized", "block",
-    "delete", "deleted", "deny", "denied", "encrypt", "encrypted", "error",
+    "automatic", "automatically", "authorize",
+    "authorized", "block", "delete", "deleted", "deny", "denied",
+    "delay", "display", "encrypt", "encrypted", "error",
     "escalate", "escalated", "escalation", "expire", "expired",
-    "invalid", "lock", "locked", "permission", "reject", "rejected", "retain",
-    "retry", "scan", "scanned", "timeout", "virus",
+    "include", "invalid", "lock", "locked", "permission", "proceed",
+    "reject", "rejected", "retain", "retrieve", "retry", "scan", "scanned",
+    "timeout", "update", "virus",
 }
 
 # Lower-risk behavioral terms are review signals rather than proof of an
 # invented requirement.  They are checked only when used as actions so nouns
 # such as "audit logs" cannot create a false unsupported-behavior defect.
-_REVIEW_FACT_TERMS = {"fail", "failure", "notify", "record", "warning"}
+_REVIEW_FACT_TERMS = {"fail", "failure", "notify", "record", "test", "warning"}
 
 _FACT_ALIASES = {
+    "accessibl": "access",
+    "accessible": "access",
     "admin": "administrator",
     "administrative": "administrator",
+    "authenticat": "authentication",
+    "authenticate": "authentication",
+    "authentication": "authentication",
     "alert": "notify",
     "notification": "notify",
     "notify": "notify",
     "captur": "record",
     "capture": "record",
+    "delet": "delete",
+    "deleted": "delete",
     "invitation": "invite",
     "inviting": "invite",
     "invited": "invite",
     "mfa": "authentication",
+    "includ": "include",
+    "inform": "notify",
     "preserv": "retain",
     "preserve": "retain",
     "recover": "reset",
@@ -76,10 +87,14 @@ _FACT_ALIASES = {
     "retriev": "retrieve",
     "log": "record",
     "record": "record",
+    "request": "request",
+    "submit": "request",
+    "submitt": "request",
+    "updat": "update",
 }
 
 _NEGATION_RE = re.compile(
-    r"\b(?:not|never|no|cannot|can't|mustn't|without)\b",
+    r"\b(?:not|never|no|cannot|can't|mustn't|without|instead\s+of)\b",
     re.IGNORECASE,
 )
 
@@ -157,7 +172,12 @@ def proposition_support(source: str, candidate: str) -> float:
 
     source_numbers = normalized_numbers(source)
     candidate_numbers = normalized_numbers(candidate)
-    if source_numbers and candidate_numbers and not candidate_numbers.issubset(source_numbers):
+    # Numeric safety is enforced separately by ``unsupported_numeric_claims``.
+    # At the similarity layer, reject only when the two propositions contain
+    # entirely different numbers. This permits a complete source clause to
+    # contain additional constraints omitted by an extracted requirement; that
+    # omission is a completeness problem, not a contradiction.
+    if source_numbers and candidate_numbers and source_numbers.isdisjoint(candidate_numbers):
         return 0.0
 
     shared = source_tokens & candidate_tokens
@@ -172,16 +192,33 @@ def evidence_clause_candidates(text: str) -> list[str]:
     source = text or ""
     candidates = [source.strip()]
 
+    # Match through punctuation inside a proposition and stop only when the
+    # punctuation is followed by whitespace/end-of-text.  A negated character
+    # class (``[^.!?]+``) incorrectly split common requirement values such as
+    # 2.0 seconds, TLS 1.3, semantic versions, IP addresses, and 99.9% uptime.
     sentence_spans = [
         (match.start(), match.end(), match.group(0).strip())
         for match in re.finditer(
-            r"[^.!?]+(?:[.!?]+(?=\s|$)|$)",
+            r".+?(?:[.!?]+(?=\s|$)|$)",
             source,
             flags=re.DOTALL,
         )
         if match.group(0).strip()
     ]
     candidates.extend(sentence for _, _, sentence in sentence_spans)
+
+    # PDFs and DOCX conversions commonly preserve list items as wrapped lines.
+    # Treat each bullet as a bounded proposition so a section heading or an
+    # adjacent requirement cannot dilute an otherwise exact citation.
+    bullet_pattern = re.compile(
+        r"(?:^|\n)\s*[-*\u2022]\s*(.+?)(?=(?:\n\s*[-*\u2022]\s)|(?:\n\s*#{1,6}\s)|\Z)",
+        flags=re.DOTALL,
+    )
+    candidates.extend(
+        match.group(1).strip()
+        for match in bullet_pattern.finditer(source)
+        if match.group(1).strip()
+    )
 
     # Composite requirements may span adjacent source sentences. Preserve the
     # exact substring, including its original whitespace, for public quoting.
@@ -340,7 +377,61 @@ def unsupported_fact_terms(text: str, sources: Iterable[str]) -> set[str]:
     result = unsupported & assertive_stems
     if "deny" in result and access_control_entails(text, sources):
         result.remove("deny")
+    if "retain" in result and retention_entails(text, sources):
+        result.remove("retain")
     return result
+
+
+def retention_entails(text: str, sources: Iterable[str]) -> bool:
+    """Recognize preservation implied by non-destructive record handling.
+
+    Soft deletion, archival, and an explicit prohibition on permanent deletion
+    entail retaining the record. The rule is generic and applies to records,
+    files, assets, cases, and other persisted entities.
+    """
+    candidate_tokens = fact_tokens(text)
+    if "retain" not in candidate_tokens:
+        return False
+    for source in sources:
+        lowered = re.sub(r"\s+", " ", source or "").lower()
+        if (
+            re.search(r"\bsoft[- ]?delet(?:e|ed|ion|ing)?\b", lowered)
+            or re.search(
+                r"\b(?:cannot|can not|must not|shall not|never|not)\b"
+                r"[^.;]{0,60}\bpermanent(?:ly)?\s+delet",
+                lowered,
+            )
+            or re.search(r"\b(?:archive|archived|mark(?:ed)?\s+as\s+retired)\b", lowered)
+        ):
+            return True
+    return False
+
+
+def complete_requirement_from_evidence(requirement: str, evidence: str) -> str:
+    """Restore source-side numeric constraints omitted from a same-language requirement.
+
+    The function returns the original text unless the evidence is a strongly
+    related bounded clause containing additional numeric facts. In that case,
+    the complete source clause is safer than publishing a silently weakened
+    normalized requirement.
+    """
+    requirement = (requirement or "").strip()
+    evidence = (evidence or "").strip()
+    if not requirement or not evidence:
+        return requirement
+    missing_numbers = normalized_numbers(evidence) - normalized_numbers(requirement)
+    if not missing_numbers:
+        return requirement
+    if check_different_languages(requirement, evidence):
+        return requirement
+    if proposition_support(requirement, evidence) < 0.60:
+        return requirement
+    if has_polarity_conflict(requirement, [evidence]):
+        return requirement
+
+    cleaned = re.sub(r"^\s*[-*\u2022]\s*", "", evidence).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned if len(cleaned) <= 800 else requirement
 
 
 def unsupported_review_terms(text: str, sources: Iterable[str]) -> set[str]:
@@ -363,7 +454,9 @@ def unsupported_review_terms(text: str, sources: Iterable[str]) -> set[str]:
     asserted: set[str] = set()
     if "notify" in candidates and re.search(
         r"\b(?:shall|must|will|should|can|may|to|want(?:s)?(?:\s+to)?)\s+"
-        r"(?:\w+\s+){0,2}(?:notify|alert)\b|\bsend(?:s|ing)?\b[^.;]{0,40}\bnotifications?\b",
+        r"(?:\w+\s+){0,2}(?:notify|alert|inform)\b|"
+        r"\bsend(?:s|ing)?\b[^.;]{0,40}\bnotifications?\b|"
+        r"\b(?:is|are|was|were|be)\s+informed\b",
         lowered,
     ):
         asserted.add("notify")
@@ -373,7 +466,14 @@ def unsupported_review_terms(text: str, sources: Iterable[str]) -> set[str]:
         lowered,
     ):
         asserted.add("record")
-    for term in candidates - {"notify", "record"}:
+    if "record" in candidates and re.search(
+        r"\b(?:is|are|was|were|be)\s+(?:recorded|logged|captured)\b",
+        lowered,
+    ):
+        asserted.add("record")
+    if "test" in candidates and re.search(r"\btest(?:s|ed|ing)?\b", lowered):
+        asserted.add("test")
+    for term in candidates - {"notify", "record", "test"}:
         if re.search(rf"\b{re.escape(term)}\b", lowered):
             asserted.add(term)
     return asserted
@@ -571,13 +671,16 @@ def infer_requirement_category(text: str, labels: Sequence[str] = ()) -> str:
     """Map source language to a stable, user-facing category."""
     lowered = (text or "").lower()
     categories = (
-        ("Security & Access Control", ("authentication", "multi-factor", "mfa", "permission", "role", "access", "encrypt")),
+        ("Security & Access Control", ("authentication", "multi-factor", "mfa", "permission", "role", "access", "encrypt", "tls", "ssl", "credential")),
         ("Audit & Compliance", ("audit", "immutable", "compliance", "regulation")),
         ("Case Management", ("case", "queue", "status transition", "analyst", "supervisor")),
         ("Notifications & Escalation", ("notify", "notification", "escalat", "on-call", "warning")),
-        ("Reporting & Export", ("report", "export", "csv", "pdf", "dashboard")),
+        # Performance must be checked before presentation/reporting terms. A
+        # dashboard with a latency/load/uptime target is a quality attribute,
+        # not automatically a reporting feature.
+        ("Performance & Reliability", ("latency", "response time", "load time", "load and become interactive", "uptime", "availability", "throughput", "concurrent load", "active sessions", "sla", "performance", "reliability")),
+        ("Reporting & Export", ("report", "reporting", "export", "csv", "pdf", "analytics dashboard", "reporting dashboard")),
         ("Data Retention", ("retain", "retention", "archive", "delete", "storage")),
-        ("Performance & Reliability", ("latency", "response time", "availability", "throughput", "sla", "performance")),
         ("Integration", ("api", "webhook", "integration", "third-party")),
     )
     for category, terms in categories:
@@ -588,6 +691,43 @@ def infer_requirement_category(text: str, labels: Sequence[str] = ()) -> str:
     if "NFR" in labels:
         return "Quality Attributes"
     return "Functional Capability"
+
+
+def normalize_requirement_labels(text: str, labels: Sequence[str]) -> list[str]:
+    """Resolve contradictory FR/NFR multi-label output conservatively.
+
+    A requirement may legitimately also be a business rule, but a concrete
+    capability should not be exported as NFR merely because its purpose uses a
+    vague quality word such as "fast". Explicit measurable or recognized
+    quality attributes retain NFR.
+    """
+    normalized = list(dict.fromkeys(str(label) for label in labels if label))
+    label_set = set(normalized)
+    lowered = (text or "").lower()
+    nfr_indicators = (
+        "latency", "response time", "load time", "uptime", "availability",
+        "throughput", "concurrent", "scalab", "reliab", "encrypt", "tls",
+        "ssl", "accessibility", "maintainab", "recover", "failover", "sla",
+    )
+    measurable_quality = bool(
+        re.search(r"\b\d+(?:\.\d+)?\s*(?:ms|milliseconds?|seconds?|%|percent|sessions?|requests?)\b", lowered)
+    )
+    if (
+        {"FR", "NFR"}.issubset(label_set)
+        and not measurable_quality
+        and not any(term in lowered for term in nfr_indicators)
+    ):
+        normalized = [label for label in normalized if label != "NFR"]
+    business_rule_indicators = (
+        "only", "unless", "except", "cannot", "must not", "shall not",
+        "approval", "limit", "up to", "at most", "at least", "exceed",
+        "retention", "retain", "soft-delete", "soft delete", "required if",
+    )
+    if "FR" in normalized and "BR" in normalized and not any(
+        term in lowered for term in business_rule_indicators
+    ):
+        normalized = [label for label in normalized if label != "BR"]
+    return normalized
 
 
 def normalized_numbers(text: str) -> set[str]:
@@ -611,7 +751,7 @@ def lexical_support(requirement: str, evidence: str) -> float:
 
     req_numbers = normalized_numbers(requirement)
     ev_numbers = normalized_numbers(evidence)
-    if ev_numbers and req_numbers and not ev_numbers.issubset(req_numbers):
+    if ev_numbers and req_numbers and ev_numbers.isdisjoint(req_numbers):
         return 0.0
 
     overlap = req_tokens & ev_tokens
@@ -655,10 +795,6 @@ def clear_story_mapping_mismatch(
         unsupported_numeric_claims(story_text, requirement_texts)
         or has_polarity_conflict(story_text, requirement_texts)
         or unsupported_fact_terms(story_text, requirement_texts)
-        or (
-            score < MIN_STORY_ALIGNMENT
-            and unsupported_review_terms(story_text, requirement_texts)
-        )
     )
 
 

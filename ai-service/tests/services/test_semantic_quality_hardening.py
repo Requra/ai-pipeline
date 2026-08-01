@@ -22,11 +22,14 @@ from app.services.semantic_quality import (
     access_control_entails,
     best_evidence_clause,
     clause_coverage,
+    complete_requirement_from_evidence,
     infer_requirement_category,
     infer_requirement_priority,
+    normalize_requirement_labels,
     normalize_story_points,
     split_requirement_clauses,
     unsupported_fact_terms,
+    unsupported_review_terms,
 )
 
 
@@ -731,3 +734,113 @@ async def test_low_alignment_alone_creates_review_not_high_mapping_issue(base_st
 
     assert len(mapping) == 1
     assert mapping[0].severity == "medium"
+
+
+def test_decimal_and_protocol_values_do_not_split_evidence_clauses():
+    source = (
+        "The dashboard shall load in less than 2.0 seconds under 500 sessions. "
+        "All traffic shall use TLS 1.3 protocol. "
+        "Availability shall be at least 99.9% monthly."
+    )
+    requirements = [
+        "The dashboard shall load in less than 2.0 seconds under 500 sessions.",
+        "All traffic shall use TLS 1.3 protocol.",
+        "Availability shall be at least 99.9% monthly.",
+    ]
+
+    for requirement in requirements:
+        score, quote = best_evidence_clause(requirement, source)
+        assert score >= 0.90
+        assert requirement.rstrip(".") in quote
+
+
+def test_category_inference_distinguishes_performance_reporting_and_security():
+    assert infer_requirement_category(
+        "The dashboard shall load and become interactive within 2 seconds under concurrent load.",
+        ["NFR"],
+    ) == "Performance & Reliability"
+    assert infer_requirement_category(
+        "The analytics dashboard shall export a monthly CSV report.",
+        ["FR"],
+    ) == "Reporting & Export"
+    assert infer_requirement_category(
+        "All browser traffic shall use TLS 1.3.",
+        ["NFR"],
+    ) == "Security & Access Control"
+
+
+def test_label_normalization_removes_spurious_nfr_from_concrete_capability():
+    assert normalize_requirement_labels(
+        "The system shall generate a unique QR code for each asset for fast scanning.",
+        ["NFR", "FR"],
+    ) == ["FR"]
+    assert normalize_requirement_labels(
+        "The dashboard shall load within 2.0 seconds.",
+        ["FR", "NFR"],
+    ) == ["FR", "NFR"]
+
+
+def test_evidence_with_additional_numeric_constraint_is_support_not_contradiction():
+    requirement = (
+        "The dashboard shall load in less than 2.0 seconds under normal concurrent load."
+    )
+    evidence = (
+        "The dashboard must load in less than 2.0 seconds under normal concurrent "
+        "load (up to 500 active sessions)."
+    )
+
+    score, clause = best_evidence_clause(requirement, evidence)
+
+    assert score >= 0.60
+    assert "500 active sessions" in clause
+    assert complete_requirement_from_evidence(requirement, clause) == evidence
+
+
+def test_soft_delete_entails_record_retention_and_normalizes_delete_forms():
+    source = (
+        "Asset records cannot be permanently deleted; they must be soft-deleted "
+        "and marked as Retired for audit compliance."
+    )
+
+    assert not unsupported_fact_terms(
+        "The system shall soft-delete records instead of permanently deleting them.",
+        [source],
+    )
+    assert not unsupported_fact_terms(
+        "Asset history is preserved and retained.",
+        [source],
+    )
+
+
+def test_label_normalization_removes_unsupported_business_rule_label():
+    assert normalize_requirement_labels(
+        "The system shall register a hardware asset.",
+        ["FR", "BR"],
+    ) == ["FR"]
+    assert normalize_requirement_labels(
+        "Requests exceeding $1,000 require manager approval.",
+        ["FR", "BR"],
+    ) == ["FR", "BR"]
+
+
+def test_observable_actions_absent_from_source_are_rejected():
+    assert unsupported_fact_terms(
+        "The new asset is included in the asset list.",
+        ["The administrator shall register a hardware asset."],
+    ) == {"include"}
+    assert unsupported_fact_terms(
+        "The checkout request status is updated accordingly.",
+        ["A user may request an asset checkout."],
+    ) == {"update"}
+
+
+def test_passive_notifications_and_recording_are_reviewed_as_new_behavior():
+    source = "A user may request an asset checkout."
+    assert unsupported_review_terms(
+        "The checkout request is recorded in the system.",
+        [source],
+    ) == {"record"}
+    assert unsupported_review_terms(
+        "The user is informed of the checkout limit.",
+        [source],
+    ) == {"notify"}

@@ -7,9 +7,7 @@ from app.nodes.quality_gate import quality_gate_node
 from app.schemas.items import (
     ExtractedRequirement, 
     ClassifiedRequirement, 
-    SourceChunk, 
     UserStory, 
-    AcceptanceCriterion, 
     RequirementCoverage,
     EvidenceSpan
 )
@@ -157,10 +155,9 @@ async def test_evidence_and_ac_ids(base_state):
     
     # Check AC IDs
     assert story.acceptance_criteria[0].id == "api-001_story_1_ac_1"
-    assert story.acceptance_criteria[1].id == "api-001_story_1_ac_2"
-    
+
     # Check coverage links to AC IDs
-    assert coverage.acceptance_criteria_ids == ["api-001_story_1_ac_1", "api-001_story_1_ac_2"]
+    assert coverage.acceptance_criteria_ids == ["api-001_story_1_ac_1"]
 
 @pytest.mark.asyncio
 async def test_quality_gate_special_coverage(base_state):

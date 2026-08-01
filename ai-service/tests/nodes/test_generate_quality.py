@@ -20,26 +20,27 @@ def _req(rid, text, labels, **over):
     return ClassifiedRequirement(**base)
 
 
-def test_fallback_criteria_are_specific_and_at_least_two():
+def test_fallback_criteria_are_specific_and_cover_atomic_requirement():
     req = _req(1, "The system shall export invoices to PDF.", ["FR"], actor="user", goal="export invoices")
     acs = build_specific_acceptance_criteria(req, "job_story_1", "a user")
-    assert len(acs) >= 2
+    assert len(acs) >= 1
     assert acs[0].id == "job_story_1_ac_1"
     # None are generic boilerplate, and they reference the requirement content.
     assert not any(is_generic_ac(ac.text) for ac in acs)
     assert any("invoices to PDF" in ac.text for ac in acs)
+    assert all("then The system shall" not in ac.text for ac in acs)
 
 
 def test_nfr_fallback_criteria_mention_measurement():
     req = _req(2, "Responses must complete within 500ms.", ["NFR"])
     acs = build_specific_acceptance_criteria(req, "job_story_2", "a user")
-    assert len(acs) >= 2
+    assert len(acs) >= 1
     assert any("500ms" in ac.text for ac in acs)
 
 
 @pytest.mark.asyncio
 async def test_skipped_requirement_gets_specific_fallback_story(base_state):
-    """LLM skips a requirement -> fallback story with >=2 specific ACs (no generic)."""
+    """LLM skips a requirement -> fallback story with source-specific ACs."""
     state = base_state.copy()
     state["job_id"] = "q-job"
     state["classified_requirements"] = [
@@ -55,7 +56,7 @@ async def test_skipped_requirement_gets_specific_fallback_story(base_state):
     stories = result["user_stories"]
     assert len(stories) == 1
     story = stories[0]
-    assert len(story.acceptance_criteria) >= 2
+    assert len(story.acceptance_criteria) >= 1
     assert not any(is_generic_ac(ac.text) for ac in story.acceptance_criteria)
     # The old generic boilerplate must be gone.
     assert all("implemented as specified" not in ac.text.lower() for ac in story.acceptance_criteria)
@@ -65,7 +66,7 @@ async def test_skipped_requirement_gets_specific_fallback_story(base_state):
 
 @pytest.mark.asyncio
 async def test_total_fallback_produces_specific_criteria(base_state):
-    """LLM raises -> total fallback path still yields >=2 specific ACs."""
+    """LLM raises -> total fallback path still yields specific ACs."""
     state = base_state.copy()
     state["job_id"] = "q-job2"
     state["classified_requirements"] = [
@@ -79,7 +80,7 @@ async def test_total_fallback_produces_specific_criteria(base_state):
 
     assert result["status"] == "partial"
     story = result["user_stories"][0]
-    assert len(story.acceptance_criteria) >= 2
+    assert len(story.acceptance_criteria) >= 1
     assert not any(is_generic_ac(ac.text) for ac in story.acceptance_criteria)
 
 
@@ -100,5 +101,57 @@ async def test_short_llm_acceptance_criteria_are_replaced_before_quality_gate(ba
         result = await generate_node(state)
 
     assert not any(w["code"] == "GENERATE_STORY_QUALITY" for w in result.get("warnings", []))
-    assert len(result["user_stories"][0].acceptance_criteria) >= 2
-    assert all("send emails" in ac.text.lower() for ac in result["user_stories"][0].acceptance_criteria)
+    assert len(result["user_stories"][0].acceptance_criteria) >= 1
+    assert all("sends emails" in ac.text.lower() for ac in result["user_stories"][0].acceptance_criteria)
+
+
+@pytest.mark.asyncio
+async def test_generation_removes_unsupported_and_duplicate_criteria(base_state):
+    state = base_state.copy()
+    state["job_id"] = "source-bound"
+    source = "The system shall generate a unique QR code for every registered asset."
+    state["classified_requirements"] = [_req(1, source, ["FR"], actor="system", goal="generate a unique QR code")]
+    mock_llm = MagicMock()
+    mock_llm.ainvoke = AsyncMock(return_value=MagicMock(content=json.dumps({"stories": [{
+        "source_requirement_id": 1,
+        "title": "Generate asset QR code",
+        "description": "As a system operator, I want to generate a unique QR code for every asset, so that each asset is identifiable.",
+        "acceptance_criteria": [
+            "Given a registered asset, when its QR code is generated, then the QR code is unique for that asset.",
+            "Given multiple registered assets, when QR codes are generated, then every asset has a distinct QR code.",
+            "Given an asset list, when it opens, then the QR code is displayed in the list.",
+        ],
+        "labels": ["FR"],
+    }]})))
+
+    with patch("app.nodes.generate.get_llm", return_value=mock_llm):
+        result = await generate_node(state)
+
+    criteria = result["user_stories"][0].acceptance_criteria
+    assert len(criteria) == 1
+    assert "displayed in the list" not in criteria[0].text.lower()
+
+
+@pytest.mark.asyncio
+async def test_generation_normalizes_technical_persona_before_quality_repair(base_state):
+    state = base_state.copy()
+    state["job_id"] = "persona"
+    source = "The system shall generate a unique code for each record."
+    state["classified_requirements"] = [
+        _req(1, source, ["FR"], actor="System", goal="generate a unique code")
+    ]
+    mock_llm = MagicMock()
+    mock_llm.ainvoke = AsyncMock(return_value=MagicMock(content=json.dumps({"stories": [{
+        "source_requirement_id": 1,
+        "title": "Generate code",
+        "description": "As the system, I want to generate a unique code, so that each record is identifiable.",
+        "acceptance_criteria": [
+            "Given a record, when its code is generated, then the code is unique."
+        ],
+        "labels": ["FR"],
+    }]})))
+
+    with patch("app.nodes.generate.get_llm", return_value=mock_llm):
+        result = await generate_node(state)
+
+    assert result["user_stories"][0].description.startswith("As a system operator,")

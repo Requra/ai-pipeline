@@ -64,7 +64,7 @@ def test_quote_support_score_drives_groundedness():
 def test_missing_source_ids_lowers_traceability():
     stories = [_story("US1", source_ids=(1,)), _story("US2", source_ids=())]
     s = compute_quality_scores([_req(1)], stories, [])
-    assert s.traceability_coverage == 0.75
+    assert s.traceability_coverage == 0.5
 
 
 def test_generic_criteria_lower_ac_quality():
@@ -73,8 +73,50 @@ def test_generic_criteria_lower_ac_quality():
     assert s.acceptance_criteria_quality == 0.0
 
 
+def test_redundant_criteria_cannot_score_as_perfect():
+    story = _story("US1")
+    story.acceptance_criteria = [
+        _ac("Given monthly uptime, when measured, then availability is at least 99.9%.", 1),
+        _ac("Given availability is measured monthly, when calculated, then uptime meets 99.9%.", 2),
+    ]
+    req = ClassifiedRequirement(
+        id=1,
+        text="Monthly availability shall be at least 99.9%.",
+        candidate_labels=["NFR"], labels=["NFR"], confidence=0.9,
+        evidence=[EvidenceSpan(chunk_id="c", quote="Monthly availability shall be at least 99.9%.", support_score=1.0)],
+        quote_support_score=1.0,
+    )
+
+    score = compute_quality_scores([req], [story], [])
+
+    assert score.acceptance_criteria_quality < 1.0
+
+
+def test_source_aware_duplicate_criteria_lower_final_score():
+    req = ClassifiedRequirement(
+        id=1,
+        text="The system shall authenticate users through the existing LDAP directory.",
+        candidate_labels=["FR"], labels=["FR"], confidence=1.0,
+        evidence=[EvidenceSpan(
+            chunk_id="ldap",
+            quote="The system shall authenticate users through the existing LDAP directory.",
+            support_score=1.0,
+        )],
+        quote_support_score=1.0,
+    )
+    story = _story("US1")
+    story.acceptance_criteria = [
+        _ac("Given valid credentials, when a user logs in, then LDAP authentication grants access.", 1),
+        _ac("Given LDAP credentials, when authentication occurs, then the user successfully accesses the system.", 2),
+    ]
+
+    score = compute_quality_scores([req], [story], [])
+
+    assert score.acceptance_criteria_quality < 1.0
+
+
 def test_insufficient_criteria_lower_completeness():
-    stories = [_story("US1", acs=1)]
+    stories = [_story("US1", acs=0)]
     s = compute_quality_scores([_req(1)], stories, [])
     assert s.story_completeness == 0.0
 

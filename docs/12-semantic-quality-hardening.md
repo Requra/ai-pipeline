@@ -8,7 +8,7 @@
 >
 > **Implementation status:** MVP implemented
 >
-> **Last verified:** 26 July 2026
+> **Last verified:** 1 August 2026
 >
 > **Compatibility guarantee:** no API endpoint, request payload, or final response structure was changed
 
@@ -59,6 +59,14 @@ The main outcomes are:
 12. Resolved extraction warnings are removed after authoritative grounding.
 13. All reasoning-model calls share bounded concurrency, provider timeouts, and
     rate-limit-aware retries without removing any quality-generation step.
+14. Decimal values, protocol versions, percentages, and similar dotted tokens
+    remain intact during clause matching, preventing false evidence rejection.
+15. Acceptance criteria favor source-specific testability over a fixed count;
+    duplicate or boilerplate criteria are detected instead of rewarded.
+16. Traceability is scored as a weakest-link measure across story mappings,
+    actionable-requirement coverage, and verified evidence coverage.
+17. Structured summaries receive a deterministic source-coverage pass so model
+    omissions and null-like placeholders do not leak into the final response.
 
 The branch uses deterministic semantic checks for the MVP. It does not require
 an NLI service or an additional LLM call for evidence adjudication.
@@ -118,6 +126,10 @@ The important ownership boundary is:
 | Priority inference | Explicit source labels and urgency terms can upgrade priority; absent support defaults conservatively. |
 | Priority preservation | Classification does not overwrite a stronger valid priority already established by extraction. |
 | Category normalization | Requirement categories are inferred from source-supported semantics rather than accepted blindly. |
+| Label reconciliation | A generic `NFR` label is removed when the text has no measurable or recognized quality attribute; valid mixed labels remain supported. |
+| Business-rule reconciliation | A model-added `BR` label is removed from ordinary capabilities unless the source contains a rule, limit, approval, exception, prohibition, or retention condition. |
+| Public type precedence | A supported `NFR` or constraint takes precedence over `FR` in the single public `type` field; `BR` may coexist without overriding it. |
+| Domain-independent category cues | Security, performance, reliability, availability, reporting, and dashboard intent use behavior-specific signals rather than document-specific phrases. |
 | Confidence validation | Invalid or weak confidence values are detected by the quality gate. |
 
 Primary implementation:
@@ -143,6 +155,7 @@ Primary implementation:
 | Resolution guidance | Non-independent conflicts receive two or three dynamic, actionable resolution options. |
 | Clarification questions | Conflict warnings can include questions that help a reviewer resolve ambiguity. |
 | Informational complementary links | `COMPLEMENTARY` relationships do not reduce the score or create a score cap. |
+| Orthogonal numeric constraints | Rules constraining different measurable dimensions of one workflow, such as monetary approval and item quantity, are treated as compatible. |
 
 Canonicalization runs before story generation, so duplicate warnings are not
 merely hidden from scoring; the duplicate requirements themselves are resolved.
@@ -159,6 +172,8 @@ Primary implementation:
 |---|---|
 | Retrieval is non-authoritative | A top-ranked chunk is only a candidate and cannot automatically become a citation. |
 | Clause-level comparison | A requirement is compared with the best supporting clause or bounded sentence window in a chunk. |
+| Decimal-safe segmentation | Sentence splitting preserves values such as `2.0`, `TLS 1.3`, `99.9%`, IP addresses, and version numbers. |
+| Bullet-aware segmentation | Wrapped PDF and DOCX list items are isolated without section-heading or adjacent-requirement contamination. |
 | Provenance validation | Document identity, source identity, and chunk identity must be valid. |
 | Exact quote validation | The published quote must occur in the claimed source chunk or document. |
 | Numeric validation | Unsupported or mismatched numeric facts reject the evidence. |
@@ -166,12 +181,15 @@ Primary implementation:
 | Polarity validation | Explicit contradiction blocks acceptance; omission is handled separately. |
 | Ambiguous evidence protection | Evidence in the review zone does not reach public `source_refs`. |
 | Cross-language caution | Cross-language pairs are review-only without NLI. |
-| Fallback evidence cap | Fallback-origin confidence is capped at `0.70`. |
+| Verified confidence calibration | Candidate origin does not cap confidence after provenance, quote, numeric, behavior, and polarity checks pass; low-ASR evidence remains capped conservatively. |
 | Low-ASR caution | Semantically valid low-confidence transcript evidence is retained with a review diagnostic. |
 | Final formatting defense | Any non-zero evidence support below `0.60` is filtered before output. |
 | Reference deduplication | Duplicate document references with the same source and normalized quote are collapsed, retaining the strongest one. |
 | Audio identity preservation | Audio references retain chunk identity because timestamps may distinguish otherwise similar quotes. |
 | Warning reconciliation | `EXTRACT_WEAK_EVIDENCE` is removed when final grounding verifies the requirement; unresolved warnings are rebuilt with the exact remaining count. |
+| Review-state cleanup | Evidence-only review markers are cleared after authoritative grounding succeeds, while unrelated review reasons are preserved. |
+| Public issue consolidation | Evidence aliases are exposed as one readable defect per requirement and root cause. |
+| Source-constraint completion | A strongly related same-language source clause can restore numeric constraints omitted from extracted wording before story generation. |
 
 ### 5.4 Semantic matching and three-state polarity
 
@@ -188,6 +206,10 @@ Additional semantic behavior includes:
 
 - General synonym normalization, including alert/notify, record/capture/log,
   invite/invitation, administrator/admin, preserve/retain, and recover/reset.
+- Morphology-safe normalization covers delete/deleted/deleting,
+  include/included, update/updated, and authentication variants.
+- Soft deletion, archival, and prohibitions on permanent deletion entail record
+  retention without creating a false unsupported-behavior issue.
 - Action-aware comparison so a shared noun alone does not prove a behavior.
 - Exact and contained proposition entailment when negation agrees.
 - Access-control entailment: “only administrators may retrieve” supports the
@@ -208,14 +230,18 @@ Primary implementation:
 |---|---|
 | Canonical input | Stories are generated from canonical requirements after deduplication. |
 | Actor normalization | User-story personas are normalized without inventing a human actor. |
+| Pre-repair persona normalization | Technical personas such as `As the system` are converted to `As a system operator` before they can trigger an avoidable LLM repair call. |
 | Source-bound wording | Story descriptions and criteria use only linked requirement facts and evidence. |
 | No invented behavior | Prompts explicitly prohibit unsupported validation, permissions, notifications, retry, escalation, retention, timing, and negative cases. |
 | Deterministic fallback | If LLM generation fails or is malformed, source-bound fallback stories are produced. |
+| Clause-owned fallback criteria | Fallback generation creates one specific criterion per independent source clause and never pads a story with boilerplate merely to reach a fixed count. |
 | Valid story shape | Malformed wording such as `so that: The system shall...` is normalized. |
 | Complete mappings | Mapping validation considers title, description, and all acceptance criteria. |
 | Story deduplication | Duplicate generated stories are merged while preserving requirement mappings. |
 | Fibonacci estimates | Story points are normalized to `1`, `2`, `3`, `5`, or `8`. |
 | Fact-ledger repair | Repair receives the linked source facts and removes unsupported additions. |
+| Post-repair sanitation | Repaired stories pass through the same deterministic source, behavior, polarity, numeric, persona, and duplicate checks as initially generated stories. |
+| Final coverage reconstruction | Requirement coverage and criterion IDs are rebuilt from the final repaired story objects, preventing stale relationships. |
 | Bounded repair loop | Repair is optional and limited to prevent uncontrolled latency or loops. |
 
 Configuration:
@@ -251,7 +277,16 @@ The validator:
 - Creates a High mapping issue only when an independent clear mismatch exists.
 - Uses the actual story index or ID rather than `item_id=0`.
 - Detects near-duplicate stories.
-- Flags generic, empty, malformed, or untestable criteria.
+- Flags generic, empty, malformed, untestable, or semantically duplicate
+  criteria.
+- Removes criteria containing unsupported observable actions before output and
+  regenerates source-bound criteria when removal creates a coverage gap.
+- Detects passive invented behavior such as a request being recorded or a user
+  being informed, as well as unsupported absolute timing such as `without delay`.
+- Accepts one specific criterion for a truly atomic one-clause requirement;
+  multi-clause requirements must cover each independent fact.
+- Keeps opposite boundary cases distinct, such as authorized access versus
+  denied unauthorized access.
 
 Primary implementation:
 
@@ -297,6 +332,16 @@ Rules:
   Low `0.01`, with a maximum additive penalty of `0.70`.
 - A genuine unowned High defect can cap the final score below `0.60`.
 - A genuine unowned Medium defect can cap it below `0.80`.
+- Traceability is the minimum of valid story-mapping precision, actionable
+  requirement coverage, and verified evidence coverage. A high mapping rate
+  therefore cannot hide missing citations.
+- Story quality inherits missing-evidence risk from its linked requirement,
+  preventing a story from reporting perfect quality when its source is not
+  verified.
+- Acceptance-criteria quality includes criterion uniqueness as well as
+  precision and clause coverage.
+- Final scoring uses the same source-aware duplicate adjudication as the final
+  quality gate, so a reported duplicate cannot coexist with perfect AC quality.
 
 Primary implementation:
 
@@ -315,6 +360,14 @@ Current behavior:
 4. Reduce partial summaries hierarchically.
 5. Synthesize across documents while preserving their separate scopes.
 6. Append pipeline questions and artifact digest information.
+7. Remove null-like values such as `None`, `N/A`, and `null` from list fields.
+8. Reconcile every canonical source requirement against all summary sections
+   and restore omitted facts to scope, assumptions, out-of-scope, or open
+   questions as appropriate.
+9. Recover explicit human actors as stakeholders while excluding technical
+   components such as the system or database.
+10. Append omitted security, performance, availability, and measurable quality
+    constraints to the executive summary using canonical source text.
 
 The configured input bound is `12,000` characters per summarization unit. The
 middle of long documents is not silently discarded.
@@ -368,6 +421,11 @@ Informational warnings do not force `partial`. Examples include merged duplicate
 notifications, complementary relationships, and retrieval-limit diagnostics.
 `EXTRACT_WEAK_EVIDENCE` is actionable only when it remains unresolved after
 grounding.
+
+Before publishing, formatting also consolidates duplicate public issues by
+stable item and root cause, filters complementary relationships from quality
+defects, and derives concise requirement titles from the actual goal rather
+than exposing mechanical actor-prefixed wording.
 
 Primary implementation:
 
@@ -465,9 +523,12 @@ Acceptance-criteria quality combines:
 
 - Criterion precision: each criterion is relevant and supported.
 - Clause fact coverage: all distinct source facts are represented.
+- Criterion uniqueness: repeated paraphrases do not increase quality.
 
 This avoids a misleading 100% result from many criteria that repeat only one
-source fact.
+source fact. There is no universal requirement for two criteria: an atomic
+single-clause requirement may have one specific, testable criterion, while a
+multi-clause requirement needs enough distinct criteria to cover its facts.
 
 ## 7. Warning and issue lifecycle
 
@@ -552,7 +613,7 @@ Recommended post-MVP work:
 
 The branch was last verified with:
 
-- `389 passed`
+- `412 passed`
 - `1 skipped`
 - `1 existing Starlette/httpx deprecation warning`
 - Ruff critical checks passed

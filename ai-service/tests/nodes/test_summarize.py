@@ -1,7 +1,7 @@
 import pytest
 from unittest.mock import MagicMock, patch, AsyncMock
 from app.nodes.summarize import summarize_node
-from app.schemas.items import StructuredSummary
+from app.schemas.items import ClassifiedRequirement, StructuredSummary
 from app.schemas.items import SourceChunk
 
 
@@ -61,3 +61,72 @@ async def test_summarize_preserves_multiple_document_scopes(base_state):
     assert "operations.pdf" in final_prompt
     assert "workspace" in result["summary"].executive_summary.lower()
     assert "operations" in result["summary"].executive_summary.lower()
+
+
+@pytest.mark.asyncio
+async def test_summary_removes_none_sentinel_and_restores_omitted_requirements(base_state):
+    state = base_state.copy()
+    state["raw_text"] = "The service exports reports and maintains 99.9% uptime."
+    state["classified_requirements"] = [
+        ClassifiedRequirement(
+            id=1,
+            text="The service shall export monthly reports.",
+            candidate_labels=["FR"],
+            labels=["FR"],
+            confidence=0.9,
+        ),
+        ClassifiedRequirement(
+            id=2,
+            text="The service shall maintain 99.9% monthly uptime.",
+            candidate_labels=["NFR"],
+            labels=["NFR"],
+            confidence=0.9,
+        ),
+    ]
+    response = StructuredSummary(
+        executive_summary="The service exports monthly reports.",
+        key_decisions=[], open_questions=["None"], risks=[], assumptions=[],
+        action_items=[], stakeholders=[], scope=["Monthly report export"],
+        out_of_scope=[],
+    ).model_dump_json()
+    mock_llm = MagicMock()
+    mock_llm.ainvoke = AsyncMock(return_value=MagicMock(content=response))
+
+    with patch("app.nodes.summarize.get_llm", return_value=mock_llm):
+        result = await summarize_node(state)
+
+    assert result["summary"].open_questions == []
+    assert any("99.9%" in item for item in result["summary"].scope)
+
+
+@pytest.mark.asyncio
+async def test_summary_restores_explicit_stakeholders_and_key_constraints(base_state):
+    state = base_state.copy()
+    state["raw_text"] = "Administrators configure access. Availability is 99.9%."
+    state["classified_requirements"] = [
+        ClassifiedRequirement(
+            id=1,
+            text="Administrators shall configure access.",
+            actor="Administrator",
+            candidate_labels=["FR"], labels=["FR"], confidence=0.9,
+        ),
+        ClassifiedRequirement(
+            id=2,
+            text="The service shall maintain 99.9% monthly uptime.",
+            actor="System",
+            candidate_labels=["NFR"], labels=["NFR"], confidence=0.9,
+        ),
+    ]
+    response = StructuredSummary(
+        executive_summary="The service manages access.",
+        key_decisions=[], open_questions=[], risks=[], assumptions=[],
+        action_items=[], stakeholders=[], scope=[], out_of_scope=[],
+    ).model_dump_json()
+    mock_llm = MagicMock()
+    mock_llm.ainvoke = AsyncMock(return_value=MagicMock(content=response))
+
+    with patch("app.nodes.summarize.get_llm", return_value=mock_llm):
+        result = await summarize_node(state)
+
+    assert "Administrators" in result["summary"].stakeholders
+    assert "99.9%" in result["summary"].executive_summary

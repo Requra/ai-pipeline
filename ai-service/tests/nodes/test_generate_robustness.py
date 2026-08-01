@@ -85,7 +85,7 @@ async def test_generate_node_robust_mapping(base_state):
     assert all(c.coverage_type == "covered_by_story" for c in coverages)
     c10 = next(c for c in coverages if c.requirement_id == 10)
     assert c10.story_ids == ["robust-job_story_10"]
-    assert c10.acceptance_criteria_ids == ["robust-job_story_10_ac_1", "robust-job_story_10_ac_2"]
+    assert c10.acceptance_criteria_ids == ["robust-job_story_10_ac_1"]
 
 @pytest.mark.asyncio
 async def test_non_story_filtering_both_label_sources(base_state):

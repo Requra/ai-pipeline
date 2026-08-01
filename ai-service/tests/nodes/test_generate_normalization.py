@@ -310,7 +310,7 @@ async def test_generate_removes_unsupported_acceptance_facts(base_state):
     assert "invalid" not in combined
     assert "error" not in combined
     assert story.story_points in {1, 2, 3, 5, 8}
-    assert len(story.acceptance_criteria) >= 2
+    assert len(story.acceptance_criteria) >= 1
 
 
 @pytest.mark.asyncio
@@ -342,7 +342,7 @@ async def test_generate_rejects_unrelated_declared_mapping(base_state):
 
     story = result["user_stories"][0]
     assert story.source_requirement_ids == [1]
-    assert "retain exported reports" in " ".join(
+    assert "retains exported reports" in " ".join(
         criterion.text.lower() for criterion in story.acceptance_criteria
     )
 

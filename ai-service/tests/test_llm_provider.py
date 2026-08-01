@@ -34,6 +34,7 @@ def test_get_llm_openrouter(monkeypatch):
     monkeypatch.setattr(settings, "OPENROUTER_MODEL", "test-model")
     monkeypatch.setattr(settings, "OPENROUTER_BASE_URL", "https://openrouter.test/api/v1")
     monkeypatch.setattr(settings, "OPENROUTER_APP_NAME", "Test App")
+    monkeypatch.setattr(settings, "LLM_FALLBACK_CHAIN", None)
 
     from app.llm import get_llm
 
@@ -53,6 +54,7 @@ def test_get_llm_openai(monkeypatch):
     monkeypatch.setattr(settings, "LLM_PROVIDER", "openai")
     monkeypatch.setattr(settings, "OPENAI_API_KEY", "test-openai-key")
     monkeypatch.setattr(settings, "OPENAI_MODEL", "gpt-4o-mini")
+    monkeypatch.setattr(settings, "LLM_FALLBACK_CHAIN", None)
 
     from app.llm import get_llm
 
@@ -68,6 +70,7 @@ def test_get_llm_groq(monkeypatch):
     monkeypatch.setattr(settings, "LLM_PROVIDER", "groq")
     monkeypatch.setattr(settings, "GROQ_API_KEY", "test-groq-key")
     monkeypatch.setattr(settings, "GROQ_MODEL", "llama-3.3-70b-versatile")
+    monkeypatch.setattr(settings, "LLM_FALLBACK_CHAIN", None)
 
     from app.llm import get_llm
 
@@ -82,6 +85,7 @@ def test_get_llm_groq(monkeypatch):
 def test_get_llm_unsupported(monkeypatch):
     _inject_fake_langchain_openai()
     monkeypatch.setattr(settings, "LLM_PROVIDER", "invalid_provider")
+    monkeypatch.setattr(settings, "LLM_FALLBACK_CHAIN", None)
 
     from app.llm import get_llm
 
