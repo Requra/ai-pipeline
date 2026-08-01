@@ -3,6 +3,7 @@ import re
 from typing import Optional
 from app.schemas.pipeline_state import PipelineState
 from app.services.semantic_quality import infer_requirement_category, normalize_story_points
+from app.services.quality_scoring import normalize_issue_root_cause
 from app.progress import update_progress
 from app.schemas.items import (
     JobResult,
@@ -40,10 +41,12 @@ def v1_type_from_labels(labels) -> str:
     stories so a story's type reflects its source labels (not a hard-coded
     'Functional')."""
     labs = set(labels or [])
-    if "FR" in labs:
-        return "Functional"
+    # A measurable quality attribute remains non-functional even when an LLM
+    # also emits FR. BR may coexist with either, but does not override them.
     if "NFR" in labs or "Constraint" in labs or "Assumption" in labs:
         return "Non-Functional"
+    if "FR" in labs:
+        return "Functional"
     if "BR" in labs:
         return "Business"
     return "Functional"
@@ -73,6 +76,55 @@ def _dedupe_source_refs(refs: list[SourceRefV1]) -> list[SourceRefV1]:
         if ref.confidence_score > existing.confidence_score:
             deduped[existing_index] = ref
     return deduped
+
+
+def _issue_value(issue, field: str, default=None):
+    return issue.get(field, default) if isinstance(issue, dict) else getattr(issue, field, default)
+
+
+def _reconcile_public_quality_issues(issues: list) -> list[QualityIssue]:
+    """Expose one readable defect per item/root cause without changing shape."""
+    severity_rank = {"low": 1, "medium": 2, "high": 3}
+    grouped: dict[tuple, dict] = {}
+    for issue in issues:
+        model = issue if isinstance(issue, QualityIssue) else QualityIssue(**issue)
+        root_cause = normalize_issue_root_cause(model.rule_violated)
+        if root_cause == "COMPLEMENTARY":
+            continue
+        key = (model.item_type, model.item_id, root_cause)
+        entry = grouped.setdefault(key, {"model": model, "details": []})
+        if severity_rank.get(model.severity, 0) > severity_rank.get(
+            entry["model"].severity, 0
+        ):
+            entry["model"] = model
+        if model.details and model.details not in entry["details"]:
+            entry["details"].append(model.details)
+
+    reconciled: list[QualityIssue] = []
+    for (_item_type, _item_id, root_cause), entry in grouped.items():
+        model = entry["model"]
+        if root_cause == "EVIDENCE_NOT_GROUNDED" and model.severity == "high":
+            model = model.model_copy(update={
+                "rule_violated": "missing_verified_evidence",
+                "details": (
+                    "Requirement evidence could not be verified against the "
+                    "uploaded sources."
+                ),
+            })
+        else:
+            model = model.model_copy(update={
+                "details": " ".join(entry["details"]),
+            })
+        reconciled.append(model)
+    return reconciled
+
+
+def _requirement_title(requirement: ClassifiedRequirement) -> str:
+    goal = (getattr(requirement, "goal", None) or "").strip().rstrip(".")
+    if goal:
+        return goal[:1].upper() + goal[1:]
+    text = (getattr(requirement, "text", "") or "").strip().rstrip(".")
+    return (text[:77] + "...") if len(text) > 80 else text
 
 
 def parse_pipeline_error(err_str: str, status: str) -> Optional[PipelineError]:
@@ -138,7 +190,9 @@ async def format_node(state: PipelineState) -> dict:
     error = state.get("error")
     stories = state.get("user_stories", []) or []
     reqs = state.get("classified_requirements", []) or []
-    q_issues = state.get("quality_issues", []) or []
+    q_issues = _reconcile_public_quality_issues(
+        state.get("quality_issues", []) or []
+    )
     warnings = state.get("warnings", []) or []
 
     # Coerce user stories and requirements into Pydantic models where needed first
@@ -198,6 +252,9 @@ async def format_node(state: PipelineState) -> dict:
             informational_warning_codes = {
                 "DUPLICATE_REQUIREMENT_MERGED",
                 "SEMANTIC_COMPLEMENTARY",
+                # Grounding owns the final status through a High evidence
+                # defect. The warning itself is diagnostic and may be stale in
+                # backward-compatible callers that invoke format directly.
                 "EXTRACT_WEAK_EVIDENCE",
                 "WEAK_EVIDENCE_SUPPORT",
                 "NO_RETRIEVED_EVIDENCE",
@@ -370,7 +427,7 @@ async def format_node(state: PipelineState) -> dict:
         )
         
         # Requirement title generation
-        title = r.actor + " wants to " + r.goal if r.actor and r.goal else r.text[:50].strip() + "..."
+        title = _requirement_title(r)
         
         mapped_reqs.append(RequirementV1(
             id=req_str_id,
@@ -388,8 +445,16 @@ async def format_node(state: PipelineState) -> dict:
 
     # 3. User Stories mapping
     mapped_stories = []
+    # Internal story IDs are job-scoped implementation details (for example,
+    # ``job-123_story_7``).  Keep an explicit map to the IDs emitted by the V1
+    # contract so every public relationship uses the same namespace.
+    story_id_map = {}
+    public_acceptance_criterion_ids = set()
     for idx, s in enumerate(coerced_stories, start=1):
         story_str_id = f"US-{str(idx).zfill(3)}"
+        # Duplicate internal IDs are already reported by the quality gate.  Use
+        # the first emitted story as the deterministic relationship target.
+        story_id_map.setdefault(s.id, story_str_id)
         
         # Map Linked requirement ID
         linked_req_id = "REQ-001"
@@ -443,9 +508,21 @@ async def format_node(state: PipelineState) -> dict:
         story_issues = [
             qi.details if isinstance(qi, QualityIssue) else qi.get("details", "") 
             for qi in q_issues 
-            if (getattr(qi, "item_id", None) == s.id or (isinstance(qi, dict) and qi.get("item_id") == s.id)) 
+            if (getattr(qi, "item_id", None) == idx or (isinstance(qi, dict) and qi.get("item_id") == idx))
             and (getattr(qi, "item_type", None) == "story" or (isinstance(qi, dict) and qi.get("item_type") == "story"))
         ]
+        linked_internal_requirements = [
+            requirement
+            for requirement in coerced_reqs
+            if requirement.id in (getattr(s, "source_requirement_ids", []) or [])
+        ]
+        if linked_internal_requirements and any(
+            not (getattr(requirement, "evidence", None) or [])
+            for requirement in linked_internal_requirements
+        ):
+            story_issues.append(
+                "A linked requirement does not have verified source evidence."
+            )
         score = max(0.0, 1.0 - (len(story_issues) * 0.15))
         quality = QualityV1(
             score=round(score, 2),
@@ -456,6 +533,7 @@ async def format_node(state: PipelineState) -> dict:
         # Acceptance criteria mapping
         ac_v1_list = []
         for ac in getattr(s, "acceptance_criteria", []) or []:
+            public_acceptance_criterion_ids.add(ac.id)
             ac_v1_list.append(AcceptanceCriterionV1(
                 id=ac.id,
                 text=ac.text,
@@ -510,13 +588,38 @@ async def format_node(state: PipelineState) -> dict:
     # 4. Requirement Coverages mapping
     mapped_coverages = []
     internal_coverages = state.get("requirement_coverages", []) or []
+    emitted_story_ids = {story.id for story in mapped_stories}
     for cov in internal_coverages:
-        str_req_id = req_id_map.get(cov.requirement_id, f"REQ-{str(cov.requirement_id).zfill(3)}")
+        str_req_id = req_id_map.get(cov.requirement_id)
+        if str_req_id is None:
+            # A public relationship must never point at an object that was not
+            # emitted. The quality gate retains the diagnostic for invalid
+            # internal coverage; the public graph simply omits the dangling row.
+            continue
+        # Accept already-public IDs for backward compatibility, translate known
+        # internal IDs, and omit dangling references that do not identify an
+        # emitted story/criterion.
+        public_story_ids = []
+        for story_id in cov.story_ids:
+            mapped_story_id = story_id_map.get(story_id)
+            if mapped_story_id is None and story_id in emitted_story_ids:
+                mapped_story_id = story_id
+            if mapped_story_id is not None and mapped_story_id not in public_story_ids:
+                public_story_ids.append(mapped_story_id)
+
+        public_ac_ids = []
+        for criterion_id in cov.acceptance_criteria_ids:
+            if (
+                criterion_id in public_acceptance_criterion_ids
+                and criterion_id not in public_ac_ids
+            ):
+                public_ac_ids.append(criterion_id)
+
         mapped_coverages.append(RequirementCoverageV1(
             requirement_id=str_req_id,
             coverage_type=cov.coverage_type,
-            story_ids=cov.story_ids,
-            acceptance_criteria_ids=cov.acceptance_criteria_ids,
+            story_ids=public_story_ids,
+            acceptance_criteria_ids=public_ac_ids,
             reason=cov.reason
         ))
 
@@ -627,6 +730,28 @@ async def format_node(state: PipelineState) -> dict:
     # Structured error parsing
     structured_error = parse_pipeline_error(error, status)
 
+    # QualityIssue.item_id remains an integer in contract V1.  Normalize
+    # requirement/coverage IDs to the numeric suffix of their emitted REQ ID so
+    # callers can resolve (item_type, item_id) without exposing internal IDs.
+    # Story issues are already created with their one-based public position by
+    # quality_gate and therefore need no type or shape change.
+    requirement_public_numbers = {
+        requirement.id: index
+        for index, requirement in enumerate(coerced_reqs, start=1)
+    }
+    public_quality_issues = []
+    for issue in q_issues:
+        public_issue = issue if isinstance(issue, QualityIssue) else QualityIssue(**issue)
+        public_item_id = public_issue.item_id
+        if public_issue.item_type in ("requirement", "coverage"):
+            public_item_id = requirement_public_numbers.get(
+                public_issue.item_id,
+                public_issue.item_id,
+            )
+        public_quality_issues.append(
+            public_issue.model_copy(update={"item_id": public_item_id})
+        )
+
     # Backward compatible export rows
     legacy_export_rows = state.get("export_rows", []) or []
 
@@ -643,7 +768,7 @@ async def format_node(state: PipelineState) -> dict:
         summary=summary_obj,
         exports=exports,
         artifacts=artifacts,
-        quality_issues=q_issues,
+        quality_issues=public_quality_issues,
         warnings=warnings,
         quality_report=quality_report,
         error=structured_error,
