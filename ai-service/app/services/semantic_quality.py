@@ -27,6 +27,7 @@ _NUMBER_RE = re.compile(
     r"\b\d+(?:\.\d+)?\s*(?:ms|milliseconds?|seconds?|minutes?|hours?|days?|weeks?|months?|years?|%|percent|mb|gb|kb)?\b",
     re.IGNORECASE,
 )
+_NUMBER_VALUE_RE = re.compile(r"\b(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\b")
 
 _FACT_TOKEN_RE = re.compile(r"[a-z0-9]+")
 _FACT_SCAFFOLDING = {
@@ -44,11 +45,11 @@ _FACT_SCAFFOLDING = {
 # absent from every linked source fact, it must not silently appear in a story
 # or acceptance criterion.
 _ASSERTIVE_FACT_TERMS = {
-    "automatic", "automatically", "authorize",
+    "access", "automatic", "automatically", "authorize",
     "authorized", "block", "delete", "deleted", "deny", "denied",
     "delay", "display", "encrypt", "encrypted", "error",
     "escalate", "escalated", "escalation", "expire", "expired",
-    "include", "invalid", "lock", "locked", "permission", "proceed",
+    "include", "invalid", "lock", "locked", "permission", "proceed", "profile",
     "reject", "rejected", "retain", "retrieve", "retry", "scan", "scanned",
     "timeout", "update", "virus",
 }
@@ -59,6 +60,7 @@ _ASSERTIVE_FACT_TERMS = {
 _REVIEW_FACT_TERMS = {"fail", "failure", "notify", "record", "test", "warning"}
 
 _FACT_ALIASES = {
+    "acces": "access",
     "accessibl": "access",
     "accessible": "access",
     "admin": "administrator",
@@ -67,6 +69,8 @@ _FACT_ALIASES = {
     "authenticate": "authentication",
     "authentication": "authentication",
     "alert": "notify",
+    "appear": "display",
+    "appearing": "display",
     "notification": "notify",
     "notify": "notify",
     "captur": "record",
@@ -79,13 +83,18 @@ _FACT_ALIASES = {
     "mfa": "authentication",
     "includ": "include",
     "inform": "notify",
+    "grant": "authorize",
+    "granted": "authorize",
     "preserv": "retain",
     "preserve": "retain",
+    "proce": "proceed",
     "recover": "reset",
     "retention": "retain",
     "retrieval": "retrieve",
     "retriev": "retrieve",
     "log": "record",
+    "list": "display",
+    "listed": "display",
     "record": "record",
     "request": "request",
     "submit": "request",
@@ -346,6 +355,85 @@ def access_control_entails(text: str, sources: Iterable[str]) -> bool:
     return False
 
 
+def _has_enforceable_numeric_upper_bound(text: str) -> bool:
+    """Return whether a numeric cap defines an enforceable business boundary.
+
+    An explicit permission or limit (for example, "allowed to check out up to
+    3 assets") entails rejection above the cap. A workload envelope (for
+    example, "under load of up to 500 sessions") only defines the conditions
+    under which another requirement is measured and must not be converted into
+    a rejection rule.
+    """
+    normalized = re.sub(r"\s+", " ", text or "").strip().lower()
+    cap = r"(?:up to|at most|no more than|maximum(?:\s+of)?)\s+\d+(?:[,.]\d+)?"
+    explicit_permission = re.search(
+        rf"\b(?:allow(?:ed|s)?|permit(?:ted|s)?)\b[^.;()]{{0,100}}\b{cap}",
+        normalized,
+    )
+    explicit_limit = re.search(
+        r"\b(?:limit(?:ed|s)?)\b[^.;()]{0,60}\bto\s+\d+(?:[,.]\d+)?",
+        normalized,
+    )
+    direct_modal_cap = re.search(
+        rf"\b(?:may|can)\b[^.;()]{{0,80}}\b{cap}",
+        normalized,
+    )
+    return bool(explicit_permission or explicit_limit or direct_modal_cap)
+
+
+def numeric_upper_bound_entails(text: str, sources: Iterable[str]) -> bool:
+    """Recognize rejection at a source-defined numeric upper boundary."""
+    candidate = re.sub(r"\s+", " ", text or "").strip().lower()
+    if not re.search(
+        r"\b(?:den(?:y|ies|ied)|reject(?:s|ed)?|block(?:s|ed)?|prevent(?:s|ed)?|"
+        r"cannot|can't|does\s+not\s+proceed|not\s+allowed|not\s+permitted)\b",
+        candidate,
+    ):
+        return False
+    candidate_numbers = normalized_numbers(candidate)
+    candidate_tokens = fact_tokens(candidate)
+    for source in sources:
+        if not _has_enforceable_numeric_upper_bound(source):
+            continue
+        if not re.search(
+            r"\b(?:up to|at most|no more than|maximum(?:\s+of)?|limit(?:ed)?\s+to)\s+"
+            r"\d+(?:[,.]\d+)?",
+            source or "",
+            flags=re.IGNORECASE,
+        ):
+            continue
+        source_numbers = normalized_numbers(source)
+        source_tokens = fact_tokens(source)
+        if not (candidate_numbers & source_numbers):
+            continue
+        if len(candidate_tokens & source_tokens) >= 2:
+            return True
+    return False
+
+
+def _exclusive_access_scope_entails(text: str, sources: Iterable[str]) -> bool:
+    """Recognize a faithful restatement of an exclusive source permission."""
+    candidate = re.sub(r"\s+", " ", text or "").strip().lower()
+    limited = re.search(
+        r"\b(?:access|retrieval|permission)\b[^.;]{0,60}"
+        r"\b(?:limited|restricted)\s+to\s+(?P<role>[a-z][a-z0-9 _-]{1,40})",
+        candidate,
+    )
+    if not limited:
+        return False
+    candidate_roles = fact_tokens(limited.group("role"))
+    for source in sources:
+        exclusive = re.search(
+            r"\bonly\s+(?P<role>[a-z][a-z0-9 _-]{1,60}?)\s+"
+            r"(?:may|can|shall|must|are\s+allowed\s+to|are\s+permitted\s+to)\s+",
+            source or "",
+            flags=re.IGNORECASE,
+        )
+        if exclusive and fact_tokens(exclusive.group("role")) & candidate_roles:
+            return True
+    return False
+
+
 def source_fact_texts(requirements: Sequence) -> list[str]:
     """Build the internal fact ledger for linked requirements.
 
@@ -375,8 +463,32 @@ def unsupported_fact_terms(text: str, sources: Iterable[str]) -> set[str]:
     unsupported = candidate_tokens - source_tokens
     assertive_stems = {_canonical_fact_token(term) for term in _ASSERTIVE_FACT_TERMS}
     result = unsupported & assertive_stems
+    if "display" in result and not re.search(
+        r"\b(?:display|show|appear)(?:s|ed|ing)?\b|"
+        r"\b(?:is|are|was|were|be)\s+listed\b|"
+        r"\b(?:shall|must|will|should|can|may|to)\s+list\b",
+        text or "",
+        flags=re.IGNORECASE,
+    ):
+        # "list" is often an object ("asset list"), not a newly asserted
+        # presentation action. Keep the action check syntax-aware.
+        result.remove("display")
+    access_is_asserted = re.search(
+        r"^\s*(?:access|retrieve|read|view)\b|"
+        r"\b(?:shall|must|will|should|can|may|to)\s+"
+        r"(?:access|retrieve|read|view)\b|"
+        r"\b(?:accesses|retrieves|reads|views)\b|"
+        r"\b(?:is|are|was|were|be)\s+accessible\b",
+        text or "",
+        flags=re.IGNORECASE,
+    )
+    access_is_entailed = access_control_entails(text, sources) or _exclusive_access_scope_entails(text, sources)
+    if "access" in result and (not access_is_asserted or access_is_entailed):
+        result.remove("access")
     if "deny" in result and access_control_entails(text, sources):
         result.remove("deny")
+    if numeric_upper_bound_entails(text, sources):
+        result.difference_update({"block", "deny", "proceed", "reject"})
     if "retain" in result and retention_entails(text, sources):
         result.remove("retain")
     return result
@@ -408,7 +520,7 @@ def retention_entails(text: str, sources: Iterable[str]) -> bool:
 
 
 def complete_requirement_from_evidence(requirement: str, evidence: str) -> str:
-    """Restore source-side numeric constraints omitted from a same-language requirement.
+    """Restore explicit source constraints omitted from a same-language requirement.
 
     The function returns the original text unless the evidence is a strongly
     related bounded clause containing additional numeric facts. In that case,
@@ -420,7 +532,10 @@ def complete_requirement_from_evidence(requirement: str, evidence: str) -> str:
     if not requirement or not evidence:
         return requirement
     missing_numbers = normalized_numbers(evidence) - normalized_numbers(requirement)
-    if not missing_numbers:
+    evidence_negative = bool(_NEGATION_RE.search(evidence))
+    requirement_negative = bool(_NEGATION_RE.search(requirement))
+    missing_negative_constraint = evidence_negative and not requirement_negative
+    if not missing_numbers and not missing_negative_constraint:
         return requirement
     if check_different_languages(requirement, evidence):
         return requirement
@@ -460,6 +575,13 @@ def unsupported_review_terms(text: str, sources: Iterable[str]) -> set[str]:
         lowered,
     ):
         asserted.add("notify")
+    if "notify" in candidates and re.search(
+        r"\b(?:and|then)\s+(?:the\s+)?(?:system|service|application|portal|it)\s+"
+        r"(?:notify|alert|inform)(?:s|ed|ing)?\b|"
+        r"\band\s+(?:notify|alert|inform)(?:s|ed|ing)?\b",
+        lowered,
+    ):
+        asserted.add("notify")
     if "record" in candidates and re.search(
         r"\b(?:shall|must|will|should|can|may|to|want(?:s)?(?:\s+to)?)\s+"
         r"(?:\w+\s+){0,1}(?:record|capture|log)\b",
@@ -486,11 +608,15 @@ def _claim_clauses(text: str) -> list[str]:
         cleaned = part.strip()
         if not cleaned:
             continue
-        claims.append(cleaned)
+        split_claims = split_requirement_clauses(cleaned)
+        if len(split_claims) > 1:
+            claims.extend(split_claims)
+        else:
+            claims.append(cleaned)
         then_parts = re.split(r"\bthen\b", cleaned, maxsplit=1, flags=re.IGNORECASE)
         if len(then_parts) == 2 and then_parts[1].strip():
             claims.append(then_parts[1].strip())
-        claims.extend(split_requirement_clauses(cleaned))
+        claims.extend(split_claims)
     return list(dict.fromkeys(claims))
 
 
@@ -518,6 +644,8 @@ def evaluate_polarity(text: str, sources: Iterable[str]) -> str:
         return "ENTAILED"
     if access_control_entails(text, sources):
         return "ENTAILED"
+    if numeric_upper_bound_entails(text, sources):
+        return "ENTAILED"
 
     source_clauses = []
     for source in sources:
@@ -528,47 +656,51 @@ def evaluate_polarity(text: str, sources: Iterable[str]) -> str:
     if not source_clauses or not candidate_clauses:
         return "NOT_COVERED"
 
-    best_source = None
-    best_candidate = None
-    best_score = -1.0
-    for source_clause in source_clauses:
-        for candidate_clause in candidate_clauses:
-            score = _clause_relation_score(source_clause, candidate_clause)
-            if score > best_score:
-                best_score = score
-                best_source = source_clause
-                best_candidate = candidate_clause
+    any_entailed = False
+    for candidate_clause in candidate_clauses:
+        best_source = max(
+            source_clauses,
+            key=lambda source_clause: _clause_relation_score(source_clause, candidate_clause),
+        )
+        best_score = _clause_relation_score(best_source, candidate_clause)
+        if best_score < 0.25:
+            continue
 
-    if best_score < 0.25 or best_source is None or best_candidate is None:
-        return "NOT_COVERED"
-
-    related_source_tokens = fact_tokens(best_source) - {
-        "not", "never", "no", "without",
-    }
-    related_candidate_tokens = fact_tokens(best_candidate) - {
-        "not", "never", "no", "without",
-    }
-    if len(related_source_tokens & related_candidate_tokens) < 2:
-        return "NOT_COVERED"
-
-    candidate_negative = bool(_NEGATION_RE.search(best_candidate))
-    source_negative = bool(_NEGATION_RE.search(best_source))
-    if candidate_negative != source_negative:
         source_tokens = fact_tokens(best_source) - {"not", "never", "no", "without"}
-        candidate_tokens = fact_tokens(best_candidate) - {"not", "never", "no", "without"}
+        candidate_tokens = fact_tokens(candidate_clause) - {"not", "never", "no", "without"}
         shared = source_tokens & candidate_tokens
-        source_coverage = len(shared) / len(source_tokens) if source_tokens else 0.0
-        # A polarity mismatch is a contradiction only when the candidate
-        # explicitly asserts the same proposition.  Merely omitting a negative
-        # source clause is NOT_COVERED.
-        if len(shared) < 2 or source_coverage < 0.60:
-            return "NOT_COVERED"
-        return "CONTRADICTED"
-    return "ENTAILED"
+        if len(shared) < 2:
+            continue
+
+        candidate_negative = bool(_NEGATION_RE.search(candidate_clause))
+        source_negative = bool(_NEGATION_RE.search(best_source))
+        if candidate_negative != source_negative:
+            source_coverage = len(shared) / len(source_tokens) if source_tokens else 0.0
+            # A polarity mismatch is a contradiction only when this atomic
+            # candidate clause asserts the same proposition. A negative clause
+            # must never contaminate an adjacent positive clause (or vice versa).
+            if source_coverage >= 0.60:
+                return "CONTRADICTED"
+            continue
+        any_entailed = True
+    return "ENTAILED" if any_entailed else "NOT_COVERED"
 
 
 def has_polarity_conflict(text: str, sources: Iterable[str]) -> bool:
     """Detect an introduced or removed negation on an otherwise related fact."""
+    candidate = re.sub(r"\s+", " ", text or "").lower()
+    if re.search(
+        r"\b(?:unlimited|unrestricted)\b|"
+        r"\bwithout\s+(?:any\s+)?(?:restriction|restrictions|limit|limits)\b",
+        candidate,
+    ):
+        for source in sources:
+            if re.search(
+                r"\b(?:up to|at most|no more than|maximum|max(?:imum)?|limit(?:ed)? to)\b",
+                source or "",
+                flags=re.IGNORECASE,
+            ):
+                return True
     return evaluate_polarity(text, sources) == "CONTRADICTED"
 
 
@@ -576,7 +708,7 @@ def split_requirement_clauses(text: str) -> list[str]:
     """Split a canonical requirement into clauses that should be covered."""
     source = text or ""
     raw = re.split(
-        r"\s*;\s*|\s+(?=without\b)|\s+and\s+(?=(?:shall|must|will|should|may|allows?|retains?|records?|displays?|sends?|includes?|enforces?|provides?|produces?|identifies?|attaches?|scans?)\b)",
+        r"\s*;\s*|\s+(?=without\b)|,?\s+and\s+(?=(?:not|never|cannot|can\s+not|shall\s+not|must\s+not)\b)|\s+and\s+(?=(?:shall|must|will|should|may|allows?|retains?|records?|displays?|sends?|includes?|enforces?|provides?|produces?|identifies?|attaches?|scans?)\b)",
         source,
         flags=re.I,
     )
@@ -616,6 +748,8 @@ def clause_coverage(requirements: Sequence, criteria: Sequence[str]) -> float:
     for clause in clauses:
         clause_is_covered = False
         for criterion in criteria:
+            if missing_required_numeric_claims(clause, criterion):
+                continue
             if access_control_entails(criterion, [clause]):
                 clause_is_covered = True
                 break
@@ -733,6 +867,32 @@ def normalize_requirement_labels(text: str, labels: Sequence[str]) -> list[str]:
 def normalized_numbers(text: str) -> set[str]:
     """Return normalized numeric claims including their units when present."""
     return {re.sub(r"\s+", " ", match.group(0).strip().lower()) for match in _NUMBER_RE.finditer(text or "")}
+
+
+def _normalized_numeric_values(text: str) -> set[str]:
+    """Return formatting-independent numeric values for completeness checks."""
+    values: set[str] = set()
+    for match in _NUMBER_VALUE_RE.finditer(text or ""):
+        raw = match.group(0).replace(",", "")
+        try:
+            numeric = float(raw)
+            values.add(str(int(numeric)) if numeric.is_integer() else format(numeric, "g"))
+        except ValueError:
+            values.add(raw.lower())
+    return values
+
+
+def missing_required_numeric_claims(source: str, candidate: str) -> set[str]:
+    """Return measurable source values omitted by a candidate artifact.
+
+    This is intentionally the inverse of ``unsupported_numeric_claims``. It
+    compares normalized numeric values so harmless formatting differences such
+    as ``2`` versus ``2.0`` do not create a false omission.
+    """
+    source_values = _normalized_numeric_values(source)
+    if not source_values:
+        return set()
+    return source_values - _normalized_numeric_values(candidate)
 
 
 def lexical_support(requirement: str, evidence: str) -> float:

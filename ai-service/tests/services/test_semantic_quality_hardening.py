@@ -23,10 +23,13 @@ from app.services.semantic_quality import (
     best_evidence_clause,
     clause_coverage,
     complete_requirement_from_evidence,
+    has_polarity_conflict,
     infer_requirement_category,
     infer_requirement_priority,
+    missing_required_numeric_claims,
     normalize_requirement_labels,
     normalize_story_points,
+    numeric_upper_bound_entails,
     split_requirement_clauses,
     unsupported_fact_terms,
     unsupported_review_terms,
@@ -844,3 +847,116 @@ def test_passive_notifications_and_recording_are_reviewed_as_new_behavior():
         "The user is informed of the checkout limit.",
         [source],
     ) == {"notify"}
+
+
+@pytest.mark.parametrize(
+    ("candidate", "source", "expected"),
+    [
+        (
+            "Then the uploaded asset appears in the asset list.",
+            "Users shall upload an asset.",
+            "display",
+        ),
+        (
+            "Then the request is listed with status and details.",
+            "Users shall submit a request.",
+            "display",
+        ),
+        (
+            "Then appropriate access is granted based on the LDAP profile.",
+            "The application shall authenticate users through LDAP.",
+            "authorize",
+        ),
+    ],
+)
+def test_unsupported_outcomes_are_rejected_generically(candidate, source, expected):
+    assert expected in unsupported_fact_terms(candidate, [source])
+
+
+def test_negative_source_constraint_is_restored_from_verified_evidence():
+    requirement = "Records shall be soft-deleted and marked as Retired."
+    evidence = (
+        "Records cannot be permanently deleted; they must be soft-deleted "
+        "and marked as Retired."
+    )
+    assert complete_requirement_from_evidence(requirement, evidence) == evidence
+
+
+def test_conjunct_notification_and_accessibility_are_unsupported_outcomes():
+    limit_source = "Users shall be allowed to check out up to 3 assets simultaneously."
+    assert unsupported_review_terms(
+        "Then the system prevents checkout and informs the user of the limit.",
+        [limit_source],
+    ) == {"notify"}
+    assert has_polarity_conflict(
+        "Users can obtain assets without restrictions.",
+        [limit_source],
+    )
+    assert "access" in unsupported_fact_terms(
+        "Then the retired record is accessible during an audit.",
+        ["Records shall be soft-deleted and marked as Retired for audit compliance."],
+    )
+
+
+def test_reordered_positive_and_negative_clauses_are_not_a_contradiction():
+    source = (
+        "Asset database records cannot be permanently deleted; they must be "
+        "soft-deleted and marked as Retired for audit compliance."
+    )
+    requirement = (
+        "Asset database records shall be soft-deleted and marked as Retired for "
+        "audit compliance, and not permanently deleted."
+    )
+    assert not has_polarity_conflict(requirement, [source])
+
+
+def test_numeric_upper_bound_entails_rejection_above_the_limit():
+    source = "Users shall be allowed to check out up to 3 assets simultaneously."
+    boundary = (
+        "Given a user already has 3 assets, when the user attempts to check out "
+        "another asset, then the operation does not proceed because the maximum "
+        "of 3 has been reached."
+    )
+    assert numeric_upper_bound_entails(boundary, [source])
+    assert not unsupported_fact_terms(boundary, [source])
+    assert not has_polarity_conflict(boundary, [source])
+    assert numeric_upper_bound_entails(
+        "Given 3 checked-out assets, when another is requested, then the system prevents the additional checkout.",
+        [source],
+    )
+
+
+def test_workload_envelope_does_not_entail_rejection_above_the_test_load():
+    source = (
+        "The dashboard shall load in less than 2 seconds under normal concurrent "
+        "load of up to 500 active sessions."
+    )
+    candidate = (
+        "Given 500 active sessions, when another session begins, then the system "
+        "prevents the additional session."
+    )
+
+    assert not numeric_upper_bound_entails(candidate, [source])
+
+
+def test_clause_coverage_requires_all_source_numeric_values():
+    requirement = ClassifiedRequirement(
+        id=1,
+        text=(
+            "The dashboard shall load in less than 2.0 seconds under normal "
+            "concurrent load of up to 500 active sessions."
+        ),
+        candidate_labels=["NFR"], labels=["NFR"], confidence=0.9,
+    )
+    vague = (
+        "Given normal load, when users open the dashboard, then it loads within "
+        "the specified time."
+    )
+    measurable = (
+        "Given up to 500 active sessions, when users open the dashboard, then it "
+        "loads in less than 2 seconds."
+    )
+    assert missing_required_numeric_claims(requirement.text, vague) == {"2", "500"}
+    assert clause_coverage([requirement], [vague]) == 0.0
+    assert not missing_required_numeric_claims(requirement.text, measurable)
+    assert clause_coverage([requirement], [measurable]) == 1.0
