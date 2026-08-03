@@ -2,7 +2,16 @@ import time
 import re
 from typing import Optional
 from app.schemas.pipeline_state import PipelineState
-from app.services.semantic_quality import infer_requirement_category, normalize_story_points
+from app.services.semantic_quality import (
+    has_polarity_conflict,
+    infer_requirement_category,
+    normalize_story_points,
+    proposition_support,
+    source_fact_texts,
+    unsupported_fact_terms,
+    unsupported_numeric_claims,
+    unsupported_review_terms,
+)
 from app.services.quality_scoring import normalize_issue_root_cause
 from app.progress import update_progress
 from app.schemas.items import (
@@ -121,10 +130,46 @@ def _reconcile_public_quality_issues(issues: list) -> list[QualityIssue]:
 
 def _requirement_title(requirement: ClassifiedRequirement) -> str:
     goal = (getattr(requirement, "goal", None) or "").strip().rstrip(".")
-    if goal:
+    sources = source_fact_texts([requirement])
+    goal_is_supported = bool(goal) and bool(sources) and (
+        max((proposition_support(source, goal) for source in sources), default=0.0) >= 0.15
+        and not unsupported_numeric_claims(goal, sources)
+        and not unsupported_fact_terms(goal, sources)
+        and not unsupported_review_terms(goal, sources)
+        and not has_polarity_conflict(goal, sources)
+    )
+    if goal_is_supported:
         return goal[:1].upper() + goal[1:]
     text = (getattr(requirement, "text", "") or "").strip().rstrip(".")
-    return (text[:77] + "...") if len(text) > 80 else text
+    predicate = re.match(
+        r"^.+?\s+(?:shall|must|will|should|may|can)\s+(?:be\s+able\s+to\s+)?(.+)$",
+        text,
+        flags=re.IGNORECASE,
+    )
+    title = predicate.group(1).strip() if predicate else text
+    title = title[:1].upper() + title[1:] if title else "Requirement"
+    return (title[:77] + "...") if len(title) > 80 else title
+
+
+def _calibrated_requirement_confidence(
+    requirement: ClassifiedRequirement,
+    source_refs: list[SourceRefV1],
+) -> float:
+    """Combine extraction confidence with authoritative grounded evidence.
+
+    Extraction remains useful as a prior, while verified grounding owns most
+    of the final confidence. A missing citation or unresolved review state
+    prevents an unjustifiably high public value. The response shape is
+    unchanged.
+    """
+    extraction = min(1.0, max(0.0, float(getattr(requirement, "confidence", 0.0) or 0.0)))
+    if not source_refs:
+        return round(min(extraction, 0.49), 4)
+    evidence = max(ref.confidence_score for ref in source_refs)
+    calibrated = (0.30 * extraction) + (0.70 * evidence)
+    if getattr(requirement, "needs_review", False):
+        calibrated = min(calibrated, 0.79)
+    return round(min(1.0, max(0.0, calibrated)), 4)
 
 
 def parse_pipeline_error(err_str: str, status: str) -> Optional[PipelineError]:
@@ -437,7 +482,7 @@ async def format_node(state: PipelineState) -> dict:
             category=infer_requirement_category(r.text, labels),
             priority=priority,
             actor=r.actor or "System",
-            confidence_score=r.confidence,
+            confidence_score=_calibrated_requirement_confidence(r, source_refs),
             deduplication_key=generate_dedup_key(title),
             source_refs=source_refs,
             quality=quality

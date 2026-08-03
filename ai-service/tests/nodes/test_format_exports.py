@@ -28,7 +28,7 @@ def _req(rid, labels, conf=0.9):
     return ClassifiedRequirement(
         id=rid, text=f"Requirement {rid}", actor="user", goal="do thing",
         candidate_labels=labels, labels=labels, confidence=conf, classification_confidence=conf,
-        evidence=[EvidenceSpan(chunk_id=f"c{rid}", quote=f"quote for {rid}")],
+        evidence=[EvidenceSpan(chunk_id=f"c{rid}", quote=f"quote for {rid}", support_score=1.0)],
     )
 
 
@@ -73,7 +73,7 @@ async def test_export_rows_are_enriched(base_state):
     row = jr.exports.excel.rows[0]
     # Enriched, useful columns are present and populated.
     assert row["requirement_id"].startswith("REQ-")
-    assert row["confidence"] == 0.77
+    assert row["confidence"] == 0.931
     assert "Given A" in row["acceptance_criteria"]
     assert "quote for 1" in row["source_quotes"]
     assert row["type"] == "Functional"
@@ -81,6 +81,33 @@ async def test_export_rows_are_enriched(base_state):
     jira = jr.exports.jira.rows[0]
     assert len(jira["acceptance_criteria"]) == 2
     assert "quote for 1" in jira["source_quotes"]
+
+
+@pytest.mark.asyncio
+async def test_requirement_confidence_is_calibrated_and_unsupported_goal_is_not_title(base_state):
+    requirement = ClassifiedRequirement(
+        id=1,
+        text="Checkout requests shall undergo manager approval above $1,000.",
+        actor="Manager",
+        goal="Approve or reject checkout requests",
+        candidate_labels=["BR"], labels=["BR"],
+        confidence=0.7, classification_confidence=0.9,
+        evidence=[EvidenceSpan(
+            chunk_id="c1",
+            quote="Checkout requests shall undergo manager approval above $1,000.",
+            support_score=1.0,
+        )],
+    )
+    state = base_state.copy()
+    state["classified_requirements"] = [requirement]
+    state["user_stories"] = [_story("s1", 1, ["BR"])]
+
+    result = await format_node(state)
+    public_requirement = result["job_result"].requirements[0]
+
+    assert public_requirement.confidence_score == 0.91
+    assert "reject" not in public_requirement.title.lower()
+    assert "manager approval" in public_requirement.title.lower()
 
 
 @pytest.mark.asyncio
