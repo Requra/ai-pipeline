@@ -260,7 +260,7 @@ async def test_grounding_restores_omitted_numeric_constraint_and_accepts_soft_de
             id=2,
             text=(
                 "The system shall soft-delete and mark asset records as Retired "
-                "instead of permanently deleting them."
+                "for audit compliance."
             ),
             candidate_labels=["FR", "BR"],
             labels=["FR", "BR"],
@@ -276,6 +276,40 @@ async def test_grounding_restores_omitted_numeric_constraint_and_accepts_soft_de
     assert "500 active sessions" in requirements[0].text
     assert requirements[0].evidence[0].support_score > 0.70
     assert requirements[1].evidence[0].support_score > 0.70
+    assert "cannot be permanently deleted" in requirements[1].text
+    assert not any(
+        issue.rule_violated == "missing_verified_evidence"
+        for issue in result["quality_issues"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_grounding_accepts_reordered_negative_and_positive_clauses(base_state):
+    source = (
+        "Asset database records cannot be permanently deleted; they must be "
+        "soft-deleted and marked as Retired for audit compliance."
+    )
+    requirement = (
+        "Asset database records shall be soft-deleted and marked as Retired for "
+        "audit compliance, and not permanently deleted."
+    )
+    state = base_state.copy()
+    state["chunks"] = [
+        SourceChunk(chunk_id="retention", text=source, start_char=0, end_char=len(source))
+    ]
+    state["classified_requirements"] = [
+        ClassifiedRequirement(
+            id=1, text=requirement, candidate_labels=["FR", "BR"],
+            labels=["FR", "BR"], confidence=0.7,
+            evidence=[EvidenceSpan(chunk_id="retention", quote=source)],
+        )
+    ]
+
+    result = await evidence_grounding_node(state)
+
+    grounded = result["classified_requirements"][0]
+    assert grounded.evidence
+    assert grounded.evidence[0].support_score >= 0.95
     assert not any(
         issue.rule_violated == "missing_verified_evidence"
         for issue in result["quality_issues"]

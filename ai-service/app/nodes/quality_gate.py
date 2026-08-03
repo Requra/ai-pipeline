@@ -264,8 +264,9 @@ async def quality_gate_node(state: PipelineState) -> dict:
 
         linked_requirements = [req_map[req_id] for req_id in src_ids if req_id in req_map]
         linked_facts = source_fact_texts(linked_requirements)
-        unsupported_story_terms = unsupported_fact_terms(desc, linked_facts)
-        polarity_conflict = has_polarity_conflict(desc, linked_facts)
+        story_claim_text = f"{getattr(s, 'title', '')} {desc}".strip()
+        unsupported_story_terms = unsupported_fact_terms(story_claim_text, linked_facts)
+        polarity_conflict = has_polarity_conflict(story_claim_text, linked_facts)
         if unsupported_story_terms or polarity_conflict:
             new_issues.append(QualityIssue(
                 item_id=story_index,
@@ -278,7 +279,7 @@ async def quality_gate_node(state: PipelineState) -> dict:
                 ),
             ))
         else:
-            review_terms = unsupported_review_terms(desc, linked_facts)
+            review_terms = unsupported_review_terms(story_claim_text, linked_facts)
             if review_terms:
                 new_issues.append(QualityIssue(
                     item_id=story_index,
@@ -471,8 +472,9 @@ async def quality_gate_node(state: PipelineState) -> dict:
                 ))
                 continue
             unsupported_terms = unsupported_fact_terms(criterion_text, source_facts)
+            review_terms = unsupported_review_terms(criterion_text, source_facts)
             polarity_conflict = has_polarity_conflict(criterion_text, source_facts)
-            if unsupported_terms or polarity_conflict:
+            if unsupported_terms or review_terms or polarity_conflict:
                 new_issues.append(QualityIssue(
                     item_id=story_index,
                     item_type="story",
@@ -480,7 +482,7 @@ async def quality_gate_node(state: PipelineState) -> dict:
                     rule_violated="acceptance_criterion_unsupported_fact",
                     details=(
                         f"Story {s.id} acceptance criterion introduces unsupported behavior: "
-                        f"{', '.join(sorted(unsupported_terms)) or 'polarity reversal'}."
+                        f"{', '.join(sorted(unsupported_terms | review_terms)) or 'polarity reversal'}."
                     ),
                 ))
                 continue
