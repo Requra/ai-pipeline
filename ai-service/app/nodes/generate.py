@@ -19,6 +19,7 @@ from app.services.semantic_quality import (
     MIN_STORY_ALIGNMENT,
     proposition_support,
     normalize_story_points,
+    numeric_upper_bound_entails,
     source_fact_texts,
     split_requirement_clauses,
     story_alignment,
@@ -199,6 +200,7 @@ def _observable_outcome(clause: str) -> str:
     negative = bool(modal.group("negative"))
     is_plural = (
         subject.lower() == "they"
+        or subject.lower() in {"users", "records", "assets", "requests", "codes"}
         or subject.lower().endswith((" users", " records", " assets", " requests", " codes"))
     )
     if modal.group("be"):
@@ -209,7 +211,21 @@ def _observable_outcome(clause: str) -> str:
         action = words[0]
         remainder = f" {words[1]}" if len(words) > 1 else ""
         if not is_plural and not negative:
-            action = action + ("s" if action.endswith("e") else "es" if action.endswith(("s", "x", "z", "ch", "sh")) else "s")
+            def conjugate(verb: str) -> str:
+                return verb + (
+                    "s" if verb.endswith("e")
+                    else "es" if verb.endswith(("s", "x", "z", "ch", "sh"))
+                    else "s"
+                )
+
+            action = conjugate(action)
+            remainder = re.sub(
+                r"^(\s+and\s+)([a-z]+)",
+                lambda match: match.group(1) + conjugate(match.group(2)),
+                remainder,
+                count=1,
+                flags=re.IGNORECASE,
+            )
         auxiliary = "do not " if negative and is_plural else "does not " if negative else ""
         outcome = f"{subject} {auxiliary}{action}{remainder}"
     return outcome[:1].lower() + outcome[1:]
@@ -240,6 +256,23 @@ def build_source_bound_acceptance_criteria(requirements, story_id: str) -> List[
             f"attempts to {activity}, then {outcome}."
         )
         criteria.append(text)
+        upper_bound = re.search(
+            r"\b(?:up to|at most|no more than|maximum(?:\s+of)?|limit(?:ed)?\s+to)\s+"
+            r"(?P<number>\d+(?:[,.]\d+)?)\s+(?P<object>[a-z][a-z0-9 _-]{0,40}?)"
+            r"(?=\s+(?:simultaneously|at\s+a\s+time)\b|[.,;]|$)",
+            clause,
+            flags=re.IGNORECASE,
+        )
+        if upper_bound:
+            number = upper_bound.group("number")
+            bounded_object = upper_bound.group("object").strip()
+            boundary_text = (
+                f"Given {performer} already has {number} {bounded_object}, when "
+                f"{performer} attempts to {activity} again, then the operation "
+                f"does not proceed because the maximum of {number} has been reached."
+            )
+            if numeric_upper_bound_entails(boundary_text, [clause]):
+                criteria.append(boundary_text)
     return [
         AcceptanceCriterion(
             id=f"{story_id}_ac_{index + 1}",
@@ -280,6 +313,41 @@ def _mapping_supported(requirement, story_text: str) -> bool:
     return bool(req_tokens) and len(req_tokens & story_tokens) / len(req_tokens) >= 0.25
 
 
+def _source_bound_story_wording(requirements) -> tuple[str, str]:
+    """Build safe title/description wording from one canonical requirement."""
+    req = requirements[0] if requirements else None
+    if req is None:
+        return "Fulfill documented requirement", (
+            "As a user, I want to fulfill the documented requirement, so that "
+            "the required outcome is achieved."
+        )
+    text = (getattr(req, "text", "") or "").strip().rstrip(".")
+    sources = source_fact_texts([req])
+    goal = (getattr(req, "goal", None) or "").strip().rstrip(".")
+    goal_supported = bool(goal) and (
+        max((proposition_support(source, goal) for source in sources), default=0.0) >= 0.15
+        and not unsupported_numeric_claims(goal, sources)
+        and not unsupported_fact_terms(goal, sources)
+        and not unsupported_review_terms(goal, sources)
+        and not has_polarity_conflict(goal, sources)
+    )
+    if not goal_supported:
+        modal = re.match(
+            r"^.+?\s+(?:shall|must|will|should|may|can)\s+(?:be\s+able\s+to\s+)?(.+)$",
+            text,
+            flags=re.IGNORECASE,
+        )
+        goal = modal.group(1).strip() if modal else text
+    goal = goal or "fulfill the documented requirement"
+    title = goal[:1].upper() + goal[1:]
+    agile_actor = normalize_actor_to_agile_role(getattr(req, "actor", None))
+    description = (
+        f"As {agile_actor}, I want to {goal[:1].lower() + goal[1:]}, so that "
+        "the documented requirement is fulfilled."
+    )
+    return title[:120], description
+
+
 def _sanitize_generated_story(story: UserStory, req_map: dict[int, Any]) -> UserStory:
     """Remove unsupported mappings/facts and constrain estimates before output."""
     story.description = normalize_story_persona(story.description)
@@ -303,6 +371,25 @@ def _sanitize_generated_story(story: UserStory, req_map: dict[int, Any]) -> User
     story.source_requirement_ids = valid_ids
 
     linked = [req_map[req_id] for req_id in valid_ids if req_id in req_map]
+    sources = source_fact_texts(linked)
+    unsafe_title = (
+        unsupported_numeric_claims(story.title, sources)
+        or unsupported_fact_terms(story.title, sources)
+        or unsupported_review_terms(story.title, sources)
+        or has_polarity_conflict(story.title, sources)
+    )
+    unsafe_description = (
+        unsupported_numeric_claims(story.description, sources)
+        or unsupported_fact_terms(story.description, sources)
+        or unsupported_review_terms(story.description, sources)
+        or has_polarity_conflict(story.description, sources)
+    )
+    if unsafe_title or unsafe_description:
+        safe_title, safe_description = _source_bound_story_wording(linked)
+        if unsafe_title:
+            story.title = safe_title
+        if unsafe_description:
+            story.description = safe_description
     linked_labels = [
         label
         for req in linked
@@ -328,6 +415,19 @@ def _sanitize_generated_story(story: UserStory, req_map: dict[int, Any]) -> User
         for criterion in supported_criteria
         if criterion.id not in duplicate_criterion_ids
     ]
+    generated_boundary_criteria = [
+        criterion
+        for criterion in build_source_bound_acceptance_criteria(linked, story.id)
+        if numeric_upper_bound_entails(criterion.text, sources)
+    ]
+    if generated_boundary_criteria and not any(
+        numeric_upper_bound_entails(criterion.text, sources)
+        for criterion in supported_criteria
+    ):
+        # Clause coverage alone cannot prove that an upper boundary is tested:
+        # "allow while below N" and "reject N+1" are distinct observable
+        # cases. Complete the boundary deterministically from the source rule.
+        supported_criteria.extend(generated_boundary_criteria)
     criterion_texts = [criterion.text for criterion in supported_criteria]
     if not supported_criteria or clause_coverage(linked, criterion_texts) < 1.0:
         story.acceptance_criteria = build_source_bound_acceptance_criteria(linked, story.id)
@@ -398,12 +498,22 @@ def rebuild_requirement_coverages(
 
 
 def _dedupe_generated_stories(stories: List[UserStory]) -> List[UserStory]:
-    """Merge duplicate generated propositions while preserving coverage."""
+    """Merge repeated outputs only for the same canonical requirement.
+
+    Similar wording is not sufficient to merge stories for disjoint source
+    requirements: the public contract exposes one primary requirement ID and
+    such a merge would hide traceability in exports.
+    """
     canonical: List[UserStory] = []
     for story in stories:
         duplicate = None
         story_tokens = set(re.findall(r"[a-z0-9]+", story.description.lower()))
         for existing in canonical:
+            if not (
+                set(story.source_requirement_ids or [])
+                & set(existing.source_requirement_ids or [])
+            ):
+                continue
             existing_tokens = set(re.findall(r"[a-z0-9]+", existing.description.lower()))
             union = story_tokens | existing_tokens
             similarity = len(story_tokens & existing_tokens) / len(union) if union else 0.0
@@ -626,7 +736,15 @@ async def generate_node(state: PipelineState) -> dict:
                     for criterion in (s.acceptance_criteria or [])
                 ],
             ])
-            for r_id in dict.fromkeys(req_ids):
+            declared_ids = [r_id for r_id in dict.fromkeys(req_ids) if r_id in req_map]
+            # The public story contract has one primary requirement_id. A
+            # model-generated N:1 story cannot represent every requirement
+            # faithfully in its description and downstream export row.
+            # Canonical requirements were already deduplicated upstream, so
+            # use source-bound fallbacks instead of publishing a lossy merge.
+            if len(declared_ids) != 1:
+                continue
+            for r_id in declared_ids:
                 req = req_map.get(r_id)
                 if req is None:
                     continue
