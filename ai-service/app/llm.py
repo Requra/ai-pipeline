@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 _gate_lock = threading.Lock()
 _sync_gates: Dict[int, threading.BoundedSemaphore] = {}
+_quota_blocked_until: Dict[tuple[str, str], float] = {}
 _async_gates: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, Dict[int, asyncio.Semaphore]]" = (
     weakref.WeakKeyDictionary()
 )
@@ -78,6 +79,72 @@ def _retry_delay_seconds(exc: Exception, attempt: int) -> float:
     requested_delay = max(exponential, retry_after or 0.0)
     jitter = random.uniform(0.0, min(1.0, requested_delay * 0.25))
     return min(maximum, requested_delay + jitter)
+
+
+_PERMANENT_QUOTA_MARKERS = (
+    "insufficient_quota",
+    "insufficient quota",
+    "insufficient credits",
+    "not enough credits",
+    "requires more credits",
+    "can only afford",
+    "credit balance",
+    "credits exhausted",
+    "out of credits",
+    "no remaining tokens",
+    "token quota",
+    "token limit exceeded",
+    "token limit for this account",
+    "tokens left",
+    "quota exceeded",
+    "daily quota",
+    "monthly quota",
+    "usage limit reached",
+    "free-models-per-day",
+    "payment required",
+)
+
+
+def _error_text(exc: Exception) -> str:
+    """Collect provider details without depending on one SDK error shape."""
+    parts = [str(exc)]
+    body = getattr(exc, "body", None)
+    if body is not None:
+        parts.append(str(body))
+    response = getattr(exc, "response", None)
+    response_text = getattr(response, "text", None)
+    if response_text:
+        parts.append(str(response_text))
+    return " ".join(parts).lower()
+
+
+def _is_permanent_quota_error(exc: Exception) -> bool:
+    """Identify exhausted credits or token quota, which backoff cannot fix."""
+    response = getattr(exc, "response", None)
+    if getattr(response, "status_code", None) == 402:
+        return True
+    details = _error_text(exc)
+    return any(marker in details for marker in _PERMANENT_QUOTA_MARKERS)
+
+
+def _mark_quota_exhausted(provider: str, model: str) -> None:
+    cooldown = max(
+        0.0,
+        float(getattr(settings, "LLM_QUOTA_COOLDOWN_SECONDS", 300.0)),
+    )
+    with _gate_lock:
+        _quota_blocked_until[(provider, model)] = time.monotonic() + cooldown
+
+
+def _quota_cooldown_remaining(provider: str, model: str) -> float:
+    key = (provider, model)
+    with _gate_lock:
+        blocked_until = _quota_blocked_until.get(key, 0.0)
+        remaining = blocked_until - time.monotonic()
+        if remaining <= 0:
+            _quota_blocked_until.pop(key, None)
+            return 0.0
+        return remaining
 
 
 class ResilientLLMClient:
@@ -159,6 +226,8 @@ class ResilientLLMClient:
 
     def _is_retryable_error(self, exc: Exception) -> bool:
         # Catch rate limit, connection, timeout, and internal server errors
+        if _is_permanent_quota_error(exc):
+            return False
         if isinstance(exc, (
             openai.RateLimitError,
             openai.APIConnectionError,
@@ -187,6 +256,16 @@ class ResilientLLMClient:
         for config in self.providers:
             provider = config["provider"]
             model = config["model"]
+            cooldown = _quota_cooldown_remaining(provider, model)
+            if cooldown > 0:
+                logger.warning(
+                    "Skipping quota-exhausted provider %s:%s for another %.1fs",
+                    provider, model, cooldown,
+                )
+                last_error = RuntimeError(
+                    f"Provider {provider}:{model} is temporarily unavailable after quota exhaustion"
+                )
+                continue
             
             try:
                 client = self._instantiate_client(provider, model)
@@ -212,6 +291,14 @@ class ResilientLLMClient:
                     return response
                 except Exception as exc:
                     latency_ms = int((time.time() - start_time) * 1000)
+                    if _is_permanent_quota_error(exc):
+                        _mark_quota_exhausted(provider, model)
+                        logger.warning(
+                            "Permanent quota exhaustion on %s:%s; skipping retries and trying the next configured provider",
+                            provider, model,
+                        )
+                        last_error = exc
+                        break
                     if not self._is_retryable_error(exc) or attempt == max_attempts:
                         logger.warning("Failed LLM attempt (sync) using %s:%s in %dms: %s", provider, model, latency_ms, exc)
                         last_error = exc
@@ -232,6 +319,16 @@ class ResilientLLMClient:
         for config in self.providers:
             provider = config["provider"]
             model = config["model"]
+            cooldown = _quota_cooldown_remaining(provider, model)
+            if cooldown > 0:
+                logger.warning(
+                    "Skipping quota-exhausted provider %s:%s for another %.1fs",
+                    provider, model, cooldown,
+                )
+                last_error = RuntimeError(
+                    f"Provider {provider}:{model} is temporarily unavailable after quota exhaustion"
+                )
+                continue
 
             try:
                 client = self._instantiate_client(provider, model)
@@ -257,6 +354,14 @@ class ResilientLLMClient:
                     return response
                 except Exception as exc:
                     latency_ms = int((time.time() - start_time) * 1000)
+                    if _is_permanent_quota_error(exc):
+                        _mark_quota_exhausted(provider, model)
+                        logger.warning(
+                            "Permanent quota exhaustion on %s:%s; skipping retries and trying the next configured provider",
+                            provider, model,
+                        )
+                        last_error = exc
+                        break
                     if not self._is_retryable_error(exc) or attempt == max_attempts:
                         logger.warning("Failed LLM attempt (async) using %s:%s in %dms: %s", provider, model, latency_ms, exc)
                         last_error = exc

@@ -172,6 +172,7 @@ class Settings:
     LLM_MAX_RETRIES: int = _env_int("LLM_MAX_RETRIES", 2)
     LLM_RETRY_BASE_SECONDS: float = _env_float("LLM_RETRY_BASE_SECONDS", 1.0)
     LLM_RETRY_MAX_SECONDS: float = _env_float("LLM_RETRY_MAX_SECONDS", 30.0)
+    LLM_QUOTA_COOLDOWN_SECONDS: float = _env_float("LLM_QUOTA_COOLDOWN_SECONDS", 300.0)
 
     # ------------------------------------------------------------------
     # Conflict Detection

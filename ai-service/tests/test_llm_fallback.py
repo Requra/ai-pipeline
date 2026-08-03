@@ -4,7 +4,12 @@ import asyncio
 import httpx
 import openai
 from unittest.mock import MagicMock
-from app.llm import ResilientLLMClient, _retry_delay_seconds
+from app.llm import (
+    ResilientLLMClient,
+    _is_permanent_quota_error,
+    _quota_blocked_until,
+    _retry_delay_seconds,
+)
 from app.config import settings
 
 
@@ -91,6 +96,88 @@ def test_resilient_llm_client_non_retryable_error(monkeypatch):
     # Non-retryable error should fail immediately without retries or fallbacks
     assert mock_primary.invoke.call_count == 1
     assert mock_fallback.invoke.call_count == 0
+
+
+def test_exhausted_token_quota_skips_retries_and_uses_fallback(monkeypatch):
+    monkeypatch.setattr(
+        settings,
+        "LLM_FALLBACK_CHAIN",
+        '[{"provider":"groq","model":"llama-3.3-70b-versatile"}]',
+    )
+    monkeypatch.setattr(settings, "LLM_MAX_RETRIES", 5)
+    monkeypatch.setattr(settings, "LLM_QUOTA_COOLDOWN_SECONDS", 0)
+    client = ResilientLLMClient(primary_provider="openrouter")
+    exhausted = openai.RateLimitError(
+        message="No remaining tokens; insufficient credits",
+        response=httpx.Response(
+            429,
+            request=httpx.Request("POST", "http://test"),
+        ),
+        body={"error": {"code": "insufficient_quota"}},
+    )
+    primary = MagicMock()
+    primary.invoke.side_effect = exhausted
+    fallback = MagicMock()
+    fallback.invoke.return_value = MockAIMessage(content="fallback succeeded")
+
+    monkeypatch.setattr(
+        client,
+        "_instantiate_client",
+        lambda provider, _model: primary if provider == "openrouter" else fallback,
+    )
+    monkeypatch.setattr(time, "sleep", lambda _delay: pytest.fail("quota must not back off"))
+
+    response = client.invoke("hello")
+
+    assert _is_permanent_quota_error(exhausted)
+    assert response.content == "fallback succeeded"
+    assert primary.invoke.call_count == 1
+    assert fallback.invoke.call_count == 1
+
+
+def test_payment_required_is_permanent_quota_error():
+    error = openai.APIStatusError(
+        message="Payment required",
+        response=httpx.Response(
+            402,
+            request=httpx.Request("POST", "http://test"),
+        ),
+        body=None,
+    )
+    assert _is_permanent_quota_error(error)
+
+
+def test_quota_circuit_skips_exhausted_provider_across_clients(monkeypatch):
+    model = "quota-circuit-test-model"
+    key = ("openrouter", model)
+    monkeypatch.setattr(settings, "LLM_FALLBACK_CHAIN", None)
+    monkeypatch.setattr(settings, "LLM_QUOTA_COOLDOWN_SECONDS", 300)
+    exhausted = openai.RateLimitError(
+        message="Quota exceeded; no remaining tokens",
+        response=httpx.Response(
+            429,
+            request=httpx.Request("POST", "http://test"),
+        ),
+        body=None,
+    )
+    provider_client = MagicMock()
+    provider_client.invoke.side_effect = exhausted
+    first = ResilientLLMClient(primary_provider="openrouter", model_name=model)
+    monkeypatch.setattr(first, "_instantiate_client", lambda _provider, _model: provider_client)
+
+    try:
+        with pytest.raises(RuntimeError, match="All configured LLM providers failed"):
+            first.invoke("hello")
+        assert provider_client.invoke.call_count == 1
+
+        second = ResilientLLMClient(primary_provider="openrouter", model_name=model)
+        instantiate = MagicMock()
+        monkeypatch.setattr(second, "_instantiate_client", instantiate)
+        with pytest.raises(RuntimeError, match="temporarily unavailable"):
+            second.invoke("hello")
+        instantiate.assert_not_called()
+    finally:
+        _quota_blocked_until.pop(key, None)
 
 
 def test_retry_delay_respects_retry_after_and_is_bounded(monkeypatch):
