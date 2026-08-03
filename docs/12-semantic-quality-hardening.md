@@ -8,7 +8,7 @@
 >
 > **Implementation status:** MVP implemented
 >
-> **Last verified:** 1 August 2026
+> **Last verified:** 3 August 2026
 >
 > **Compatibility guarantee:** no API endpoint, request payload, or final response structure was changed
 
@@ -67,6 +67,33 @@ The main outcomes are:
     actionable-requirement coverage, and verified evidence coverage.
 17. Structured summaries receive a deterministic source-coverage pass so model
     omissions and null-like placeholders do not leak into the final response.
+18. Already-canonical requirements keep one public story and export identity
+    each; model-proposed many-to-one story merges fall back to source-bound
+    stories instead of hiding secondary requirements.
+19. Acceptance-criterion sanitation rejects unsupported presentation outcomes
+    and profile-based authorization while distinguishing action verbs from
+    nouns such as “asset list.”
+20. Semantically equivalent user-role labels are consolidated in stakeholder
+    summaries.
+21. Exhausted credits or token quota skip futile backoff retries and move once
+    to a configured fallback provider, substantially limiting quota-failure
+    latency.
+22. Public requirement confidence is calibrated after grounding from a 30%
+    extraction prior and 70% strongest verified-evidence score; missing
+    evidence and unresolved review states are capped conservatively.
+23. Unsupported actions are removed from requirement titles, story titles,
+    descriptions, and acceptance criteria—not only from citations.
+24. Strong same-language evidence restores omitted explicit negative
+    constraints as well as omitted numeric constraints.
+25. Structured summary fields are source-bound, inferred assumptions and
+    out-of-scope claims are removed, and verbose stakeholder descriptions are
+    consolidated into canonical roles.
+26. Measurable acceptance criteria must preserve every numeric value from the
+    source clause; vague substitutions such as `specified time` or `multiple
+    users` cannot satisfy coverage.
+27. Numeric authorization limits are distinguished from performance workload
+    envelopes, so an explicit business cap can produce an above-limit denial
+    test while `up to 500 sessions` cannot invent rejection of session 501.
 
 The branch uses deterministic semantic checks for the MVP. It does not require
 an NLI service or an additional LLM call for evidence adjudication.
@@ -131,6 +158,7 @@ The important ownership boundary is:
 | Public type precedence | A supported `NFR` or constraint takes precedence over `FR` in the single public `type` field; `BR` may coexist without overriding it. |
 | Domain-independent category cues | Security, performance, reliability, availability, reporting, and dashboard intent use behavior-specific signals rather than document-specific phrases. |
 | Confidence validation | Invalid or weak confidence values are detected by the quality gate. |
+| Post-grounding confidence calibration | Public requirement confidence combines the extraction prior (`30%`) with the strongest verified citation support (`70%`). No verified citation caps confidence at `0.49`; unresolved review caps it at `0.79`. |
 
 Primary implementation:
 
@@ -189,7 +217,15 @@ Primary implementation:
 | Warning reconciliation | `EXTRACT_WEAK_EVIDENCE` is removed when final grounding verifies the requirement; unresolved warnings are rebuilt with the exact remaining count. |
 | Review-state cleanup | Evidence-only review markers are cleared after authoritative grounding succeeds, while unrelated review reasons are preserved. |
 | Public issue consolidation | Evidence aliases are exposed as one readable defect per requirement and root cause. |
-| Source-constraint completion | A strongly related same-language source clause can restore numeric constraints omitted from extracted wording before story generation. |
+| Source-constraint completion | A strongly related same-language source clause can restore numeric constraints and explicit prohibitions omitted from extracted wording before story generation. |
+
+The two public confidence values answer different questions without changing
+the contract:
+
+- `requirements[].confidence_score` estimates the reliability of the complete
+  extracted requirement after grounding.
+- `requirements[].source_refs[].confidence_score` measures how strongly that
+  individual quote supports the requirement.
 
 ### 5.4 Semantic matching and three-state polarity
 
@@ -215,6 +251,14 @@ Additional semantic behavior includes:
 - Access-control entailment: “only administrators may retrieve” supports the
   logically equivalent denial of retrieval to non-administrators.
 - Comparison with related clauses instead of unrelated full strings.
+- Independent polarity adjudication for reordered positive and negative
+  clauses, preventing one clause's negation from contaminating an adjacent
+  supported clause.
+- Numeric upper-bound entailment: an explicit permission or business limit
+  such as `allowed to check out up to N` supports a boundary criterion that
+  prevents operation `N+1` without inventing a message or notification.
+- Workload-envelope separation: performance measurement conditions such as
+  `under load of up to N sessions` do not entail denying session `N+1`.
 - Unsupported numeric fact detection.
 - Distinction between clear unsupported behavior and uncertain review terms.
 
@@ -233,11 +277,17 @@ Primary implementation:
 | Pre-repair persona normalization | Technical personas such as `As the system` are converted to `As a system operator` before they can trigger an avoidable LLM repair call. |
 | Source-bound wording | Story descriptions and criteria use only linked requirement facts and evidence. |
 | No invented behavior | Prompts explicitly prohibit unsupported validation, permissions, notifications, retry, escalation, retention, timing, and negative cases. |
+| Deterministic title and description sanitation | Unsupported goals, titles, scope claims such as `unlimited`/`without restrictions`, and invented story outcomes are replaced with source-bound wording. |
+| Action-aware AC sanitation | Conjunct actions such as “prevents and informs” are checked independently; unsupported notifications or accessibility outcomes are removed before publication. |
 | Deterministic fallback | If LLM generation fails or is malformed, source-bound fallback stories are produced. |
 | Clause-owned fallback criteria | Fallback generation creates one specific criterion per independent source clause and never pads a story with boilerplate merely to reach a fixed count. |
+| Numeric boundary criteria | Explicit source-defined business limits produce both the allowed boundary behavior and a source-entailed above-limit rejection criterion. Inflected denial verbs such as `prevents`, `blocks`, and `rejects` are recognized, so an existing valid boundary test is not duplicated. |
+| Measurable-constraint preservation | A criterion covers a measurable clause only when it retains every source numeric value, independent of harmless formatting such as `2` versus `2.0`. Missing values trigger deterministic source-bound regeneration. |
+| Workload-safe limits | Performance envelopes such as `up to 500 active sessions` remain test conditions and never become invented rejection behavior. |
 | Valid story shape | Malformed wording such as `so that: The system shall...` is normalized. |
 | Complete mappings | Mapping validation considers title, description, and all acceptance criteria. |
-| Story deduplication | Duplicate generated stories are merged while preserving requirement mappings. |
+| Traceability-safe story identity | Each canonical requirement receives its own public story. Duplicate outputs are merged only when they refer to the same canonical requirement; similar stories with disjoint source IDs remain separate. |
+| Lossless handling of model merges | A model-proposed story spanning multiple canonical requirements is replaced by one deterministic source-bound story per requirement, preserving descriptions, criteria, coverage, and export rows under the unchanged single-primary-ID contract. |
 | Fibonacci estimates | Story points are normalized to `1`, `2`, `3`, `5`, or `8`. |
 | Fact-ledger repair | Repair receives the linked source facts and removes unsupported additions. |
 | Post-repair sanitation | Repaired stories pass through the same deterministic source, behavior, polarity, numeric, persona, and duplicate checks as initially generated stories. |
@@ -283,10 +333,24 @@ The validator:
   regenerates source-bound criteria when removal creates a coverage gap.
 - Detects passive invented behavior such as a request being recorded or a user
   being informed, as well as unsupported absolute timing such as `without delay`.
+- Treats observable outcomes such as an item appearing or being listed as
+  presentation behavior that must exist in the linked source facts.
+- Treats profile-based access grants as authorization behavior that must be
+  source-supported.
+- Uses syntax-aware checks so a noun such as `asset list` is not mistaken for
+  the action `list`.
+- Distinguishes access used as a noun from asserted access/retrieval behavior,
+  while preserving valid exclusive-permission entailment.
+- Treats `unlimited`, `unrestricted`, and `without restrictions/limits` as a
+  contradiction when the source defines an explicit maximum.
 - Accepts one specific criterion for a truly atomic one-clause requirement;
   multi-clause requirements must cover each independent fact.
+- Requires every numeric value in a measurable source clause to appear in its
+  covering criterion; vague placeholders do not count as coverage.
 - Keeps opposite boundary cases distinct, such as authorized access versus
   denied unauthorized access.
+- Recognizes inflected denial forms, preventing duplicate deterministic
+  boundary criteria when the model already supplied an equivalent test.
 
 Primary implementation:
 
@@ -366,7 +430,14 @@ Current behavior:
    questions as appropriate.
 9. Recover explicit human actors as stakeholders while excluding technical
    components such as the system or database.
-10. Append omitted security, performance, availability, and measurable quality
+10. Consolidate equivalent role names such as user, standard user, end user,
+    authorized user, and registered user into one `Users` stakeholder entry.
+11. Collapse verbose descriptions such as `Users requesting checkout` and the
+    canonical `Users` entry into one stakeholder role.
+12. Remove assumptions, out-of-scope claims, action items, risks, and decisions
+    that cannot be supported by canonical requirement facts; assumption,
+    out-of-scope, and question fields require their corresponding source label.
+13. Append omitted security, performance, availability, and measurable quality
     constraints to the executive summary using canonical source text.
 
 The configured input bound is `12,000` characters per summarization unit. The
@@ -386,6 +457,11 @@ Primary implementation:
 | Text | `null` | Document, source, chunk, exact quote |
 | Audio | `null` | Language, speaker when available, timestamps, ASR confidence, source, chunk, exact quote |
 
+Backend document and audio retrieval validates HTTP(S) URLs, credentials,
+allowlisted hosts, resolved addresses, redirects, payload size, and integrity.
+The text-fetch path uses the same validated URL parser as binary retrieval,
+preventing a runtime parser failure before ingestion.
+
 DOCX pages are not fabricated. The ingestion layer can attempt controlled
 headless rendering where supported, but paragraph-based extraction is the safe
 MVP fallback and preserves document identity.
@@ -404,6 +480,7 @@ Primary implementation:
 - [parse_to_chunks.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/parse_to_chunks.py)
 - [transcribe.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/transcribe.py)
 - [items.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/schemas/items.py)
+- [backend.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/clients/backend.py)
 
 ### 5.10 Final formatting and status
 
@@ -455,16 +532,35 @@ client, even when no fallback provider is configured.
 | `LLM_RETRY_BASE_SECONDS` | `1.0` | Starts exponential retry delay at one second. |
 | `LLM_RETRY_MAX_SECONDS` | `30.0` | Bounds retry delay and provider `Retry-After` handling. |
 | `PROVIDER_TIMEOUT_SECONDS` | `120` | Applies a timeout to every reasoning-provider request. |
+| `LLM_QUOTA_COOLDOWN_SECONDS` | `300` | Temporarily opens a process-wide circuit for a provider/model after confirmed token or credit exhaustion. |
 
 Retry delays use exponential backoff with jitter and honor a valid
 `Retry-After` header up to the configured maximum. The underlying provider
 client has its own retries disabled so requests are not multiplied by nested
 retry layers.
 
+Quota and credit exhaustion are handled differently from transient rate
+limits. HTTP `402` responses and provider messages indicating exhausted
+credits, daily/monthly quota, or no remaining tokens are not retried on the
+same provider. A shared provider/model circuit also prevents later pipeline
+nodes and jobs in the same service process from repeating the known-failing
+call during the configured cooldown. The client attempts each configured
+fallback provider once and then fails promptly. Ordinary transient `429`
+responses continue to use the bounded retry policy. This prevents token
+exhaustion from turning a predictable failure into several minutes of repeated
+calls.
+
 This change controls request bursts from parallel extraction chunks and
 concurrent jobs. It does not skip extraction, classification, generation,
 summarization, grounding, validation, or scoring, and it does not change the
 public API contract.
+
+Local Docker development uses a bind mount for `./ai-service`. The API command
+includes Uvicorn `--reload`, so API-process Python changes reload automatically.
+The separate `ai-worker` process does not use a file watcher and must be
+restarted after pipeline-code changes. Rebuilding is unnecessary for ordinary
+Python edits because of the bind mount; dependency or Dockerfile changes still
+require a rebuild.
 
 Conflict detection and quality repair are enabled for the MVP:
 
@@ -568,6 +664,8 @@ The response-quality changes also improve production safety:
 - Parallel LLM calls are bounded by one shared per-process concurrency gate.
 - Retryable provider errors use bounded exponential backoff with jitter.
 - Valid provider `Retry-After` guidance is used when calculating retry delay.
+- Permanent token/credit exhaustion skips retries and tries a configured
+  fallback once.
 - Every reasoning request uses the configured provider timeout.
 - Ambiguity degrades to review/partial rather than failing the whole pipeline.
 - No external NLI dependency or per-pair LLM adjudication cost is required.
@@ -613,7 +711,7 @@ Recommended post-MVP work:
 
 The branch was last verified with:
 
-- `412 passed`
+- `430 passed`
 - `1 skipped`
 - `1 existing Starlette/httpx deprecation warning`
 - Ruff critical checks passed
@@ -721,6 +819,15 @@ represented below.
 | `29970fe` | Added clause-level grounding/retrieval and upstream-warning reconciliation. |
 | `f3b26eb` | Deduplicated final references and filtered weak or informational evidence warnings. |
 
+Current verified working-tree enhancements (3 August 2026), pending their
+final commit hash: traceability-safe one-story-per-canonical-requirement
+generation, unsupported presentation/authorization outcome filtering,
+stakeholder alias consolidation, and permanent quota-exhaustion fail-fast
+routing. The same working tree now also includes post-grounding requirement
+confidence calibration, negative-constraint completion, whole-story claim
+sanitation, strict structured-summary source binding, and grammar-safe fallback
+criteria.
+
 ## Appendix B. Implementation and test map
 
 | Responsibility | Implementation | Main tests |
@@ -731,7 +838,7 @@ represented below.
 | Retrieval candidates | [retrieve_evidence.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/retrieve_evidence.py) | [test_retrieve_evidence.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/nodes/test_retrieve_evidence.py) |
 | Authoritative grounding and warning reconciliation | [evidence_grounding.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/evidence_grounding.py) | [test_evidence_grounding.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/nodes/test_evidence_grounding.py) |
 | Shared semantic decisions | [semantic_quality.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/services/semantic_quality.py) | [test_semantic_quality_hardening.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/services/test_semantic_quality_hardening.py) |
-| Story generation and fallback | [generate.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/generate.py) | [test_generate_quality.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/nodes/test_generate_quality.py) |
+| Story generation and fallback | [generate.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/generate.py) | [test_generate_quality.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/nodes/test_generate_quality.py), [test_generate_normalization.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/nodes/test_generate_normalization.py) |
 | Story repair | [repair_stories.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/repair_stories.py) | [test_repair_stories.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/nodes/test_repair_stories.py) |
 | Story validation | [story_validator.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/validators/story_validator.py) | [test_story_validator.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/validators/test_story_validator.py) |
 | Quality gate | [quality_gate.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/quality_gate.py) | [test_quality_gate.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/nodes/test_quality_gate.py) |
