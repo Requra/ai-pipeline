@@ -130,3 +130,72 @@ async def test_summary_restores_explicit_stakeholders_and_key_constraints(base_s
 
     assert "Administrators" in result["summary"].stakeholders
     assert "99.9%" in result["summary"].executive_summary
+
+
+@pytest.mark.asyncio
+async def test_summary_consolidates_user_role_aliases(base_state):
+    state = base_state.copy()
+    state["classified_requirements"] = [
+        ClassifiedRequirement(
+            id=1, text="Users shall submit requests.", actor="User",
+            candidate_labels=["FR"], labels=["FR"], confidence=0.9,
+        ),
+        ClassifiedRequirement(
+            id=2, text="Standard users shall view requests.", actor="Standard User",
+            candidate_labels=["FR"], labels=["FR"], confidence=0.9,
+        ),
+    ]
+    response = StructuredSummary(
+        executive_summary="Users submit and view requests.",
+        key_decisions=[], open_questions=[], risks=[], assumptions=[],
+        action_items=[], stakeholders=["Users"], scope=[], out_of_scope=[],
+    ).model_dump_json()
+    mock_llm = MagicMock()
+    mock_llm.ainvoke = AsyncMock(return_value=MagicMock(content=response))
+
+    with patch("app.nodes.summarize.get_llm", return_value=mock_llm):
+        result = await summarize_node(state)
+
+    assert result["summary"].stakeholders == ["Users"]
+
+
+@pytest.mark.asyncio
+async def test_summary_removes_invented_fields_and_verbose_stakeholder_duplicates(base_state):
+    state = base_state.copy()
+    state["classified_requirements"] = [
+        ClassifiedRequirement(
+            id=1, text="Users shall request asset checkout.", actor="User",
+            candidate_labels=["FR"], labels=["FR"], confidence=0.9,
+        ),
+        ClassifiedRequirement(
+            id=2, text="Managers shall approve checkout requests above $1,000.", actor="Manager",
+            candidate_labels=["BR"], labels=["BR"], confidence=0.9,
+        ),
+    ]
+    response = StructuredSummary(
+        executive_summary="Users request assets and managers approve high-value requests.",
+        key_decisions=["Manager approval is required above $1,000."],
+        open_questions=[], risks=[],
+        assumptions=["Users will receive necessary training."],
+        action_items=["Develop and test the entire platform."],
+        stakeholders=[
+            "Users requesting asset checkout",
+            "Users",
+            "Managers approving requests",
+            "Managers",
+        ],
+        scope=[],
+        out_of_scope=["Changing the identity provider configuration."],
+    ).model_dump_json()
+    mock_llm = MagicMock()
+    mock_llm.ainvoke = AsyncMock(return_value=MagicMock(content=response))
+
+    with patch("app.nodes.summarize.get_llm", return_value=mock_llm):
+        result = await summarize_node(state)
+
+    summary = result["summary"]
+    assert summary.stakeholders == ["Users", "Managers"]
+    assert summary.assumptions == []
+    assert summary.action_items == []
+    assert summary.out_of_scope == []
+    assert summary.key_decisions == ["Manager approval is required above $1,000."]

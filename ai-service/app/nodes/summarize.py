@@ -8,7 +8,14 @@ from app.llm import get_llm
 from app.prompts.loader import load_prompt
 from app.prompts.registry import PromptId
 from app.progress import update_progress
-from app.services.semantic_quality import proposition_support
+from app.services.semantic_quality import (
+    has_polarity_conflict,
+    proposition_support,
+    source_fact_texts,
+    unsupported_fact_terms,
+    unsupported_numeric_claims,
+    unsupported_review_terms,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -328,13 +335,38 @@ def _ensure_summary_stakeholders_and_constraints(
         "operator": "Operators",
         "supervisor": "Supervisors",
     }
-    stakeholders = _safe_str_list(summary.stakeholders)
+    def canonical_stakeholder(value: str) -> str:
+        normalized = re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+        role_patterns = (
+            (r"\b(?:administrator|admin)s?\b", "Administrators"),
+            (r"\bmanagers?\b", "Managers"),
+            (r"\b(?:standard |end |authorized |registered )?users?\b", "Users"),
+            (r"\bcustomers?\b", "Customers"),
+            (r"\banalysts?\b", "Analysts"),
+            (r"\boperators?\b", "Operators"),
+            (r"\bsupervisors?\b", "Supervisors"),
+        )
+        for pattern, canonical in role_patterns:
+            if re.search(pattern, normalized):
+                return canonical
+        return value.strip()
+
+    stakeholders = []
+    for value in _safe_str_list(summary.stakeholders):
+        canonical = canonical_stakeholder(value)
+        if canonical and canonical not in stakeholders:
+            stakeholders.append(canonical)
     for req in reqs:
         actor = re.sub(r"^(?:a|an|the)\s+", "", (getattr(req, "actor", "") or "").strip(), flags=re.I)
         lowered = actor.lower().rstrip("s")
         if not actor or lowered in technical_actors:
             continue
-        stakeholder = stakeholder_map.get(lowered, actor.title())
+        # Consolidate role aliases instead of exposing duplicate concepts such
+        # as both "Users" and "Standard User" in the summary.
+        if re.fullmatch(r"(?:standard|end|authorized|registered)?\s*user", lowered):
+            stakeholder = "Users"
+        else:
+            stakeholder = stakeholder_map.get(lowered, actor.title())
         if stakeholder not in stakeholders:
             stakeholders.append(stakeholder)
     summary.stakeholders = stakeholders
@@ -369,10 +401,62 @@ def _ensure_summary_stakeholders_and_constraints(
     return summary
 
 
+def _source_bind_summary_fields(
+    summary: StructuredSummary,
+    state: PipelineState,
+) -> StructuredSummary:
+    """Remove model-invented structured claims while retaining useful synthesis."""
+    reqs = state.get("classified_requirements") or state.get("extracted_requirements") or []
+    all_facts = source_fact_texts(reqs)
+
+    def supported(item: str, facts: list[str], threshold: float = 0.25) -> bool:
+        if not item or not facts:
+            return False
+        return (
+            max((proposition_support(fact, item) for fact in facts), default=0.0) >= threshold
+            and not unsupported_numeric_claims(item, facts)
+            and not unsupported_fact_terms(item, facts)
+            and not unsupported_review_terms(item, facts)
+            and not has_polarity_conflict(item, facts)
+        )
+
+    def facts_for(label: str) -> list[str]:
+        return source_fact_texts([
+            req for req in reqs
+            if label in set(getattr(req, "labels", []) or [])
+            or label in set(getattr(req, "candidate_labels", []) or [])
+        ])
+
+    summary.key_decisions = [item for item in summary.key_decisions if supported(item, all_facts)]
+    summary.risks = [item for item in summary.risks if supported(item, all_facts)]
+    summary.action_items = [item for item in summary.action_items if supported(item, all_facts)]
+    summary.assumptions = [
+        item for item in summary.assumptions if supported(item, facts_for("Assumption"))
+    ]
+    summary.out_of_scope = [
+        item for item in summary.out_of_scope if supported(item, facts_for("Out-of-Scope"))
+    ]
+    explicit_questions = facts_for("Open Question")
+    pipeline_questions = []
+    for warning in state.get("warnings", []) or []:
+        message = warning.get("message", "") if isinstance(warning, dict) else getattr(warning, "message", "")
+        match = re.search(r"Clarification Question:\s*(.+?)(?:\n|$)", message or "")
+        if match:
+            pipeline_questions.extend(_safe_str_list(match.group(1).strip()))
+    summary.open_questions = [
+        item for item in summary.open_questions
+        if supported(item, explicit_questions) or item in pipeline_questions
+    ]
+    return summary
+
+
 def _finalize_summary(summary: StructuredSummary, state: PipelineState) -> StructuredSummary:
     return _ensure_summary_stakeholders_and_constraints(
         _ensure_requirement_summary_coverage(
-            _append_pipeline_questions(summary, state),
+            _source_bind_summary_fields(
+                _append_pipeline_questions(summary, state),
+                state,
+            ),
             state,
         ),
         state,
