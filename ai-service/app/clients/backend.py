@@ -173,7 +173,7 @@ class BackendDocumentClient:
             return None
 
         try:
-            parsed = urllib.parse.urlparse(url)
+            parsed = urlparse(url)
             if parsed.username or parsed.password:
                 raise SourceSecurityError("User-info URLs are not allowed")
             if parsed.scheme not in ("http", "https") or not parsed.hostname:
