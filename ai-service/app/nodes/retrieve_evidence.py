@@ -36,6 +36,11 @@ from app.services.semantic_quality import (
     has_polarity_conflict,
     check_different_languages,
 )
+from app.services.audio_semantics import (
+    best_audio_evidence_clause,
+    is_audio_chunk,
+    normalize_audio_matching_text,
+)
 
 logger = logging.getLogger("app.nodes.retrieve_evidence")
 
@@ -103,7 +108,10 @@ def _quote_support_score(
             and float(asr_confidence) < MIN_ASR_CONFIDENCE
         )
 
-        score, supporting_clause = best_evidence_clause(req.text, chunk.text)
+        if is_audio_chunk(chunk):
+            score, supporting_clause = best_audio_evidence_clause(req.text, chunk.text)
+        else:
+            score, supporting_clause = best_evidence_clause(req.text, chunk.text)
         if supporting_clause:
             evidence.quote = supporting_clause
         if evidence.origin == "fallback":
@@ -118,9 +126,12 @@ def _quote_support_score(
             is_partial = True
         else:
             if score >= 0.60:
-                numeric_mismatch = bool(
-                    unsupported_numeric_claims(req.text, [supporting_clause])
-                )
+                numeric_mismatch = bool(unsupported_numeric_claims(
+                    normalize_audio_matching_text(req.text)
+                    if is_audio_chunk(chunk) else req.text,
+                    [normalize_audio_matching_text(supporting_clause)]
+                    if is_audio_chunk(chunk) else [supporting_clause],
+                ))
                 unsupported_behavior = bool(
                     unsupported_fact_terms(req.text, [supporting_clause])
                 )
@@ -243,24 +254,39 @@ async def retrieve_evidence_node(state: PipelineState) -> dict:
 
         # Retrieval results are candidates, not citations.  Only candidates
         # that support the requirement proposition become evidence.
-        cited = {e.chunk_id for e in req.evidence}
+        # Extraction evidence is still provisional here. A bad model quote
+        # must not block retrieval from finding a better clause in the same
+        # transcript window or document chunk.
+        cited = {
+            (e.chunk_id, re.sub(r"\s+", " ", (e.quote or "").strip().lower()))
+            for e in req.evidence
+        }
+        cited_chunk_ids = {e.chunk_id for e in req.evidence}
         qualified_hits = 0
         for hit in hits:
             if len(req.evidence) >= MAX_EVIDENCE_PER_REQ:
                 limit_applied += 1
                 break
-            if hit.chunk_id in cited:
+            orig_chunk = chunks_by_id.get(hit.chunk_id)
+            # This recovery path is deliberately audio-only. Document
+            # extraction already has stable chunk boundaries, and retaining its
+            # established one-chunk behavior prevents response changes there.
+            if hit.chunk_id in cited_chunk_ids and not is_audio_chunk(orig_chunk):
                 continue
             snippet = _best_snippet(hit.text, query_tokens)
             if not snippet:
                 continue
 
-            orig_chunk = chunks_by_id.get(hit.chunk_id)
             orig_doc_id = getattr(orig_chunk, "document_id", None) if orig_chunk else None
-            support, supporting_clause = best_evidence_clause(
-                req.text,
-                getattr(orig_chunk, "text", "") or snippet,
-            )
+            source_text = getattr(orig_chunk, "text", "") or snippet
+            if is_audio_chunk(orig_chunk):
+                support, supporting_clause = best_audio_evidence_clause(
+                    req.text, source_text
+                )
+            else:
+                support, supporting_clause = best_evidence_clause(
+                    req.text, source_text
+                )
 
             evidence_lang = (
                 getattr(orig_chunk, "language", None)
@@ -296,9 +322,12 @@ async def retrieve_evidence_node(state: PipelineState) -> dict:
                 continue
             else:
                 if support >= 0.60:
-                    numeric_mismatch = bool(
-                        unsupported_numeric_claims(req.text, [supporting_clause])
-                    )
+                    numeric_mismatch = bool(unsupported_numeric_claims(
+                        normalize_audio_matching_text(req.text)
+                        if is_audio_chunk(orig_chunk) else req.text,
+                        [normalize_audio_matching_text(supporting_clause)]
+                        if is_audio_chunk(orig_chunk) else [supporting_clause],
+                    ))
                     unsupported_behavior = bool(
                         unsupported_fact_terms(req.text, [supporting_clause])
                     )
@@ -319,6 +348,12 @@ async def retrieve_evidence_node(state: PipelineState) -> dict:
                     continue
 
             if is_accepted:
+                evidence_key = (
+                    hit.chunk_id,
+                    re.sub(r"\s+", " ", supporting_clause.strip().lower()),
+                )
+                if evidence_key in cited:
+                    continue
                 req.evidence.append(EvidenceSpan(
                     chunk_id=hit.chunk_id,
                     quote=supporting_clause,
@@ -331,7 +366,7 @@ async def retrieve_evidence_node(state: PipelineState) -> dict:
                     entailment_score=support,
                     support_score=support,
                 ))
-                cited.add(hit.chunk_id)
+                cited.add(evidence_key)
                 qualified_hits += 1
                 req.evidence_match_score = max(req.evidence_match_score or 0.0, support)
 

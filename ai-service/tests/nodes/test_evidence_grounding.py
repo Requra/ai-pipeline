@@ -314,3 +314,167 @@ async def test_grounding_accepts_reordered_negative_and_positive_clauses(base_st
         issue.rule_violated == "missing_verified_evidence"
         for issue in result["quality_issues"]
     )
+
+
+@pytest.mark.asyncio
+async def test_grounding_accepts_explicit_arabic_audio_quote_without_contract_change(base_state):
+    """Arabic transcript evidence may support an English canonical requirement."""
+    quote = "يجب أن يستخدم النظام بروتوكول TLS 1.3."
+    state = base_state.copy()
+    state["chunks"] = [
+        SourceChunk(
+            chunk_id="audio-tls", text=quote, start_char=0, end_char=len(quote),
+            start_time_sec=4.0, end_time_sec=6.0, document_id="audio-1", language="ar",
+            asr_confidence=0.92,
+        )
+    ]
+    state["source_documents"] = [{"document_id": "audio-1", "language": "ar"}]
+    state["classified_requirements"] = [
+        ClassifiedRequirement(
+            id=1,
+            text="The system shall use TLS 1.3 protocol.",
+            candidate_labels=["NFR"], labels=["NFR"], confidence=0.8,
+            extraction_type="explicit",
+            evidence=[EvidenceSpan(chunk_id="audio-tls", quote=quote, document_id="audio-1")],
+        )
+    ]
+
+    result = await evidence_grounding_node(state)
+
+    requirement = result["classified_requirements"][0]
+    assert requirement.evidence
+    assert requirement.evidence[0].quote == quote
+    assert requirement.evidence[0].support_score >= 0.70
+    assert not any(
+        issue.rule_violated == "missing_verified_evidence"
+        for issue in result["quality_issues"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_grounding_keeps_cross_language_document_evidence_review_only(base_state):
+    """The multilingual relaxation is strictly limited to timestamped audio."""
+    quote = "يجب أن يستخدم النظام بروتوكول TLS 1.3."
+    state = base_state.copy()
+    state["chunks"] = [
+        SourceChunk(chunk_id="document-tls", text=quote, start_char=0, end_char=len(quote), language="ar")
+    ]
+    state["classified_requirements"] = [
+        ClassifiedRequirement(
+            id=1, text="The system shall use TLS 1.3 protocol.",
+            candidate_labels=["NFR"], labels=["NFR"], confidence=0.8,
+            extraction_type="explicit",
+            evidence=[EvidenceSpan(chunk_id="document-tls", quote=quote)],
+        )
+    ]
+
+    result = await evidence_grounding_node(state)
+
+    assert not result["classified_requirements"][0].evidence
+
+
+@pytest.mark.asyncio
+async def test_grounding_rejects_incomplete_same_language_audio_clause(base_state):
+    """A partial ASR fragment cannot support a completed named identifier."""
+    source = "The system shall integrate with LDAP Active."
+    state = base_state.copy()
+    state["chunks"] = [
+        SourceChunk(
+            chunk_id="audio-ldap", text=source, start_char=0, end_char=len(source),
+            start_time_sec=0.0, end_time_sec=2.0, document_id="audio-1", language="en",
+        )
+    ]
+    state["classified_requirements"] = [
+        ClassifiedRequirement(
+            id=1,
+            text="The system shall integrate with LDAP Active Directory.",
+            candidate_labels=["FR"], labels=["FR"], confidence=0.9,
+            extraction_type="explicit",
+            evidence=[EvidenceSpan(
+                chunk_id="audio-ldap", quote=source, document_id="audio-1",
+            )],
+        )
+    ]
+
+    result = await evidence_grounding_node(state)
+
+    requirement = result["classified_requirements"][0]
+    assert requirement.evidence == []
+    assert requirement.needs_review
+    assert any(
+        issue.rule_violated == "missing_verified_evidence"
+        for issue in result["quality_issues"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_grounding_accepts_audio_asr_numeric_protocol_and_adjacent_clause_variants(base_state):
+    source = (
+        "Non Functional Requirements. The dashboard must load in less than 2 seconds "
+        "under up to 500 active sessions. All communication must use T L S 1 3 protocol. "
+        "The system availability must be at least 99 9 percent monthly."
+    )
+    requirements = [
+        "The dashboard shall load in less than 2.0 seconds under up to 500 active sessions.",
+        "All communication shall use TLS 1.3 protocol.",
+        "The system availability shall be at least 99.9 percent monthly.",
+    ]
+    state = base_state.copy()
+    state["chunks"] = [
+        SourceChunk(
+            chunk_id="audio-window", text=source, start_char=0, end_char=len(source),
+            start_time_sec=0.0, end_time_sec=18.0, document_id="audio-1", language="en",
+        )
+    ]
+    state["classified_requirements"] = [
+        ClassifiedRequirement(
+            id=index, text=text, candidate_labels=["NFR"], labels=["NFR"],
+            confidence=0.8, extraction_type="explicit",
+            evidence=[EvidenceSpan(
+                chunk_id="audio-window", quote=source, document_id="audio-1",
+            )],
+        )
+        for index, text in enumerate(requirements, start=1)
+    ]
+
+    result = await evidence_grounding_node(state)
+
+    assert all(requirement.evidence for requirement in result["classified_requirements"])
+    assert not any(
+        issue.rule_violated == "missing_verified_evidence"
+        for issue in result["quality_issues"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_grounding_recovers_complete_audio_clause_from_declared_source(base_state):
+    source = (
+        "Asset database records cannot be permanently deleted. They must be "
+        "soft-deleted and marked as Retired for audit compliance."
+    )
+    state = base_state.copy()
+    state["chunks"] = [
+        SourceChunk(
+            chunk_id="audio-retention", text=source, start_char=0, end_char=len(source),
+            start_time_sec=30.0, end_time_sec=38.0, document_id="audio-1", language="en",
+        )
+    ]
+    state["classified_requirements"] = [
+        ClassifiedRequirement(
+            id=1,
+            text="Asset database records must be soft-deleted and marked as Retired for audit compliance.",
+            candidate_labels=["BR"], labels=["BR"], confidence=0.8,
+            extraction_type="explicit",
+            evidence=[EvidenceSpan(
+                chunk_id="audio-retention", quote="Asset records support audit compliance.",
+                document_id="audio-1",
+            )],
+        )
+    ]
+
+    result = await evidence_grounding_node(state)
+
+    requirement = result["classified_requirements"][0]
+    assert requirement.evidence
+    assert "cannot be permanently deleted" in requirement.text.lower()
+    assert "cannot be permanently deleted" in requirement.evidence[0].quote.lower()

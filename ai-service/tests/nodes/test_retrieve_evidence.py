@@ -159,3 +159,25 @@ async def test_ambiguous_retrieval_candidate_is_not_promoted_to_evidence():
     assert result.needs_review is True
     assert "ambiguous retrieval not promoted" in (result.review_reason or "")
     clear_source_index(job_id)
+
+
+@pytest.mark.asyncio
+async def test_retrieval_recovers_better_clause_from_same_audio_chunk():
+    """A weak extraction quote must not hide a stronger audio clause."""
+    job_id = "ret-audio-same-chunk"
+    source = "All communication between clients and servers must be encrypted using T L S 1 3 protocol."
+    chunks = [SourceChunk(
+        chunk_id="audio-1", text=source, start_char=0, end_char=len(source),
+        start_time_sec=0.0, end_time_sec=4.0, document_id="audio-source", language="en",
+    )]
+    req = _req(
+        1,
+        "The system shall encrypt all communication between clients and servers using TLS 1.3 protocol.",
+        evidence=[EvidenceSpan(chunk_id="audio-1", quote="Communication is secure.")],
+    )
+
+    out = await retrieve_evidence_node(_state(job_id, [req], chunks))
+
+    result = out["extracted_requirements"][0]
+    assert any("T L S 1 3" in evidence.quote for evidence in result.evidence)
+    clear_source_index(job_id)

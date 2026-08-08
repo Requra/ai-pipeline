@@ -23,17 +23,39 @@ from app.services.semantic_quality import (
     best_evidence_clause,
     clause_coverage,
     complete_requirement_from_evidence,
+    evaluate_polarity,
+    fact_tokens,
     has_polarity_conflict,
     infer_requirement_category,
     infer_requirement_priority,
+    introduces_unsupported_approval_outcome,
     missing_required_numeric_claims,
     normalize_requirement_labels,
     normalize_story_points,
     numeric_upper_bound_entails,
+    proposition_support,
     split_requirement_clauses,
     unsupported_fact_terms,
     unsupported_review_terms,
 )
+
+
+def test_compact_duration_tokens_align_with_written_duration_tokens():
+    assert {"2", "second"}.issubset(fact_tokens("Performance must be under 2s."))
+    assert proposition_support(
+        "Performance must be under 2 seconds.",
+        "Performance must be under 2s.",
+    ) >= 0.60
+
+
+def test_adjacent_negative_and_positive_source_clauses_do_not_create_false_polarity():
+    source = (
+        "Asset records cannot be permanently deleted. They must be soft-deleted "
+        "and marked as Retired."
+    )
+    assert evaluate_polarity(
+        "Asset records must be soft-deleted and marked as Retired.", [source]
+    ) == "ENTAILED"
 
 
 def _chunk(chunk_id: str, text: str, document_id: str = "doc-1") -> SourceChunk:
@@ -882,6 +904,16 @@ def test_negative_source_constraint_is_restored_from_verified_evidence():
     assert complete_requirement_from_evidence(requirement, evidence) == evidence
 
 
+def test_verified_source_purpose_clause_restores_audio_omission():
+    requirement = "The system shall integrate with LDAP Active Directory."
+    evidence = (
+        "The system shall integrate with LDAP Active. "
+        "Directory for user authentication."
+    )
+
+    assert complete_requirement_from_evidence(requirement, evidence) == evidence
+
+
 def test_conjunct_notification_and_accessibility_are_unsupported_outcomes():
     limit_source = "Users shall be allowed to check out up to 3 assets simultaneously."
     assert unsupported_review_terms(
@@ -895,6 +927,18 @@ def test_conjunct_notification_and_accessibility_are_unsupported_outcomes():
     assert "access" in unsupported_fact_terms(
         "Then the retired record is accessible during an audit.",
         ["Records shall be soft-deleted and marked as Retired for audit compliance."],
+    )
+
+
+def test_required_approval_does_not_entail_approval_success():
+    source = "Standard checkout requests require manager approval above $1,000."
+    assert introduces_unsupported_approval_outcome(
+        "Given the value exceeds $1,000, when a manager reviews the request, then the request is approved.",
+        [source],
+    )
+    assert not introduces_unsupported_approval_outcome(
+        "Given the value exceeds $1,000, when a request is submitted, then manager approval is required.",
+        [source],
     )
 
 

@@ -60,6 +60,7 @@ _ASSERTIVE_FACT_TERMS = {
 _REVIEW_FACT_TERMS = {"fail", "failure", "notify", "record", "test", "warning"}
 
 _FACT_ALIASES = {
+    "able": "allow",
     "acces": "access",
     "accessibl": "access",
     "accessible": "access",
@@ -82,6 +83,7 @@ _FACT_ALIASES = {
     "invited": "invite",
     "mfa": "authentication",
     "includ": "include",
+    "integration": "integrate",
     "inform": "notify",
     "grant": "authorize",
     "granted": "authorize",
@@ -161,6 +163,18 @@ def fact_tokens(text: str) -> set[str]:
         if token not in _FACT_SCAFFOLDING and len(token) > 1
     }
     lowered = (text or "").lower()
+    # Treat compact ASR and engineering notation (`2s`, `250ms`, `5min`) as
+    # the same fact dimensions as their spaced, fully written equivalents.
+    # Keep the original token too; these additions only improve alignment.
+    compact_units = {
+        "ms": "millisecond", "msec": "millisecond", "msecs": "millisecond",
+        "s": "second", "sec": "second", "secs": "second",
+        "m": "minute", "min": "minute", "mins": "minute",
+        "h": "hour", "hr": "hour", "hrs": "hour",
+    }
+    for number, unit in re.findall(r"\b(\d+(?:\.\d+)?)\s*(ms|msecs?|secs?|s|mins?|m|hrs?|h)\b", lowered):
+        tokens.add(number)
+        tokens.add(compact_units[unit])
     if re.search(r"\bmulti[-\s]+factor\s+authentication\b", lowered):
         tokens.add("authentication")
     return tokens
@@ -494,6 +508,35 @@ def unsupported_fact_terms(text: str, sources: Iterable[str]) -> set[str]:
     return result
 
 
+def introduces_unsupported_approval_outcome(text: str, sources: Iterable[str]) -> bool:
+    """Reject approval success inferred from a rule that only requires review.
+
+    ``Requires manager approval`` does not entail ``the request is approved``.
+    The latter is an additional business decision, so it must be explicitly
+    present in the source before it can appear in an acceptance criterion.
+    """
+    candidate = re.sub(r"\s+", " ", text or "").lower()
+    asserts_success = bool(re.search(
+        r"\b(?:request|application|item|record|it)\s+(?:is|are|gets?|becomes?)\s+approved\b|"
+        r"\bapproval\s+(?:is\s+)?granted\b",
+        candidate,
+    ))
+    if not asserts_success:
+        return False
+    for source in sources:
+        source_text = re.sub(r"\s+", " ", source or "").lower()
+        if not re.search(r"\bapprov(?:al|e|ed)\b", source_text):
+            continue
+        explicit_success = bool(re.search(
+            r"\b(?:request|application|item|record|it)\s+(?:is|are|gets?|becomes?)\s+approved\b|"
+            r"\bapproval\s+(?:is\s+)?granted\b|\bmanager\s+approves\b",
+            source_text,
+        ))
+        if not explicit_success:
+            return True
+    return False
+
+
 def retention_entails(text: str, sources: Iterable[str]) -> bool:
     """Recognize preservation implied by non-destructive record handling.
 
@@ -535,7 +578,21 @@ def complete_requirement_from_evidence(requirement: str, evidence: str) -> str:
     evidence_negative = bool(_NEGATION_RE.search(evidence))
     requirement_negative = bool(_NEGATION_RE.search(requirement))
     missing_negative_constraint = evidence_negative and not requirement_negative
-    if not missing_numbers and not missing_negative_constraint:
+    requirement_facts = fact_tokens(requirement)
+    evidence_facts = fact_tokens(evidence)
+    additional_facts = evidence_facts - requirement_facts
+    # A trailing purpose, condition, exception, or scope phrase is often lost
+    # when ASR inserts a sentence boundary in the middle of a statement.  If
+    # the already-selected exact evidence clause contains such an extension,
+    # preserve it rather than publishing a silently weakened requirement.
+    material_extension = bool(additional_facts) and bool(re.search(
+        r"\b(?:for|to|so\s+that|in\s+order\s+to|during|under|when|if|"
+        r"unless|except|excluding|including|with|without|using)\b|"
+        r"(?:\u0644|\u0645\u0646|\u0639\u0646\u062f|\u0625\u0630\u0627|\u0628\u0627\u0633\u062a\u062e\u062f\u0627\u0645)",
+        evidence,
+        flags=re.IGNORECASE,
+    ))
+    if not missing_numbers and not missing_negative_constraint and not material_extension:
         return requirement
     if check_different_languages(requirement, evidence):
         return requirement
@@ -707,11 +764,18 @@ def has_polarity_conflict(text: str, sources: Iterable[str]) -> bool:
 def split_requirement_clauses(text: str) -> list[str]:
     """Split a canonical requirement into clauses that should be covered."""
     source = text or ""
-    raw = re.split(
-        r"\s*;\s*|\s+(?=without\b)|,?\s+and\s+(?=(?:not|never|cannot|can\s+not|shall\s+not|must\s+not)\b)|\s+and\s+(?=(?:shall|must|will|should|may|allows?|retains?|records?|displays?|sends?|includes?|enforces?|provides?|produces?|identifies?|attaches?|scans?)\b)",
-        source,
-        flags=re.I,
-    )
+    # A source window can contain adjacent positive and negative propositions:
+    # "records cannot be permanently deleted. They must be soft-deleted." A
+    # polarity decision must compare each candidate against its related
+    # sentence, not let the first negation contaminate the next requirement.
+    sentences = re.split(r"(?<=[.!?؟])\s+(?=[^\d\s])", source)
+    raw = []
+    for sentence in sentences:
+        raw.extend(re.split(
+            r"\s*;\s*|\s+(?=without\b)|,?\s+and\s+(?=(?:not|never|cannot|can\s+not|shall\s+not|must\s+not)\b)|\s+and\s+(?=(?:shall|must|will|should|may|allows?|retains?|records?|displays?|sends?|includes?|enforces?|provides?|produces?|identifies?|attaches?|scans?)\b)",
+            sentence,
+            flags=re.I,
+        ))
     clauses: list[str] = []
     for part in raw:
         part = part.strip(" .")
