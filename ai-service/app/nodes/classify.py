@@ -58,6 +58,22 @@ def _clamp_confidence(value: float) -> float:
     return max(0.0, min(1.0, value))
 
 
+def _normalize_classification_payload(parsed) -> dict:
+    """Normalize harmless LLM envelope variations before schema validation."""
+    if isinstance(parsed, list):
+        return {"classifications": parsed}
+    if not isinstance(parsed, dict):
+        return parsed
+    if {"id", "labels", "confidence"}.issubset(parsed):
+        return {"classifications": [parsed]}
+    classifications = parsed.get("classifications")
+    if isinstance(classifications, dict):
+        return {"classifications": [classifications]}
+    if "data" in parsed:
+        return _normalize_classification_payload(parsed["data"])
+    return parsed
+
+
 async def _classify_batch(llm, batch):
     items = "\n\n".join(_format_requirement(fr) for fr in batch)
     
@@ -81,10 +97,9 @@ async def _classify_batch(llm, batch):
 
         try:
             parsed = json.loads(content)
-            # Support both direct list or wrapped in "classifications"
-            if isinstance(parsed, list):
-                parsed = {"classifications": parsed}
-            return ClassificationResponse.model_validate(parsed)
+            return ClassificationResponse.model_validate(
+                _normalize_classification_payload(parsed)
+            )
         except Exception as e:
             print(f"Classification parse/validation error: {e}")
             return None

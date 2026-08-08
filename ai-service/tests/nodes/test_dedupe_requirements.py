@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from app.nodes.dedupe_requirements import (
+    _conditional_approval_and_quantity_are_composable,
     canonicalize_requirements,
     dedupe_requirements_node,
 )
@@ -188,6 +189,49 @@ def test_atomic_or_clause_is_absorbed_by_equivalent_composite():
     assert merged_count == 1
     assert len(canonical) == 1
     assert "administrator role" in canonical[0].text
+
+
+def test_contained_action_with_purpose_clause_merges_into_composite_rule():
+    composite = _req(
+        1,
+        "Asset database records shall not be permanently deleted; instead, they must be soft-deleted and marked as Retired.",
+    )
+    atomic = _req(
+        2,
+        "The system must soft-delete and mark records as Retired for audit compliance.",
+    )
+
+    canonical, merged_count, _, _ = canonicalize_requirements([composite, atomic])
+
+    assert merged_count == 1
+    assert len(canonical) == 1
+    assert "not be permanently deleted" in canonical[0].text
+
+
+@pytest.mark.parametrize(
+    ("approval", "quantity"),
+    [
+        (
+            "Standard checkout requests require manager approval when the asset value exceeds $1,000.",
+            "Standard users may check out up to three assets simultaneously.",
+        ),
+        (
+            "تتطلب الطلبات موافقة المدير إذا تجاوزت القيمة 1000.",
+            "يسمح للمستخدمين بسحب حتى ثلاثة أصول في الوقت نفسه.",
+        ),
+    ],
+)
+def test_conditional_approval_and_quantity_limits_are_complementary(approval, quantity):
+    assert _conditional_approval_and_quantity_are_composable(
+        _req(1, approval), _req(2, quantity)
+    )
+
+
+def test_explicit_approval_exemption_is_not_silently_marked_complementary():
+    assert not _conditional_approval_and_quantity_are_composable(
+        _req(1, "Checkout requests over $1,000 require manager approval."),
+        _req(2, "Requests of up to three assets are exempt from approval."),
+    )
 
 
 @pytest.mark.asyncio

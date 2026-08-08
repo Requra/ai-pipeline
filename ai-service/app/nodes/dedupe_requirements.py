@@ -128,6 +128,47 @@ def _orthogonal_numeric_constraints(a: ExtractedRequirement, b: ExtractedRequire
     return len(a_context & b_context) < 2
 
 
+def _conditional_approval_and_quantity_are_composable(
+    a: ExtractedRequirement,
+    b: ExtractedRequirement,
+) -> bool:
+    """Recognise compatible approval gates and independent quantity limits.
+
+    An approval threshold and a maximum number of items can both govern the
+    same request. Treating that pair as a scope conflict creates a misleading
+    question and reduces the quality score. We only override an LLM conflict
+    label when neither side explicitly grants an exemption or negates the
+    other rule.
+    """
+    texts = ((a.text or "").lower(), (b.text or "").lower())
+    if any(re.search(
+        r"\b(?:no|not|never|without|exempt|except)\b|"
+        r"(?:\u0628\u062f\u0648\u0646|\u0627\u0633\u062a\u062b\u0646\u0627\u0621)",
+        text,
+    ) for text in texts):
+        return False
+    approval = re.compile(
+        r"\b(?:approv(?:e|al)|authori[sz](?:e|ation)|permission|consent)\b|"
+        r"(?:\u0645\u0648\u0627\u0641\u0642\u0629|\u062a\u0635\u0631\u064a\u062d|\u0627\u0639\u062a\u0645\u0627\u062f)",
+        re.IGNORECASE,
+    )
+    conditional = re.compile(
+        r"\b(?:if|when|unless|above|below|over|under|exceeds?|at\s+least|"
+        r"more\s+than|less\s+than)\b|"
+        r"(?:\u0625\u0630\u0627|\u0639\u0646\u062f|\u064a\u062a\u062c\u0627\u0648\u0632|\u0623\u0643\u062b\u0631\s+\u0645\u0646)",
+        re.IGNORECASE,
+    )
+    quantity = re.compile(
+        r"\b(?:up\s+to|at\s+most|maximum|max(?:imum)?|simultaneous(?:ly)?|"
+        r"number\s+of|quantity)\b|"
+        r"(?:\u062d\u062a\u0649|\u0627\u0644\u062d\u062f\s+\u0627\u0644\u0623\u0642\u0635\u0649|\u0639\u062f\u062f)",
+        re.IGNORECASE,
+    )
+    approval_text = next((text for text in texts if approval.search(text)), "")
+    quantity_text = next((text for text in texts if quantity.search(text)), "")
+    return bool(approval_text and quantity_text and conditional.search(approval_text))
+
+
 def _higher_priority(p1: str, p2: str) -> str:
     return p1 if _PRIORITY_RANK.get(p1, 1) >= _PRIORITY_RANK.get(p2, 1) else p2
 
@@ -187,7 +228,15 @@ def _containment_duplicate(a: ExtractedRequirement, b: ExtractedRequirement) -> 
         or "," in (larger_text or "")
         or bool(re.search(r"\b(?:and|or)\b", larger_text or "", re.I))
     )
-    return is_composite and len(smaller & larger) / len(smaller) >= 0.72
+    shared = smaller & larger
+    # One source window can yield a composite rule and an atomic restatement of
+    # its mandated action. The restatement may add only a purpose clause, so it
+    # has less token overlap than a textual paraphrase but no new testable rule.
+    return (
+        is_composite
+        and len(shared) >= 4
+        and len(shared) / len(smaller) >= 0.60
+    )
 
 
 def _canonical_components(
@@ -594,10 +643,13 @@ async def dedupe_requirements_node(state: PipelineState) -> dict:
                     req_a = next((req for req in deduped if req.id == req_a_int), None)
                     req_b = next((req for req in deduped if req.id == req_b_int), None)
                     if (
-                        classification == "CONSTRAINT_CONFLICT"
+                        classification in {"CONSTRAINT_CONFLICT", "SCOPE_CONFLICT"}
                         and req_a is not None
                         and req_b is not None
-                        and _orthogonal_numeric_constraints(req_a, req_b)
+                        and (
+                            _orthogonal_numeric_constraints(req_a, req_b)
+                            or _conditional_approval_and_quantity_are_composable(req_a, req_b)
+                        )
                     ):
                         classification = "COMPLEMENTARY"
                         reason = (
