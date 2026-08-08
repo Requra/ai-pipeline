@@ -1,6 +1,6 @@
 import pytest
 from app.nodes.generate import normalize_generation_payload, GenerationResponse, generate_node
-from app.schemas.items import ClassifiedRequirement
+from app.schemas.items import ClassifiedRequirement, EvidenceSpan
 from unittest.mock import MagicMock, patch, AsyncMock
 import json
 
@@ -321,6 +321,60 @@ async def test_generate_removes_unsupported_acceptance_facts(base_state):
 
 
 @pytest.mark.asyncio
+async def test_generate_audio_story_normalizes_transcript_grammar_and_rejects_unstated_lifecycle(base_state):
+    """Audio-only guards must not publish ASR grammar or invented lifecycle states."""
+    state = base_state.copy()
+    state["classified_requirements"] = [
+        ClassifiedRequirement(
+            id=1,
+            text=(
+                "Asset database records cannot be permanently deleted and must be "
+                "soft-deleted and marked as Retired."
+            ),
+            actor="System", goal="soft-delete and mark records as Retired",
+            candidate_labels=["BR"], labels=["BR"], confidence=0.9,
+            classification_confidence=0.9,
+            evidence=[EvidenceSpan(
+                chunk_id="trans_audio_semantic_0",
+                quote=(
+                    "Asset database records cannot be permanently deleted; they must be "
+                    "soft deleted and marked as Retired."
+                ),
+                timestamp="14.0",
+            )],
+        )
+    ]
+    mock_llm = MagicMock()
+    mock_llm.ainvoke = AsyncMock(return_value=MagicMock(content=json.dumps({
+        "stories": [{
+            "source_requirement_ids": [1],
+            "title": "Softs delete retired records",
+            "description": (
+                "As a system operator, I want to softs delete records, so that "
+                "they become inactive or archived."
+            ),
+            "acceptance_criteria": [
+                "Given an asset record, when it is retired, then the system softs delete it and archives it."
+            ],
+            "labels": ["BR"], "story_points": 3,
+        }]
+    })))
+
+    with patch("app.nodes.generate.get_llm", return_value=mock_llm):
+        result = await generate_node(state)
+
+    story = result["user_stories"][0]
+    published = " ".join([
+        story.title, story.description,
+        *[criterion.text for criterion in story.acceptance_criteria],
+    ]).lower()
+    assert "softs delete" not in published
+    assert "archive" not in published
+    assert "inactive" not in published
+    assert "soft-delete" in published
+
+
+@pytest.mark.asyncio
 async def test_generate_replaces_unsupported_title_and_limit_outcome(base_state):
     state = base_state.copy()
     state["classified_requirements"] = [
@@ -401,6 +455,79 @@ async def test_generate_restores_omitted_measurable_constraints_in_criteria(base
     assert "2.0 seconds" in criteria
     assert "500 active sessions" in criteria
     assert "does not proceed" not in criteria
+
+
+@pytest.mark.asyncio
+async def test_generate_removes_unsupported_vague_performance_criterion(base_state):
+    state = base_state.copy()
+    state["classified_requirements"] = [
+        ClassifiedRequirement(
+            id=1,
+            text="The dashboard shall load in less than 2 seconds under 500 active sessions.",
+            actor="System", goal="provide a responsive dashboard",
+            candidate_labels=["NFR"], labels=["NFR"], confidence=0.9,
+            classification_confidence=0.9, evidence=[], priority="Medium",
+        )
+    ]
+    mock_llm = MagicMock()
+    mock_llm.ainvoke = AsyncMock(return_value=MagicMock(content=json.dumps({
+        "stories": [{
+            "source_requirement_ids": [1],
+            "title": "Responsive dashboard",
+            "description": "As a system operator, I want a responsive dashboard, so that the documented requirement is fulfilled.",
+            "acceptance_criteria": [
+                "Given a user is on the dashboard, when they perform an action, then it responds in a timely manner."
+            ],
+            "labels": ["NFR"], "story_points": 3,
+        }]
+    })))
+
+    with patch("app.nodes.generate.get_llm", return_value=mock_llm):
+        result = await generate_node(state)
+
+    story = result["user_stories"][0]
+    published = " ".join(criterion.text for criterion in story.acceptance_criteria).lower()
+    assert "timely manner" not in published
+    assert "2 seconds" in published
+    assert "500 active sessions" in published
+
+
+@pytest.mark.asyncio
+async def test_generate_does_not_turn_soft_delete_into_an_authorized_delete(base_state):
+    state = base_state.copy()
+    state["classified_requirements"] = [
+        ClassifiedRequirement(
+            id=1,
+            text=(
+                "Asset database records shall not be permanently deleted; instead, "
+                "they must be soft-deleted and marked as Retired."
+            ),
+            actor="User", goal="manage asset database records",
+            candidate_labels=["BR"], labels=["BR"], confidence=0.9,
+            classification_confidence=0.9, evidence=[], priority="Medium",
+        )
+    ]
+    mock_llm = MagicMock()
+    mock_llm.ainvoke = AsyncMock(return_value=MagicMock(content=json.dumps({
+        "stories": [{
+            "source_requirement_ids": [1],
+            "title": "Manage records",
+            "description": "As a system operator, I want to manage records, so that the documented requirement is fulfilled.",
+            "acceptance_criteria": [
+                "Given an asset record, when the record is deleted, then it is soft-deleted and marked as Retired."
+            ],
+            "labels": ["BR"], "story_points": 3,
+        }]
+    })))
+
+    with patch("app.nodes.generate.get_llm", return_value=mock_llm):
+        result = await generate_node(state)
+
+    story = result["user_stories"][0]
+    criteria = " ".join(criterion.text for criterion in story.acceptance_criteria).lower()
+    assert "when the record is deleted" not in criteria
+    assert "not permanently delete" in criteria
+    assert story.description.lower().startswith("as a user,")
 
 
 @pytest.mark.asyncio

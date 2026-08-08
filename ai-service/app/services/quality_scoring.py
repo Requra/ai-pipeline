@@ -8,6 +8,7 @@ from typing import Dict, Sequence
 from app.services.semantic_quality import (
     clause_coverage,
     has_polarity_conflict,
+    introduces_unsupported_approval_outcome,
     is_substantive,
     meaningful_tokens,
     MIN_STORY_ALIGNMENT,
@@ -174,7 +175,11 @@ def _criterion_supported(criterion, linked_requirements: Sequence) -> bool:
         return True
     if unsupported_numeric_claims(text, sources):
         return False
-    if unsupported_fact_terms(text, sources) or has_polarity_conflict(text, sources):
+    if (
+        unsupported_fact_terms(text, sources)
+        or has_polarity_conflict(text, sources)
+        or introduces_unsupported_approval_outcome(text, sources)
+    ):
         return False
     return max(
         (proposition_support(source, text) for source in substantive),

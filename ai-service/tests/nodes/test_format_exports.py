@@ -111,6 +111,40 @@ async def test_requirement_confidence_is_calibrated_and_unsupported_goal_is_not_
 
 
 @pytest.mark.asyncio
+async def test_audio_source_reference_preserves_uploaded_document_identity(base_state):
+    state = base_state.copy()
+    state.update({
+        "file_type": "audio",
+        "metadata": {"filename": "fallback-name.mp3"},
+        "source_documents": [{
+            "document_id": "audio-source-1",
+            "filename": "requirements-meeting.mp3",
+            "file_type": "audio",
+            "mime_type": "audio/mpeg",
+        }],
+    })
+    requirement = ClassifiedRequirement(
+        id=1, text="The system shall use TLS 1.3.", actor="System", goal="Use TLS 1.3",
+        candidate_labels=["NFR"], labels=["NFR"], confidence=0.8,
+        classification_confidence=0.8,
+        evidence=[EvidenceSpan(
+            chunk_id="trans_job_semantic_0", quote="The system shall use TLS 1.3.",
+            document_id="audio-source-1", support_score=0.9,
+        )],
+    )
+    state["classified_requirements"] = [requirement]
+    state["user_stories"] = [_story("s1", 1, ["NFR"])]
+
+    result = await format_node(state)
+
+    ref = result["job_result"].requirements[0].source_refs[0]
+    assert ref.source_type == "audio"
+    assert ref.source_id == "audio-source-1"
+    assert ref.document_name == "requirements-meeting.mp3"
+    assert ref.page is None
+
+
+@pytest.mark.asyncio
 async def test_no_fake_artifact_url(base_state):
     state = base_state.copy()
     state["classified_requirements"] = [_req(1, ["FR"])]

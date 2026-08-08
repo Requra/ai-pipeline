@@ -18,6 +18,7 @@ from app.services.semantic_quality import (
     clear_story_mapping_mismatch,
     has_polarity_conflict,
     infer_requirement_priority,
+    introduces_unsupported_approval_outcome,
     is_substantive,
     meaningful_tokens,
     MIN_STORY_ALIGNMENT,
@@ -474,7 +475,10 @@ async def quality_gate_node(state: PipelineState) -> dict:
             unsupported_terms = unsupported_fact_terms(criterion_text, source_facts)
             review_terms = unsupported_review_terms(criterion_text, source_facts)
             polarity_conflict = has_polarity_conflict(criterion_text, source_facts)
-            if unsupported_terms or review_terms or polarity_conflict:
+            approval_outcome = introduces_unsupported_approval_outcome(
+                criterion_text, source_facts
+            )
+            if unsupported_terms or review_terms or polarity_conflict or approval_outcome:
                 new_issues.append(QualityIssue(
                     item_id=story_index,
                     item_type="story",
@@ -482,7 +486,8 @@ async def quality_gate_node(state: PipelineState) -> dict:
                     rule_violated="acceptance_criterion_unsupported_fact",
                     details=(
                         f"Story {s.id} acceptance criterion introduces unsupported behavior: "
-                        f"{', '.join(sorted(unsupported_terms | review_terms)) or 'polarity reversal'}."
+                        f"{', '.join(sorted(unsupported_terms | review_terms)) or 'polarity reversal'}"
+                        f"{' (approval success was not source-supported)' if approval_outcome else ''}."
                     ),
                 ))
                 continue

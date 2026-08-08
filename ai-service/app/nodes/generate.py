@@ -1,5 +1,5 @@
 from app.schemas.pipeline_state import PipelineState
-from app.schemas.items import UserStory, AcceptanceCriterion, RequirementCoverage
+from app.schemas.items import UserStory, AcceptanceCriterion, RequirementCoverage, QualityIssue
 from app.llm import get_llm
 from app.prompts.loader import load_prompt
 from app.prompts.registry import PromptId
@@ -15,6 +15,7 @@ from app.services.semantic_quality import (
     clause_coverage,
     fact_tokens,
     has_polarity_conflict,
+    introduces_unsupported_approval_outcome,
     is_substantive,
     MIN_STORY_ALIGNMENT,
     proposition_support,
@@ -106,7 +107,7 @@ def normalize_actor_to_agile_role(actor: Optional[str]) -> str:
 
 
 def normalize_story_persona(description: str) -> str:
-    """Replace technical-component personas with a valid operational role."""
+    """Replace technical personas and safe casing artifacts in a story."""
     text = (description or "").strip()
     technical_persona = re.compile(
         r"^As\s+(?:a|an|the)\s+"
@@ -114,8 +115,14 @@ def normalize_story_persona(description: str) -> str:
         re.IGNORECASE,
     )
     if technical_persona.search(text):
-        return technical_persona.sub("As a system operator,", text, count=1)
-    return text
+        text = technical_persona.sub("As a system operator,", text, count=1)
+    # Some providers capitalize the first verb after ``I want to``. This is a
+    # grammar-only normalization and preserves the stated behavior.
+    return re.sub(
+        r"(\bI\s+want\s+to\s+)([A-Z])",
+        lambda match: match.group(1) + match.group(2).lower(),
+        text,
+    )
 
 def normalize_generation_payload(parsed: Any) -> dict:
     if isinstance(parsed, list):
@@ -287,6 +294,30 @@ def _criterion_supported(text: str, requirements) -> bool:
     sources = source_fact_texts(requirements)
     if not sources:
         return False
+    # Do not publish a vague quality claim that is absent from the source. A
+    # measurable source constraint (for example, a two-second limit) is not
+    # faithfully represented by "in a timely manner".
+    lowered = (text or "").lower()
+    source_lowered = " ".join(sources).lower()
+    vague_outcomes = (
+        "in a timely manner", "in a timely fashion", "as quickly as possible",
+        "appropriately", "effectively",
+    )
+    if any(phrase in lowered and phrase not in source_lowered for phrase in vague_outcomes):
+        return False
+    # A soft-delete rule describes the replacement lifecycle state; it does
+    # not by itself authorize an ordinary delete operation. Unless the source
+    # explicitly uses deletion as the trigger, reject criteria that introduce
+    # "when the record is deleted" as a new precondition.
+    source_has_soft_delete = bool(re.search(r"\bsoft[-\s]?delet", source_lowered))
+    source_conditions_delete = bool(re.search(
+        r"\bwhen\b[^.]{0,80}\bdelet(?:e|ed|ion)\b", source_lowered,
+    ))
+    candidate_conditions_delete = bool(re.search(
+        r"\bwhen\b[^.]{0,80}\b(?:is\s+)?(?:permanently\s+)?deleted\b", lowered,
+    ))
+    if source_has_soft_delete and candidate_conditions_delete and not source_conditions_delete:
+        return False
     if unsupported_numeric_claims(text, sources):
         return False
     if unsupported_fact_terms(text, sources):
@@ -295,10 +326,66 @@ def _criterion_supported(text: str, requirements) -> bool:
         return False
     if has_polarity_conflict(text, sources):
         return False
+    if introduces_unsupported_approval_outcome(text, sources):
+        return False
+    # A generic criterion can share only "register" and "asset" with a
+    # detailed source rule while omitting every required field or constraint.
+    # Keep the threshold high enough to force a deterministic source-bound
+    # fallback in that case; composite requirements are split into clauses by
+    # the fallback builder, so this does not hide independent test cases.
     return max(
         (proposition_support(source, text) for source in sources),
         default=0.0,
-    ) >= 0.15
+    ) >= 0.35
+
+
+def _linked_audio_evidence(requirements) -> bool:
+    """Return whether a story is backed by timestamped transcription evidence.
+
+    This keeps transcript clean-up strictly scoped to audio.  Documents can
+    contain timestamps as ordinary text, but they do not populate the internal
+    EvidenceSpan timestamp field during parsing.
+    """
+    return any(
+        getattr(evidence, "timestamp", None) is not None
+        for requirement in requirements
+        for evidence in (getattr(requirement, "evidence", []) or [])
+    )
+
+
+def _linked_human_actor(requirements) -> str | None:
+    """Return the first explicit human/business actor from linked requirements."""
+    technical = {"system", "service", "application", "portal", "workspace", "database", "api"}
+    for requirement in requirements:
+        actor = (getattr(requirement, "actor", None) or "").strip()
+        if actor and actor.lower() not in technical:
+            return normalize_actor_to_agile_role(actor)
+    return None
+
+
+def _normalize_audio_story_wording(text: str) -> str:
+    """Correct safe, recurring ASR-to-story grammar artifacts.
+
+    This is intentionally a tiny grammar normalizer, not a semantic rewrite:
+    it only changes a malformed inflection to the same source-supported action.
+    """
+    normalized = text or ""
+    normalized = re.sub(r"\bsofts\s+delete\b", "soft-deletes", normalized, flags=re.I)
+    normalized = re.sub(r"\bsoft\s+delete\b", "soft-delete", normalized, flags=re.I)
+    return normalized
+
+
+def _audio_unsupported_outcome(text: str, sources) -> bool:
+    """Reject a few high-impact outcomes hallucinated from noisy transcripts.
+
+    The general fact validator deliberately treats these as ordinary domain
+    nouns for documents.  For audio we can be stricter because a timestamped
+    source ledger is present and a model must not turn an absent lifecycle
+    state (for example, ``archived``) into a published acceptance outcome.
+    """
+    source_tokens = fact_tokens(" ".join(sources))
+    candidate_tokens = fact_tokens(text)
+    return bool((candidate_tokens - source_tokens) & {"archive", "inactive"})
 
 
 def _mapping_supported(requirement, story_text: str) -> bool:
@@ -331,7 +418,12 @@ def _source_bound_story_wording(requirements) -> tuple[str, str]:
         and not unsupported_review_terms(goal, sources)
         and not has_polarity_conflict(goal, sources)
     )
-    if not goal_supported:
+    generic_goal = bool(re.match(
+        r"^(?:manage|meet|ensure|enable|provide|support|handle)\b",
+        goal,
+        flags=re.IGNORECASE,
+    ))
+    if not goal_supported or (generic_goal and len(fact_tokens(goal)) < len(fact_tokens(text))):
         modal = re.match(
             r"^.+?\s+(?:shall|must|will|should|may|can)\s+(?:be\s+able\s+to\s+)?(.+)$",
             text,
@@ -372,24 +464,46 @@ def _sanitize_generated_story(story: UserStory, req_map: dict[int, Any]) -> User
 
     linked = [req_map[req_id] for req_id in valid_ids if req_id in req_map]
     sources = source_fact_texts(linked)
+    human_actor = _linked_human_actor(linked)
+    if human_actor and re.match(r"^As\s+a\s+system\s+operator,", story.description, re.I):
+        story.description = re.sub(
+            r"^As\s+a\s+system\s+operator,",
+            f"As {human_actor},",
+            story.description,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+    if _linked_audio_evidence(linked):
+        story.title = _normalize_audio_story_wording(story.title)
+        story.description = _normalize_audio_story_wording(story.description)
+        for criterion in story.acceptance_criteria or []:
+            criterion.text = _normalize_audio_story_wording(criterion.text)
     unsafe_title = (
         unsupported_numeric_claims(story.title, sources)
         or unsupported_fact_terms(story.title, sources)
         or unsupported_review_terms(story.title, sources)
         or has_polarity_conflict(story.title, sources)
+        or (_linked_audio_evidence(linked) and _audio_unsupported_outcome(story.title, sources))
     )
     unsafe_description = (
         unsupported_numeric_claims(story.description, sources)
         or unsupported_fact_terms(story.description, sources)
         or unsupported_review_terms(story.description, sources)
         or has_polarity_conflict(story.description, sources)
+        or (_linked_audio_evidence(linked) and _audio_unsupported_outcome(story.description, sources))
     )
+    generic_fallback_description = "documented requirement is fulfilled" in story.description.lower()
     if unsafe_title or unsafe_description:
         safe_title, safe_description = _source_bound_story_wording(linked)
         if unsafe_title:
             story.title = safe_title
         if unsafe_description:
             story.description = safe_description
+    elif generic_fallback_description:
+        # The wording is source-safe but not useful to a delivery team. Rebuild
+        # it from the linked source proposition rather than exporting boilerplate.
+        _safe_title, safe_description = _source_bound_story_wording(linked)
+        story.description = safe_description
     linked_labels = [
         label
         for req in linked
@@ -404,7 +518,10 @@ def _sanitize_generated_story(story: UserStory, req_map: dict[int, Any]) -> User
     )
     supported_criteria = [
         criterion for criterion in story.acceptance_criteria
-        if _criterion_supported(criterion.text, linked)
+        if (
+            _criterion_supported(criterion.text, linked)
+            and not (_linked_audio_evidence(linked) and _audio_unsupported_outcome(criterion.text, sources))
+        )
     ]
     story.acceptance_criteria = supported_criteria
     duplicate_criterion_ids = set(
@@ -951,6 +1068,42 @@ async def generate_node(state: PipelineState) -> dict:
         issues_by_story = validate_stories(final_stories, reqs_by_id)
         duplicate_ids = find_duplicate_story_ids(final_stories)
         if issues_by_story or duplicate_ids:
+            quality_rule_map = {
+                "unsupported_acceptance_fact": ("acceptance_criterion_unsupported_fact", "medium"),
+                "missing_source_clause": ("acceptance_criteria_missing_source_clause", "medium"),
+                "incorrect_story_requirement_mapping": ("incorrect_story_requirement_mapping", "high"),
+                "missing_source_requirement_ids": ("story_missing_source_ids", "high"),
+                "all_generic_acceptance_criteria": ("generic_acceptance_criteria", "medium"),
+                "duplicate_acceptance_criteria": ("duplicate_acceptance_criterion", "medium"),
+                "missing_title": ("story_empty_title", "high"),
+                "insufficient_acceptance_criteria": ("story_missing_acceptance", "medium"),
+            }
+            generated_issues = list(state.get("quality_issues", []) or [])
+            story_indexes = {
+                story.id: index
+                for index, story in enumerate(final_stories, start=1)
+            }
+            for story_id, codes_for_story in issues_by_story.items():
+                for code in codes_for_story:
+                    mapped = quality_rule_map.get(code)
+                    if mapped is None:
+                        continue
+                    rule, severity = mapped
+                    story_index = story_indexes.get(story_id)
+                    if story_index is None:
+                        # Validation is diagnostic and must never turn a
+                        # successful generation into a total fallback because
+                        # an internal story identifier is unavailable.
+                        continue
+                    generated_issues.append(QualityIssue(
+                        item_id=story_index,
+                        item_type="story",
+                        severity=severity,
+                        rule_violated=rule,
+                        details=f"Generated story failed validation: {code}.",
+                    ))
+            if generated_issues:
+                result_payload["quality_issues"] = generated_issues
             codes = sorted({code for codes in issues_by_story.values() for code in codes})
             parts = []
             if issues_by_story:
@@ -995,14 +1148,12 @@ async def generate_node(state: PipelineState) -> dict:
                 goal = "satisfy this requirement"
 
             agile_actor = normalize_actor_to_agile_role(actor)
+            fallback_title, fallback_description = _source_bound_story_wording([req])
 
             user_story = UserStory(
                 id=story_id,
-                title=f"Story for requirement {req.id}",
-                description=(
-                    f"As {agile_actor}, I want {goal}, so that the documented "
-                    "requirement is fulfilled."
-                ),
+                title=fallback_title,
+                description=fallback_description,
                 acceptance_criteria=build_specific_acceptance_criteria(req, story_id, agile_actor),
                 source_requirement_ids=[req.id],
                 labels=_normalize_labels(getattr(req, "labels", None)),
