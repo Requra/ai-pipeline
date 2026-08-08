@@ -11,6 +11,7 @@ from typing import Optional, List, Dict, Any, Tuple
 from app.schemas.pipeline_state import PipelineState
 from app.schemas.items import SourceChunk
 from app.config import settings
+from app.services.audio_semantics import reconstruct_audio_chunks
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,8 @@ _DIARIZATION_PROMPT = (
     "and a client or development team. "
     "Speakers may alternate between Egyptian Arabic and English. "
     "Expect terms like: user story, sprint, backlog, requirement, acceptance criteria, "
-    "scope, stakeholder, UAT, sign-off, SRS, KPI, milestone, deliverable, change request."
+    "scope, stakeholder, UAT, sign-off, SRS, KPI, milestone, deliverable, change request, "
+    "QR code, LDAP Active Directory, TLS, API, database, and numeric constraints."
 )
 
 # ── Cleaner ──────────────────────────────────────────────────────────────────
@@ -98,12 +100,16 @@ def normalize_pm_terms(text: str) -> str:
 
 
 def remove_garbage(text: str) -> str:
-    """Remove obvious junk patterns."""
+    """Remove known ASR junk without changing the spoken source facts."""
     text = re.sub(r"(The audio may contain.*?)(?:\1)+", "", text, flags=re.IGNORECASE)
     text = re.sub(r"(\s*،\s*){2,}", "، ", text)
     text = re.sub(r"^\s*،\s*", "", text, flags=re.MULTILINE)
-    text = re.sub(r"(?<=[ \u0600-\u06FF])\b[a-zA-Z]{1,2}\b(?=[ \u0600-\u06FF])", "", text)
-    text = re.sub(r"[^\w\s\u0600-\u06FF.,!?،\n\*\[\]\:]", "", text)
+    # Preserve short words and acronyms (for example ``to``, ``QR``, and
+    # individually spoken ``T L S``); remove only known filler sounds.
+    text = re.sub(r"\b(?:uh+|um+|erm+|hmm+|mm+)\b", "", text, flags=re.IGNORECASE)
+    # Preserve punctuation that carries numeric, protocol, and identifier
+    # meaning: `$1,000`, `99.9%`, `TLS-1.3`, and `A/B`.
+    text = re.sub(r"[^\w\s\u0600-\u06FF.,!?،\n\*\[\]\:\$%+\-/']", "", text)
     text = re.sub(r"\b(استجة|استجه|unsure|stutter|noise)\b", "", text, flags=re.IGNORECASE)
     return text
 
@@ -111,7 +117,9 @@ def remove_garbage(text: str) -> str:
 def fix_spacing(text: str) -> str:
     """Fix spacing around punctuation."""
     text = re.sub(r"\s+([.,!?])", r"\1", text)
-    text = re.sub(r"([.,!?])(?=\w)", r"\1 ", text)
+    # Do not split decimal values (`1.3`, `99.9`) or grouped numbers
+    # (`1,000`). Only add a sentence/list separator before a non-numeric word.
+    text = re.sub(r"([.,!?])(?=[^\s\d])", r"\1 ", text)
     return text
 
 
@@ -219,7 +227,8 @@ def _chunk_audio_sync(raw_bytes: bytes, file_subtype: str) -> list[tuple[int, by
 async def _transcribe_groq(
     raw_bytes: bytes,
     file_subtype: str,
-    job_id: str = "unknown"
+    job_id: str = "unknown",
+    language: str | None = None,
 ) -> Tuple[str, List[SourceChunk]]:
     from groq import AsyncGroq
     api_key = settings.GROQ_API_KEY
@@ -227,7 +236,9 @@ async def _transcribe_groq(
         raise ValueError("TRANSCRIBE_GROQ_FAILURE: GROQ_API_KEY is not set.")
 
     model = settings.GROQ_WHISPER_MODEL
-    language = settings.GROQ_LANGUAGE or None
+    language = settings.GROQ_LANGUAGE or (
+        None if (language or "").lower() == "mixed" else language
+    )
     client = AsyncGroq(api_key=api_key)
 
     if len(raw_bytes) > COMPRESS_THRESHOLD:
@@ -392,7 +403,10 @@ async def _transcribe_deepgram(
 
     timeout = max(180, len(raw_bytes) // (100 * 1024))
     
-    keywords = ["user story", "acceptance criteria", "sprint", "backlog", "API", "ROI"]
+    keywords = [
+        "user story", "acceptance criteria", "sprint", "backlog", "API", "ROI",
+        "QR code", "LDAP", "Active Directory", "TLS", "SLA", "KPI",
+    ]
     kw_str = "&".join([f"keyterm={k}" for k in keywords])
     base_params = f"?model=nova-3&smart_format=true&filler_words=true&diarize=true&utterances=true&{kw_str}"
 
@@ -460,9 +474,11 @@ async def transcribe_node(state: PipelineState) -> dict:
         if primary_fn == _transcribe_deepgram:
             text, chunks = await _transcribe_deepgram(raw_bytes, file_subtype, job_id, language, allow_dual_run)
         else:
-            text, chunks = await _transcribe_groq(raw_bytes, file_subtype, job_id)
+            text, chunks = await _transcribe_groq(raw_bytes, file_subtype, job_id, language)
         
-        return {"raw_text": text, "chunks": chunks, "status": f"completed_via_{provider}"}
+        return _audio_transcription_result(
+            state, text, chunks, f"completed_via_{provider}"
+        )
 
     except Exception as e:
         logger.warning(f"Primary transcoder {provider} failed: {e}")
@@ -473,14 +489,39 @@ async def transcribe_node(state: PipelineState) -> dict:
         if fallback_fn == _transcribe_deepgram:
             text, chunks = await _transcribe_deepgram(raw_bytes, file_subtype, job_id, language, allow_dual_run)
         else:
-            text, chunks = await _transcribe_groq(raw_bytes, file_subtype, job_id)
+            text, chunks = await _transcribe_groq(raw_bytes, file_subtype, job_id, language)
             
-        return {
-            "raw_text": text, "chunks": chunks, 
+        result = _audio_transcription_result(
+            state, text, chunks, "completed_via_fallback"
+        )
+        result.update({
             "error": f"{state.get('error') or ''} | {primary_err}".strip(" | "),
-            "status": "completed_via_fallback"
-        }
+        })
+        return result
     except Exception as e:
         logger.error(f"All transcoders failed: {e}")
         combined_err = f"{state.get('error') or ''} | {primary_err} | TRANSCRIBE_FALLBACK_FAILURE: {e}".strip(" | ")
         return {"raw_text": None, "chunks": [], "error": combined_err, "status": "failed_all_providers"}
+
+
+def _audio_transcription_result(
+    state: PipelineState,
+    _provider_text: str,
+    utterances: List[SourceChunk],
+    status: str,
+) -> dict:
+    """Create coherent, provenance-carrying audio windows for existing nodes."""
+    source_docs = state.get("source_documents") or []
+    source_doc = source_docs[0] if source_docs else {}
+    document_id = source_doc.get("document_id") or source_doc.get("source_id")
+    chunks = reconstruct_audio_chunks(
+        utterances,
+        job_id=state.get("job_id") or "unknown",
+        document_id=document_id,
+        default_language=state.get("language"),
+    )
+    return {
+        "raw_text": "\n\n".join(chunk.text for chunk in chunks),
+        "chunks": chunks,
+        "status": status,
+    }

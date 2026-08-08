@@ -101,3 +101,53 @@ def test_normalize_missing_evidence_creation(sample_chunk):
     assert len(req["evidence"]) == 1
     assert req["evidence"][0]["quote"] == "No evidence here"
     assert req["evidence"][0]["chunk_id"] == "test_chunk_1"
+
+
+def test_audio_extraction_repairs_safe_punctuation_but_preserves_quote():
+    audio_chunk = SourceChunk(
+        chunk_id="audio-1",
+        text="Asset scanning. During audits.",
+        start_char=0,
+        end_char=30,
+        start_time_sec=0.0,
+        end_time_sec=2.0,
+        language="en",
+    )
+    payload = {
+        "requirements": [{
+            "id": 1,
+            "text": "The system supports asset scanning. During audits.",
+            "candidate_labels": ["FR"],
+            "confidence": 0.9,
+            "evidence": [{"chunk_id": "audio-1", "quote": audio_chunk.text}],
+        }]
+    }
+
+    normalized = normalize_extraction_payload(payload, audio_chunk)["requirements"][0]
+
+    assert normalized["text"].endswith("asset scanning during audits.")
+    assert normalized["evidence"][0]["quote"] == audio_chunk.text
+
+
+def test_audio_extraction_flags_likely_incomplete_acronym_fragment():
+    audio_chunk = SourceChunk(
+        chunk_id="audio-ldap",
+        text="Integrate with LDAP Active.",
+        start_char=0,
+        end_char=27,
+        start_time_sec=0.0,
+        end_time_sec=2.0,
+        language="en",
+    )
+    payload = {"requirements": [{
+        "id": 1,
+        "text": "The system shall integrate with LDAP Active.",
+        "candidate_labels": ["FR"],
+        "confidence": 0.9,
+        "evidence": [{"chunk_id": "audio-ldap", "quote": audio_chunk.text}],
+    }]}
+
+    normalized = normalize_extraction_payload(payload, audio_chunk)["requirements"][0]
+
+    assert normalized["needs_review"]
+    assert "ASR_INCOMPLETE_FRAGMENT" in normalized["review_reason"]

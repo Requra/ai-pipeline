@@ -1,15 +1,13 @@
 import os
-import sys
-import time
 import pytest
-import shutil
 from unittest.mock import patch, MagicMock, AsyncMock
 from dotenv import load_dotenv
 
 load_dotenv()
 
-from app.nodes.transcribe import transcribe_node, _transcribe_groq, _transcribe_deepgram
-from app.schemas.items import SourceChunk
+from app.nodes.transcribe import clean_transcript, transcribe_node, _transcribe_groq, _transcribe_deepgram  # noqa: E402
+from app.services.audio_semantics import best_audio_evidence_clause  # noqa: E402
+from app.schemas.items import SourceChunk  # noqa: E402
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -154,3 +152,121 @@ async def test_deepgram_bilingual_mapping(monkeypatch):
         assert chunks[0].speaker == "0"
         assert chunks[0].language == "en"
         assert chunks[0].asr_confidence == pytest.approx(0.95)
+
+
+@pytest.mark.asyncio
+async def test_audio_transcription_reconstructs_windows_and_preserves_provenance(monkeypatch):
+    """Short ASR utterances become one traceable semantic extraction window."""
+    async def _good_groq(*_args, **_kwargs):
+        utterances = [
+            SourceChunk(
+                chunk_id="provider-1", text="The system must integrate with the existing LDAP active.",
+                start_char=0, end_char=58, start_time_sec=0.0, end_time_sec=2.0,
+                language="en",
+            ),
+            SourceChunk(
+                chunk_id="provider-2", text="Directory for user authentication.",
+                start_char=0, end_char=34, start_time_sec=2.1, end_time_sec=3.0,
+                language="en",
+            ),
+        ]
+        return "ignored provider assembly", utterances
+
+    state = _make_state(raw_bytes=b"fake-audio")
+    state.update({
+        "source_documents": [{"document_id": "audio-source", "filename": "meeting.mp3"}],
+        "language": "en",
+        "audio_format": "mp3",
+        "transcribe_options": {},
+    })
+    monkeypatch.setattr("app.nodes.transcribe.settings.TRANSCRIBE_PROVIDER", "groq")
+    with patch("app.nodes.transcribe._validate_ffmpeg", return_value=None), patch(
+        "app.nodes.transcribe._transcribe_groq", side_effect=_good_groq
+    ):
+        result = await transcribe_node(state)
+
+    assert result["status"] == "completed_via_groq"
+    assert len(result["chunks"]) == 1
+    chunk = result["chunks"][0]
+    assert chunk.document_id == "audio-source"
+    assert chunk.start_time_sec == 0.0
+    assert chunk.end_time_sec == 3.0
+    assert "LDAP active. Directory" in chunk.text
+    assert result["raw_text"] == chunk.text
+
+
+def test_audio_evidence_matches_spoken_numbers_without_changing_the_quote():
+    source = "Standard users shall be allowed to check out up to three assets simultaneously."
+    requirement = "The system shall allow standard users to check out up to 3 assets simultaneously."
+
+    score, quote = best_audio_evidence_clause(requirement, source)
+
+    assert score >= 0.60
+    assert quote == source
+
+
+def test_transcript_cleanup_preserves_short_acronyms_and_numeric_punctuation():
+    transcript = (
+        "The system must use T L S 1.3 and generate a QR code for up to "
+        "$1,000 assets with 99.9% availability."
+    )
+
+    cleaned = clean_transcript(transcript)
+
+    assert "T L S 1.3" in cleaned
+    assert "QR code" in cleaned
+    assert "up to" in cleaned
+    assert "$1,000" in cleaned
+    assert "99.9%" in cleaned
+
+
+@pytest.mark.parametrize(
+    ("requirement", "source"),
+    [
+        (
+            "The dashboard shall load in less than 2.0 seconds under up to 500 active sessions.",
+            "Non Functional Requirements. The dashboard must load in less than 2 seconds under up to 500 active sessions.",
+        ),
+        (
+            "All communication shall use TLS 1.3 protocol.",
+            "All communication must use T L S 1 3 protocol.",
+        ),
+        (
+            "System availability shall be at least 99.9 percent monthly.",
+            "The system availability must be at least 99 9 percent monthly.",
+        ),
+    ],
+)
+def test_audio_evidence_matches_common_asr_numeric_and_protocol_renderings(requirement, source):
+    score, quote = best_audio_evidence_clause(requirement, source)
+
+    assert score >= 0.60
+    assert "Requirements" not in quote
+
+
+def test_audio_evidence_uses_minimum_complete_clause_without_losing_split_terms():
+    approval_requirement = "Standard checkout requests require manager approval above $1,000."
+    approval_source = (
+        "Standard checkout requests require manager approval above $1,000. "
+        "Standard users may check out up to three assets."
+    )
+    _score, approval_quote = best_audio_evidence_clause(approval_requirement, approval_source)
+    assert "three assets" not in approval_quote
+
+    ldap_requirement = "The system shall integrate with LDAP Active Directory for user authentication."
+    ldap_source = "The system shall integrate with LDAP Active. Directory for user authentication."
+    _score, ldap_quote = best_audio_evidence_clause(ldap_requirement, ldap_source)
+    assert "Directory for user authentication" in ldap_quote
+
+
+def test_audio_evidence_never_keeps_an_adjacent_requirement_for_context():
+    requirement = "Users shall request an asset checkout through a self-service dashboard."
+    source = (
+        "Administrators shall register hardware assets. "
+        "Users shall request an asset checkout through a self-service dashboard. "
+        "Standard users may check out up to three assets."
+    )
+
+    _score, quote = best_audio_evidence_clause(requirement, source)
+
+    assert quote == "Users shall request an asset checkout through a self-service dashboard."
