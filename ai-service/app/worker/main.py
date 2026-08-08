@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 from app.config import settings
 from app.startup import run_startup_checks
@@ -23,6 +24,8 @@ logger = logging.getLogger("app.worker.main")
 
 # Compile the graph once per worker process (not per job).
 _pipeline = None
+_REDIS_CONNECT_ATTEMPTS = 10
+_REDIS_CONNECT_DELAY_SECONDS = 1.0
 
 
 def _get_pipeline():
@@ -75,6 +78,25 @@ def run_job_entry_sync(job_id: str) -> str:
     return asyncio.run(run_job_entry(job_id))
 
 
+def _connect_redis_with_retry(factory):
+    """Wait briefly for Redis DNS/service readiness during container startup."""
+    last_error = None
+    for attempt in range(1, _REDIS_CONNECT_ATTEMPTS + 1):
+        try:
+            connection = factory()
+            connection.ping()
+            return connection
+        except Exception as exc:  # pragma: no cover - depends on Docker timing
+            last_error = exc
+            if attempt < _REDIS_CONNECT_ATTEMPTS:
+                logger.warning(
+                    "Redis is not ready (attempt %s/%s: %s); retrying.",
+                    attempt, _REDIS_CONNECT_ATTEMPTS, type(exc).__name__,
+                )
+                time.sleep(_REDIS_CONNECT_DELAY_SECONDS)
+    raise RuntimeError("Redis was not reachable during worker startup") from last_error
+
+
 def main() -> None:
     """Start an RQ worker bound to the configured queue."""
     logging.basicConfig(level=logging.INFO)
@@ -87,7 +109,7 @@ def main() -> None:
 
     from app.queue.redis_queue import get_redis_connection
 
-    conn = get_redis_connection()
+    conn = _connect_redis_with_retry(get_redis_connection)
     queue = Queue(settings.QUEUE_NAME, connection=conn)
     worker = Worker([queue], connection=conn)
     logger.info("AI worker starting — queue=%s", settings.QUEUE_NAME)

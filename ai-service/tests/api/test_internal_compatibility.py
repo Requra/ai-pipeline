@@ -149,6 +149,32 @@ def test_process_multipart_compatibility_audio(client, mocked_pipeline):
     assert docs[0].source_type == "audio"
     assert docs[0].mime_type == "audio/mpeg"
 
+    initial_state = mocked_pipeline.ainvoke.await_args.args[0]
+    assert initial_state["raw_bytes"] == mp3_bytes
+    assert initial_state["raw_inputs"] == []
+    assert initial_state["file_type"] == "audio"
+    assert initial_state["audio_format"] == "mp3"
+
+
+def test_process_single_audio_in_files_uses_single_source_transcription_path(
+    client, mocked_pipeline
+):
+    mp3_bytes = b"ID3\x03\x00\x00\x00\x00\x00\x00"
+    data, files = _multi_upload(
+        [("meeting.mp3", mp3_bytes, "audio/mpeg")],
+        job_id="compat-files-single-audio",
+        document_ids=["audio-source"],
+    )
+
+    response = client.post("/internal/process", headers=AUTH, data=data, files=files)
+
+    assert response.status_code == 202
+    initial_state = mocked_pipeline.ainvoke.await_args.args[0]
+    assert initial_state["raw_bytes"] == mp3_bytes
+    assert initial_state["raw_inputs"] == []
+    assert initial_state["file_type"] == "audio"
+    assert initial_state["audio_format"] == "mp3"
+
 
 def _multi_upload(files, *, job_id="compat-multi", document_ids=None):
     multipart_files = [

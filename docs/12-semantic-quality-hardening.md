@@ -8,7 +8,7 @@
 >
 > **Implementation status:** MVP implemented
 >
-> **Last verified:** 3 August 2026
+> **Last verified:** 8 August 2026
 >
 > **Compatibility guarantee:** no API endpoint, request payload, or final response structure was changed
 
@@ -94,6 +94,70 @@ The main outcomes are:
 27. Numeric authorization limits are distinguished from performance workload
     envelopes, so an explicit business cap can produce an above-limit denial
     test while `up to 500 sessions` cannot invent rejection of session 501.
+28. Audio transcripts are reconstructed into bounded semantic windows before
+    extraction, so adjacent ASR utterances preserve compound terms, conditions,
+    field lists, and source-document identity.
+29. English, Arabic, and mixed audio evidence uses audio-only matching rules;
+    exact explicit Arabic transcript quotes can support English canonical
+    requirements without changing public source-reference fields.
+30. Transcript matching accepts common ASR renderings of dotted numeric and
+    protocol values (for example, `2.0` / `2`, `99.9%` / `99 9 percent`, and
+    `TLS 1.3` / `T L S 1 3`, and `2s` / `2 seconds`) without weakening provenance, quote, numeric, or
+    polarity checks.
+31. Audio-only story sanitation removes recurrent ASR grammar artifacts and
+    rejects invented lifecycle outcomes such as `inactive` or `archived` when
+    they are absent from the timestamped source fact ledger.
+32. Transcript cleanup preserves short domain tokens and numeric punctuation,
+    preventing loss of facts such as `QR`, spoken `T L S`, `$1,000`, and
+    `99.9%` before extraction and grounding.
+33. A weak extracted quote no longer prevents retrieval from recovering the
+    best supporting clause from the same timestamped audio window.
+34. Tolerant classification parsing accepts both wrapped lists and a valid
+    singleton classifier result, so one provider formatting variation does not
+    silently downgrade a requirement to the generic fallback label.
+35. Worker startup retries Redis briefly after a container restart, avoiding a
+    transient DNS/service-readiness failure from terminating the worker.
+36. Audio citations select the shortest clause that still covers the source
+    requirement facts, preventing adjacent requirements from leaking into a
+    `source_ref` while keeping split terms such as `LDAP Active Directory`
+    together.
+37. If all quoted candidates fail, grounding can recover a strongly supported
+    clause only from the same declared audio document; it never crosses into a
+    different recording or bypasses numeric, behavior, provenance, or polarity
+    checks.
+38. Adjacent negative and positive clauses are evaluated independently. For
+    example, “cannot be permanently deleted” and “must be soft-deleted” are
+    complementary parts of one rule, not a false contradiction.
+39. Generated-story validation defects are recorded as internal quality issues
+    with their owning component, so final quality components cannot report a
+    perfect acceptance-criteria score while a real unsupported criterion is
+    still present.
+40. Audio evidence excludes isolated pronoun-led fragments and known
+    ASR-split domain phrases, ensuring the smallest published citation is also
+    a complete statement rather than an adjacent requirement or partial term.
+41. Same-language audio citations must cover every material normalized fact in
+    the published requirement. Source-bound purpose, condition, exception,
+    and scope tails are restored before generation when they were omitted by
+    extraction; otherwise the requirement remains review-only.
+42. A conditional approval gate and an independent quantity limit are treated
+    as complementary unless an explicit exemption or negation makes them
+    incompatible. This prevents false conflicts, false open questions, and
+    misleading score caps.
+43. Acceptance criteria that only say `required details` or otherwise omit the
+    material source fields are replaced with deterministic, source-bound,
+    testable criteria.
+44. Generated-story validation uses the public numeric story index for internal
+    quality issues. A validation finding can no longer crash normal generation
+    and incorrectly force all stories through the degraded fallback path.
+45. A source rule requiring approval does not entail approval success. Criteria
+    such as `the request is approved` are rejected unless the source explicitly
+    grants that outcome.
+46. Canonical audio requirement text receives safe punctuation-only repairs
+    (`serial, number`, `scanning. During audits`, and duplicated technical
+    endpoints) while the public evidence quote remains verbatim.
+47. A likely incomplete acronym/descriptor ASR fragment is retained for review
+    but cannot claim full public confidence without a complete same-source
+    clause.
 
 The branch uses deterministic semantic checks for the MVP. It does not require
 an NLI service or an additional LLM call for evidence adjudication.
@@ -184,6 +248,7 @@ Primary implementation:
 | Clarification questions | Conflict warnings can include questions that help a reviewer resolve ambiguity. |
 | Informational complementary links | `COMPLEMENTARY` relationships do not reduce the score or create a score cap. |
 | Orthogonal numeric constraints | Rules constraining different measurable dimensions of one workflow, such as monetary approval and item quantity, are treated as compatible. |
+| Conditional approval and quantity limits | A value- or condition-based approval gate and a separate maximum quantity can both apply. They are complementary unless an explicit exemption or negation creates a real inconsistency. |
 
 Canonicalization runs before story generation, so duplicate warnings are not
 merely hidden from scoring; the duplicate requirements themselves are resolved.
@@ -218,6 +283,8 @@ Primary implementation:
 | Review-state cleanup | Evidence-only review markers are cleared after authoritative grounding succeeds, while unrelated review reasons are preserved. |
 | Public issue consolidation | Evidence aliases are exposed as one readable defect per requirement and root cause. |
 | Source-constraint completion | A strongly related same-language source clause can restore numeric constraints and explicit prohibitions omitted from extracted wording before story generation. |
+| Audio claim completeness | A same-language audio citation must contain every material normalized fact in the emitted requirement. A partial ASR fragment is review-only rather than a high-confidence public reference. |
+| Purpose and scope completion | The selected source clause restores omitted source-bound purpose, condition, exception, and scope tails before story generation. |
 
 The two public confidence values answer different questions without changing
 the contract:
@@ -351,6 +418,14 @@ The validator:
   denied unauthorized access.
 - Recognizes inflected denial forms, preventing duplicate deterministic
   boundary criteria when the model already supplied an equivalent test.
+- Rejects vague placeholders such as `required details` when the source names
+  concrete required fields, then regenerates a source-bound criterion that
+  includes those fields.
+- Rejects an implied approval-success outcome when the linked source only
+  requires review or approval; approval success must be explicitly sourced.
+- Converts generated-story validation findings to the stable numeric story
+  index used by the response contract, so a diagnostic cannot crash the normal
+  generation path and trigger degraded fallback stories.
 
 Primary implementation:
 
@@ -468,11 +543,71 @@ MVP fallback and preserves document identity.
 
 For recordings:
 
+- A single audio upload always uses the single-source transcription path,
+  whether the multipart field is the legacy `file` field or the repeated
+  `files` field.
+- Raw ASR utterances are reconstructed into bounded semantic windows before
+  extraction. This prevents adjacent fragments such as `LDAP active` and
+  `Directory for authentication` from becoming separate requirements.
+- Windows preserve original ASR text, start/end timestamps, available speaker
+  data, ASR confidence, language, and source document identity internally.
+- Matching normalizes common spoken-number forms such as `three`, `one
+  thousand`, Arabic-Indic digits, dotted values (`99 9 percent`), and spoken
+  acronyms (`T L S 1 3`) only for internal comparison; the public quote remains
+  the original transcript text.
+- Transcript cleanup preserves one- and two-letter words and acronyms rather
+  than treating them as noise. It removes only recognised filler sounds and
+  retains meaningful punctuation for values, versions, currency, and ratios.
+- If extraction provides a malformed or incomplete quote, retrieval may add a
+  distinct, strongly supported clause from that same audio source window. Both
+  candidates still pass the authoritative grounding checks before publication.
+- A citation selector prefers the shortest complete statement, excludes
+  pronoun-led fragments such as `They must ...`, and joins only bounded,
+  evidence-preserving ASR splits such as `LDAP Active. Directory ...`.
+- Same-language audio evidence cannot be public if its selected quote omits a
+  material canonical fact. It is returned for review instead of being given a
+  misleading high confidence score.
+- Canonical audio wording repairs only safe ASR punctuation artifacts. Evidence
+  quotes remain exact transcript text, preserving traceability and the existing
+  response contract.
+- Incomplete acronym-plus-descriptor fragments (for example, an utterance
+  ending in `LDAP Active`) are marked for review and confidence-capped until a
+  complete clause is available from the same recording.
+- A selected source clause restores omitted purpose, condition, exception, and
+  scope facts before story generation. This preserves statements such as
+  `for user authentication` and `during audits` when ASR punctuation split
+  them from their parent requirement.
+- Exact explicit Arabic or mixed-language transcript evidence can support an
+  English canonical requirement when its source quote is present and ASR
+  confidence is sufficient. Retrieved or fallback cross-language snippets
+  remain review-only.
+- Audio extraction instructions keep field lists, purpose clauses, workload
+  conditions, QR codes, LDAP Active Directory, and TLS protocol statements in
+  their correct parent requirement. They split independently testable approval
+  or access rules, but keep a deletion prohibition and its mandated
+  replacement action together.
+- Leading spoken section headings such as `Functional Requirements` are
+  removed only from semantic extraction windows; they are never treated as a
+  business requirement.
+- The final story guard is enabled only for timestamped audio evidence. It
+  corrects safe malformed forms such as `softs delete` and rejects unpublished
+  lifecycle states such as `inactive` or `archived` unless the transcript
+  itself supports them. Document story wording is not changed by this guard.
+- Every audio transcript window carries the uploaded document ID, allowing the
+  unchanged `source_refs` fields to expose the real filename and source ID
+  instead of `unknown_file` and `SRC-001`.
 - Deepgram mixed-language processing can evaluate Arabic Egyptian (`ar-EG`) and
   English (`en-US`) transcripts and select using confidence and keyword signals.
 - Groq metadata is preserved when available.
 - Speaker metadata is provider-dependent.
 - Low-confidence or cross-language evidence is marked for review.
+
+Worker deployment behavior:
+
+- Docker health dependencies remain the first readiness gate.
+- The worker additionally retries its Redis connection for a short bounded
+  period, which makes manual worker restarts resilient to transient service DNS
+  availability without changing job endpoints or payloads.
 
 Primary implementation:
 
@@ -711,11 +846,17 @@ Recommended post-MVP work:
 
 The branch was last verified with:
 
-- `430 passed`
+- `453 passed`
 - `1 skipped`
 - `1 existing Starlette/httpx deprecation warning`
 - Ruff critical checks passed
 - `git diff --check` passed
+
+The latest deterministic extraction, audio, evidence, generation, and semantic
+regression subset also passed with `96 passed`. The host Python
+environment used for that subset does not include PyMuPDF, so the full suite
+must be run in the Docker image (or an environment with the project PDF
+dependencies installed).
 
 Important suites include:
 
@@ -724,7 +865,10 @@ cd ai-service
 python -m pytest tests/services/test_semantic_quality_hardening.py
 python -m pytest tests/services/test_quality_scoring.py
 python -m pytest tests/nodes/test_evidence_grounding.py
+python -m pytest tests/nodes/test_transcribe.py
 python -m pytest tests/nodes/test_retrieve_evidence.py
+python -m pytest tests/nodes/test_classify.py
+python -m pytest tests/nodes/test_dedupe_requirements.py
 python -m pytest tests/nodes/test_quality_gate.py
 python -m pytest tests/nodes/test_generate_quality.py
 python -m pytest tests/nodes/test_docx_traceability.py
@@ -740,6 +884,10 @@ Before promoting a model or prompt version, verify:
       all safety checks.
 - [ ] No review-zone evidence appears in `source_refs`.
 - [ ] Exact quotes exist in the claimed source.
+- [ ] Same-language audio citations cover every material emitted requirement
+      fact; partial ASR fragments are review-only.
+- [ ] Audio citations contain the smallest complete statement and no adjacent
+      unrelated requirement.
 - [ ] DOCX pages remain `null` unless a renderer produced them reliably.
 - [ ] Requirement IDs are unique and stable after canonicalization.
 - [ ] Stories map only to valid requirement IDs.
@@ -747,6 +895,8 @@ Before promoting a model or prompt version, verify:
 - [ ] Acceptance criteria cover all distinct source clauses.
 - [ ] Unsupported numbers, permissions, retention, and negative cases are absent.
 - [ ] `COMPLEMENTARY` and diagnostics do not reduce the score.
+- [ ] Conditional approval gates and independent quantity limits do not create
+      a conflict unless the source explicitly makes them incompatible.
 - [ ] Resolved `EXTRACT_WEAK_EVIDENCE` warnings are absent.
 - [ ] The status matches remaining actionable defects.
 - [ ] Overall score movement can be explained by its five components.
@@ -845,7 +995,7 @@ criteria.
 | Quality scoring | [quality_scoring.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/services/quality_scoring.py) | [test_quality_scoring.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/services/test_quality_scoring.py) |
 | Hierarchical summary | [summarize.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/summarize.py) | [test_summarize.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/nodes/test_summarize.py), [test_summarize_digest.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/nodes/test_summarize_digest.py) |
 | DOCX ingestion and chunking | [ingest.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/ingest.py), [parse_to_chunks.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/parse_to_chunks.py) | [test_docx_traceability.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/nodes/test_docx_traceability.py), [test_ingest.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/nodes/test_ingest.py) |
-| Audio metadata | [transcribe.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/transcribe.py) | [test_transcribe.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/nodes/test_transcribe.py) |
+| Audio semantic windows, matching, and metadata | [audio_semantics.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/services/audio_semantics.py), [transcribe.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/transcribe.py) | [test_transcribe.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/nodes/test_transcribe.py), [test_evidence_grounding.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/nodes/test_evidence_grounding.py) |
 | Final output and status | [format.py](file:///d:/ITI/GP/ai-pipeline/ai-service/app/nodes/format.py) | [test_format.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/nodes/test_format.py), [test_format_exports.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/nodes/test_format_exports.py) |
 | Contract compatibility | API and schema layers | [test_contract_v1.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/test_contract_v1.py), [test_direct_contract.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/test_direct_contract.py) |
 | Full MVP behavior | Complete graph | [test_mvp_quality.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/test_mvp_quality.py), [test_e2e_mocked.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/test_e2e_mocked.py), [test_pipeline.py](file:///d:/ITI/GP/ai-pipeline/ai-service/tests/test_pipeline.py) |
