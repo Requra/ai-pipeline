@@ -1,16 +1,20 @@
 import json
 import logging
 import asyncio
-from typing import List, Dict, Any, Tuple
-from pydantic import BaseModel, Field, ValidationError
+from typing import List, Dict, Any
+from pydantic import BaseModel, Field
 
 from app.schemas.pipeline_state import PipelineState
-from app.schemas.items import UserStory, AcceptanceCriterion, QualityIssue, PipelineWarning
+from app.schemas.items import UserStory, AcceptanceCriterion, QualityIssue
 from app.config import settings
 from app.llm import get_llm
 from app.prompts.loader import load_prompt
 from app.prompts.registry import PromptId
 from app.progress import update_progress
+from app.nodes.generate import (
+    _sanitize_generated_story,
+    rebuild_requirement_coverages,
+)
 
 logger = logging.getLogger("app.nodes.repair_stories")
 
@@ -19,10 +23,16 @@ REPAIRABLE_RULES = {
     "story_description_shape",
     "story_empty_title",
     "generic_acceptance_criteria",
+    "duplicate_acceptance_criterion",
     "insufficient_acceptance_criteria",
     "all_generic_acceptance_criteria",
     "weak_description",
     "missing_title",
+    "story_unsupported_fact",
+    "acceptance_criterion_unsupported_fact",
+    "acceptance_criterion_not_source_aligned",
+    "acceptance_criteria_missing_source_clause",
+    "non_human_story_persona",
 }
 
 
@@ -179,6 +189,7 @@ async def repair_stories_node(state: PipelineState) -> dict:
                     labels=repaired_item.labels or s.labels,
                     priority=s.priority,
                     evidence_reference=s.evidence_reference,
+                    story_points=s.story_points,
                     source_fr_id=s.source_fr_id
                 )
                 updated_stories.append(updated_story)
@@ -186,6 +197,20 @@ async def repair_stories_node(state: PipelineState) -> dict:
             else:
                 # Good stories are kept exactly identical (same object reference)
                 updated_stories.append(s)
+
+        # LLM repair is never authoritative. Reapply the same deterministic
+        # source-bound sanitation used after generation so repair cannot
+        # reintroduce unsupported behavior, duplicate criteria, bad labels, or
+        # technical personas.
+        updated_stories = [
+            _sanitize_generated_story(story, req_map)
+            for story in updated_stories
+        ]
+        final_coverages = rebuild_requirement_coverages(
+            reqs,
+            updated_stories,
+            state.get("requirement_coverages", []) or [],
+        )
 
         # Track resolved issues
         resolved_issues = []
@@ -212,6 +237,7 @@ async def repair_stories_node(state: PipelineState) -> dict:
         
         return {
             "user_stories": updated_stories,
+            "requirement_coverages": final_coverages,
             "quality_issues": remaining_issues,
             "resolved_quality_issues": (state.get("resolved_quality_issues", []) or []) + resolved_issues,
             "repair_attempts": attempts + 1

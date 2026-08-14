@@ -65,7 +65,7 @@ async def mocked_ainvoke(messages, **kwargs):
                     "description": "As a user, I want to process payments securely, so that my transactions are protected.",
                     "acceptance_criteria": [
                         "Given a user with a valid payment, when they submit it, then the transaction is processed and encrypted.",
-                        "Given a user with an invalid payment, when they submit it, then the system rejects it with a clear error message.",
+                        "Given transaction processing, when performance is measured, then it completes in under two seconds.",
                     ],
                     "labels": ["FR"],
                 },
@@ -133,8 +133,14 @@ async def test_process_json_end_to_end_mocked():
         jr = result["job_result"]
         assert isinstance(jr, JobResult)
         assert jr.status == "completed"
-        assert len(jr.requirements) == 2
-        assert len(jr.user_stories) == 2
+        # The atomic performance extraction is contained by the source-level
+        # payment/security/performance proposition and is canonicalized.
+        assert len(jr.requirements) == 1
+        assert len(jr.user_stories) == 1
+        assert any(
+            any(target in criterion.text.lower() for target in ("two seconds", "2 seconds"))
+            for criterion in jr.user_stories[0].acceptance_criteria
+        )
 
 
 @pytest.mark.asyncio
@@ -182,7 +188,8 @@ async def test_pdf_end_to_end_mocked():
         if jr.status == "error":
             print(f"PIPELINE ERROR: {jr.error_message}")
         assert jr.status == "completed"
-        assert len(jr.user_stories) == 2
+        assert len(jr.requirements) == 1
+        assert len(jr.user_stories) == 1
 
 
 def test_api_process_json_returns_job_result(monkeypatch):

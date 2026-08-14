@@ -73,8 +73,50 @@ def test_generic_criteria_lower_ac_quality():
     assert s.acceptance_criteria_quality == 0.0
 
 
+def test_redundant_criteria_cannot_score_as_perfect():
+    story = _story("US1")
+    story.acceptance_criteria = [
+        _ac("Given monthly uptime, when measured, then availability is at least 99.9%.", 1),
+        _ac("Given availability is measured monthly, when calculated, then uptime meets 99.9%.", 2),
+    ]
+    req = ClassifiedRequirement(
+        id=1,
+        text="Monthly availability shall be at least 99.9%.",
+        candidate_labels=["NFR"], labels=["NFR"], confidence=0.9,
+        evidence=[EvidenceSpan(chunk_id="c", quote="Monthly availability shall be at least 99.9%.", support_score=1.0)],
+        quote_support_score=1.0,
+    )
+
+    score = compute_quality_scores([req], [story], [])
+
+    assert score.acceptance_criteria_quality < 1.0
+
+
+def test_source_aware_duplicate_criteria_lower_final_score():
+    req = ClassifiedRequirement(
+        id=1,
+        text="The system shall authenticate users through the existing LDAP directory.",
+        candidate_labels=["FR"], labels=["FR"], confidence=1.0,
+        evidence=[EvidenceSpan(
+            chunk_id="ldap",
+            quote="The system shall authenticate users through the existing LDAP directory.",
+            support_score=1.0,
+        )],
+        quote_support_score=1.0,
+    )
+    story = _story("US1")
+    story.acceptance_criteria = [
+        _ac("Given valid credentials, when a user logs in, then LDAP authentication grants access.", 1),
+        _ac("Given LDAP credentials, when authentication occurs, then the user successfully accesses the system.", 2),
+    ]
+
+    score = compute_quality_scores([req], [story], [])
+
+    assert score.acceptance_criteria_quality < 1.0
+
+
 def test_insufficient_criteria_lower_completeness():
-    stories = [_story("US1", acs=1)]
+    stories = [_story("US1", acs=0)]
     s = compute_quality_scores([_req(1)], stories, [])
     assert s.story_completeness == 0.0
 
@@ -91,3 +133,83 @@ def test_high_severity_issue_counted():
     issues = [QualityIssue(item_id=1, item_type="requirement", severity="high", rule_violated="x", details="d")]
     s = compute_quality_scores([_req(1)], [], issues)
     assert s.high_severity_issue_count == 1
+
+
+def test_component_owned_duplicate_issues_are_not_double_penalized():
+    from app.schemas.items import QualityIssue
+
+    reqs = [
+        _req(1),
+        ClassifiedRequirement(
+            id=2,
+            text="req 1",
+            candidate_labels=["FR"],
+            labels=["FR"],
+            confidence=0.9,
+            classification_confidence=0.9,
+            evidence=[EvidenceSpan(chunk_id="c2", quote="req 1")],
+            quote_support_score=1.0,
+        ),
+    ]
+    baseline = compute_quality_scores(reqs, [], [])
+    issues = [
+        QualityIssue(
+            item_id=2,
+            item_type="requirement",
+            severity="high",
+            rule_violated="duplicate_requirement",
+            details="duplicate",
+        ),
+        QualityIssue(
+            item_id=1,
+            item_type="requirement",
+            severity="medium",
+            rule_violated="semantic_conflict_duplicate",
+            details="same duplicate pair",
+        ),
+    ]
+
+    scored = compute_quality_scores(reqs, [], issues)
+
+    assert scored.duplicate_risk == baseline.duplicate_risk
+    assert scored.overall_score == baseline.overall_score
+
+
+def test_story_unsupported_fact_is_owned_by_traceability():
+    from app.schemas.items import QualityIssue
+
+    req = _req(1, quote_support=1.0)
+    story = _story("US1")
+    issue = QualityIssue(
+        item_id=1,
+        item_type="story",
+        severity="high",
+        rule_violated="story_unsupported_fact",
+        details="unsupported behavior",
+    )
+
+    scored = compute_quality_scores([req], [story], [issue])
+
+    assert scored.overall_score > 0.59
+
+
+def test_invented_non_numeric_behavior_lowers_acceptance_quality():
+    req = ClassifiedRequirement(
+        id=1,
+        text="The owner shall invite named collaborators to a project.",
+        candidate_labels=["FR"], labels=["FR"], confidence=0.9,
+        classification_confidence=0.9,
+        evidence=[EvidenceSpan(chunk_id="c", quote="invite named collaborators")],
+        quote_support_score=1.0,
+    )
+    story = UserStory(
+        id="US1", title="Invite collaborators",
+        description="As an owner, I want to invite collaborators, so that they can join the project.",
+        acceptance_criteria=[
+            _ac("Given an invalid email, when an invitation is submitted, then an error is displayed.", 1),
+            _ac("Given an owner, when they invite named collaborators, then the collaborators are invited.", 2),
+        ],
+        source_requirement_ids=[1], labels=["FR"], story_points=3,
+    )
+    scores = compute_quality_scores([req], [story], [])
+    assert scores.acceptance_criteria_quality < 1.0

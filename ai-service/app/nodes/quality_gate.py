@@ -1,4 +1,4 @@
-from typing import List, Dict
+from typing import List
 from app.schemas.pipeline_state import PipelineState
 from app.schemas.items import (
     ClassifiedRequirement,
@@ -8,7 +8,27 @@ from app.schemas.items import (
 )
 from app.progress import update_progress
 from app.services.quality_scoring import compute_quality_scores
-from app.validators.story_validator import find_duplicate_story_ids, is_generic_ac
+from app.validators.story_validator import (
+    find_duplicate_acceptance_criterion_ids,
+    find_duplicate_story_ids,
+    is_generic_ac,
+)
+from app.services.semantic_quality import (
+    clause_coverage,
+    clear_story_mapping_mismatch,
+    has_polarity_conflict,
+    infer_requirement_priority,
+    introduces_unsupported_approval_outcome,
+    is_substantive,
+    meaningful_tokens,
+    MIN_STORY_ALIGNMENT,
+    proposition_support,
+    source_fact_texts,
+    story_alignment,
+    unsupported_fact_terms,
+    unsupported_numeric_claims,
+    unsupported_review_terms,
+)
 
 # Below this classification confidence a requirement is flagged for review.
 LOW_CONFIDENCE_THRESHOLD = 0.4
@@ -81,6 +101,7 @@ async def quality_gate_node(state: PipelineState) -> dict:
                     details="Requirement has no labels assigned (none predicted, none extracted)"
                 ))
                 r.needs_review = True
+
             elif candidate_labels & special_non_story_labels:
                 # This should have been fixed by classify_node, so it's a bug if it reaches here
                 new_issues.append(QualityIssue(
@@ -90,6 +111,19 @@ async def quality_gate_node(state: PipelineState) -> dict:
                     rule_violated="requirement_missing_labels",
                     details=f"Requirement missing final labels despite special candidates: {candidate_labels & special_non_story_labels}"
                 ))
+
+        expected_priority = infer_requirement_priority(getattr(r, "text", "") or "", getattr(r, "priority", None))
+        if getattr(r, "priority", "Medium") != expected_priority:
+            new_issues.append(QualityIssue(
+                item_id=r.id,
+                item_type="requirement",
+                severity="medium",
+                rule_violated="priority_not_source_supported",
+                details=(
+                    f"Requirement {r.id} priority {getattr(r, 'priority', None)} is not explicitly "
+                    f"supported by its source language; expected {expected_priority}."
+                ),
+            ))
 
         conf = getattr(r, "classification_confidence", None)
         if conf is None:
@@ -117,11 +151,36 @@ async def quality_gate_node(state: PipelineState) -> dict:
                 ))
                 r.needs_review = True
 
+    for index, requirement in enumerate(reqs):
+        current_tokens = meaningful_tokens(getattr(requirement, "text", "") or "")
+        for previous in reqs[:index]:
+            previous_tokens = meaningful_tokens(getattr(previous, "text", "") or "")
+            if min(len(current_tokens), len(previous_tokens)) < 4:
+                continue
+            intersection = current_tokens & previous_tokens
+            union = current_tokens | previous_tokens
+            jaccard = len(intersection) / len(union) if union else 0.0
+            containment = len(intersection) / min(len(current_tokens), len(previous_tokens))
+            if jaccard >= 0.90 or containment >= 0.82:
+                new_issues.append(QualityIssue(
+                    item_id=requirement.id,
+                    item_type="requirement",
+                    severity="high",
+                    rule_violated="duplicate_requirement",
+                    details=(
+                        f"Requirement {requirement.id} duplicates or overlaps canonical requirement "
+                        f"{previous.id}; canonicalization must retain only one representation."
+                    ),
+                ))
+                break
+
+    story_item_ids = {id(story): index for index, story in enumerate(stories, start=1)}
+
     # Validate stories
-    for s in stories:
+    for story_index, s in enumerate(stories, start=1):
         if not getattr(s, "title", "").strip():
             new_issues.append(QualityIssue(
-                item_id=0,
+                item_id=story_index,
                 item_type="story",
                 severity="medium",
                 rule_violated="story_empty_title",
@@ -139,18 +198,31 @@ async def quality_gate_node(state: PipelineState) -> dict:
 
         if not is_agile or contains_none:
             new_issues.append(QualityIssue(
-                item_id=0,
+                item_id=story_index,
                 item_type="story",
                 severity="low",
                 rule_violated="story_description_shape",
                 details=f"Story {s.id} description does not follow a valid Agile pattern ('As a/an/the ..., I want/must ..., so that ...')"
             ))
+        else:
+            role = agile_pattern.match(desc.strip()).group(0).split(",", 1)[0].lower()
+            if "system operator" not in role and any(
+                re.search(rf"\b{term}\b", role)
+                for term in ("system", "service", "application", "portal", "workspace", "database", "api")
+            ):
+                new_issues.append(QualityIssue(
+                    item_id=story_index,
+                    item_type="story",
+                    severity="medium",
+                    rule_violated="non_human_story_persona",
+                    details=f"Story {s.id} uses a technical component as its persona.",
+                ))
 
 
         ac = getattr(s, "acceptance_criteria", []) or []
         if not ac:
             new_issues.append(QualityIssue(
-                item_id=0,
+                item_id=story_index,
                 item_type="story",
                 severity="medium",
                 rule_violated="story_missing_acceptance",
@@ -160,7 +232,7 @@ async def quality_gate_node(state: PipelineState) -> dict:
             for i, criterion in enumerate(ac):
                 if not getattr(criterion, "id", "").strip():
                     new_issues.append(QualityIssue(
-                        item_id=0,
+                        item_id=story_index,
                         item_type="story",
                         severity="low",
                         rule_violated="acceptance_criterion_missing_id",
@@ -170,7 +242,7 @@ async def quality_gate_node(state: PipelineState) -> dict:
         src_ids = getattr(s, "source_requirement_ids", []) or []
         if not src_ids:
             new_issues.append(QualityIssue(
-                item_id=0,
+                item_id=story_index,
                 item_type="story",
                 severity="high",
                 rule_violated="story_missing_source_ids",
@@ -184,12 +256,51 @@ async def quality_gate_node(state: PipelineState) -> dict:
                 story_ev = getattr(s, "evidence_reference", []) or []
                 if req_ev and not story_ev:
                     new_issues.append(QualityIssue(
-                        item_id=0,
+                        item_id=story_index,
                         item_type="story",
                         severity="medium",
                         rule_violated="story_missing_evidence_reference",
                         details=f"Story {s.id} is missing evidence_reference despite source requirement {source_req.id} having evidence"
                     ))
+
+        linked_requirements = [req_map[req_id] for req_id in src_ids if req_id in req_map]
+        linked_facts = source_fact_texts(linked_requirements)
+        story_claim_text = f"{getattr(s, 'title', '')} {desc}".strip()
+        unsupported_story_terms = unsupported_fact_terms(story_claim_text, linked_facts)
+        polarity_conflict = has_polarity_conflict(story_claim_text, linked_facts)
+        if unsupported_story_terms or polarity_conflict:
+            new_issues.append(QualityIssue(
+                item_id=story_index,
+                item_type="story",
+                severity="high",
+                rule_violated="story_unsupported_fact",
+                details=(
+                    f"Story {s.id} introduces unsupported behavior: "
+                    f"{', '.join(sorted(unsupported_story_terms)) or 'polarity reversal'}."
+                ),
+            ))
+        else:
+            review_terms = unsupported_review_terms(story_claim_text, linked_facts)
+            if review_terms:
+                new_issues.append(QualityIssue(
+                    item_id=story_index,
+                    item_type="story",
+                    severity="medium",
+                    rule_violated="story_behavior_needs_review",
+                    details=(
+                        f"Story {s.id} may introduce behavior that requires review: "
+                        f"{', '.join(sorted(review_terms))}."
+                    ),
+                ))
+
+        if getattr(s, "story_points", 0) not in {1, 2, 3, 5, 8}:
+            new_issues.append(QualityIssue(
+                item_id=story_index,
+                item_type="story",
+                severity="medium",
+                rule_violated="invalid_story_points",
+                details=f"Story {s.id} has a non-Fibonacci story point estimate.",
+            ))
 
     # Validate coverage mapping
     for c in coverages:
@@ -254,27 +365,156 @@ async def quality_gate_node(state: PipelineState) -> dict:
                 details=f"Requirement {r.id} classified with low confidence ({conf:.2f}); review recommended.",
             ))
 
-    # Stories whose acceptance criteria are all generic / boilerplate.
+    # Generic or redundant criteria are not counted as fully testable merely
+    # because a story has two strings in Given/When/Then form.
     for s in stories:
+        story_index = story_item_ids[id(s)]
         acs = getattr(s, "acceptance_criteria", []) or []
-        if acs and all(is_generic_ac(getattr(ac, "text", "")) for ac in acs):
+        generic_count = sum(
+            1 for ac in acs if is_generic_ac(getattr(ac, "text", ""))
+        )
+        if generic_count:
             new_issues.append(QualityIssue(
-                item_id=0,
+                item_id=story_index,
                 item_type="story",
                 severity="medium",
                 rule_violated="generic_acceptance_criteria",
-                details=f"Story {s.id} has only generic acceptance criteria; they should be specific and testable.",
+                details=(
+                    f"Story {s.id} has {generic_count} generic acceptance "
+                    "criterion/criteria; replace boilerplate with observable outcomes."
+                ),
+            ))
+        linked = [
+            req_map[req_id]
+            for req_id in (getattr(s, "source_requirement_ids", []) or [])
+            if req_id in req_map
+        ]
+        duplicate_ac_ids = find_duplicate_acceptance_criterion_ids(s, linked)
+        if duplicate_ac_ids:
+            new_issues.append(QualityIssue(
+                item_id=story_index,
+                item_type="story",
+                severity="medium",
+                rule_violated="duplicate_acceptance_criterion",
+                details=(
+                    f"Story {s.id} has redundant acceptance criteria: "
+                    f"{', '.join(duplicate_ac_ids)}."
+                ),
             ))
 
     # Duplicate stories.
     for dup_id in find_duplicate_story_ids(stories):
+        duplicate_index = next(
+            (story_item_ids[id(story)] for story in stories if story.id == dup_id),
+            0,
+        )
         new_issues.append(QualityIssue(
-            item_id=0,
+            item_id=duplicate_index,
             item_type="story",
             severity="medium",
             rule_violated="duplicate_story",
             details=f"Story {dup_id} duplicates another generated story.",
         ))
+
+    # Semantic story-to-requirement mapping.  An ID alone is not traceability.
+    for s in stories:
+        story_index = story_item_ids[id(s)]
+        linked = [req_map[rid] for rid in (getattr(s, "source_requirement_ids", []) or []) if rid in req_map]
+        req_texts = [(getattr(req, "text", "") or "") for req in linked]
+        criteria_text = " ".join(
+            getattr(criterion, "text", "") or ""
+            for criterion in (getattr(s, "acceptance_criteria", []) or [])
+        )
+        story_text = (
+            f"{getattr(s, 'title', '')} {getattr(s, 'description', '')} "
+            f"{criteria_text}"
+        )
+        if linked and any(is_substantive(text) for text in req_texts):
+            alignment = story_alignment(req_texts, story_text)
+            if alignment < MIN_STORY_ALIGNMENT:
+                clear_mismatch = clear_story_mapping_mismatch(
+                    req_texts,
+                    story_text,
+                    alignment,
+                )
+                new_issues.append(QualityIssue(
+                    item_id=story_index,
+                    item_type="story",
+                    severity="high" if clear_mismatch else "medium",
+                    rule_violated="incorrect_story_requirement_mapping",
+                    details=(
+                        f"Story {s.id} does not semantically match its linked requirement(s) "
+                        f"{getattr(s, 'source_requirement_ids', [])} "
+                        f"(alignment={alignment:.2f}, "
+                        f"decision={'clear mismatch' if clear_mismatch else 'review'})."
+                    ),
+                ))
+
+        source_facts = list(req_texts)
+        for req in linked:
+            source_facts.extend(
+                (getattr(ev, "quote", "") or "")
+                for ev in (getattr(req, "evidence", []) or [])
+            )
+        substantive_facts = [fact for fact in source_facts if is_substantive(fact)]
+        for criterion in (getattr(s, "acceptance_criteria", []) or []):
+            criterion_text = getattr(criterion, "text", "") or ""
+            unsupported = unsupported_numeric_claims(criterion_text, source_facts)
+            if unsupported:
+                new_issues.append(QualityIssue(
+                    item_id=story_index,
+                    item_type="story",
+                    severity="high",
+                    rule_violated="acceptance_criterion_unsupported_fact",
+                    details=(
+                        f"Story {s.id} acceptance criterion introduces unsupported numeric claim(s): "
+                        f"{', '.join(sorted(unsupported))}."
+                    ),
+                ))
+                continue
+            unsupported_terms = unsupported_fact_terms(criterion_text, source_facts)
+            review_terms = unsupported_review_terms(criterion_text, source_facts)
+            polarity_conflict = has_polarity_conflict(criterion_text, source_facts)
+            approval_outcome = introduces_unsupported_approval_outcome(
+                criterion_text, source_facts
+            )
+            if unsupported_terms or review_terms or polarity_conflict or approval_outcome:
+                new_issues.append(QualityIssue(
+                    item_id=story_index,
+                    item_type="story",
+                    severity="high",
+                    rule_violated="acceptance_criterion_unsupported_fact",
+                    details=(
+                        f"Story {s.id} acceptance criterion introduces unsupported behavior: "
+                        f"{', '.join(sorted(unsupported_terms | review_terms)) or 'polarity reversal'}"
+                        f"{' (approval success was not source-supported)' if approval_outcome else ''}."
+                    ),
+                ))
+                continue
+            if substantive_facts and max(
+                (proposition_support(fact, criterion_text) for fact in substantive_facts),
+                default=0.0,
+            ) < 0.15:
+                new_issues.append(QualityIssue(
+                    item_id=story_index,
+                    item_type="story",
+                    severity="medium",
+                    rule_violated="acceptance_criterion_not_source_aligned",
+                    details=f"Story {s.id} has an acceptance criterion not supported by its linked source facts.",
+                ))
+
+        coverage_score = clause_coverage(
+            linked,
+            [getattr(criterion, "text", "") or "" for criterion in (getattr(s, "acceptance_criteria", []) or [])],
+        )
+        if linked and coverage_score < 1.0:
+            new_issues.append(QualityIssue(
+                item_id=story_index,
+                item_type="story",
+                severity="medium",
+                rule_violated="acceptance_criteria_missing_source_clause",
+                details=f"Story {s.id} acceptance criteria cover only {coverage_score:.0%} of linked source clauses.",
+            ))
 
     # --- Combine, dedupe, score ----------------------------------------------
     all_issues = _dedupe_issues(existing_q + new_issues)

@@ -19,10 +19,19 @@ if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
 import evaluate_pipeline as ev  # noqa: E402
+from app.config import (  # noqa: E402
+    MVP_ENABLE_CONFLICT_DETECTION_DEFAULT,
+    MVP_ENABLE_QUALITY_REPAIR_DEFAULT,
+)
 
 
 def _read(name: str) -> str:
     return (ev.FIXTURES_DIR / name).read_text(encoding="utf-8")
+
+
+def test_mvp_conflict_detection_and_quality_repair_default_to_enabled():
+    assert MVP_ENABLE_CONFLICT_DETECTION_DEFAULT == "true"
+    assert MVP_ENABLE_QUALITY_REPAIR_DEFAULT == "true"
 
 
 @pytest.mark.asyncio
@@ -42,7 +51,7 @@ async def test_relevant_fixture_meets_mvp_thresholds(name):
     assert metrics["story_count"] > 0
     assert metrics["traceability_coverage"] == 1.0
     assert metrics["source_refs_coverage"] >= 0.9
-    assert metrics["all_stories_have_2_acs"] is True
+    assert metrics["all_stories_have_acceptance_criteria"] is True
     assert metrics["exports_available"] is True
 
 

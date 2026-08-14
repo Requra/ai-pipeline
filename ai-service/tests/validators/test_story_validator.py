@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from app.schemas.items import AcceptanceCriterion, EvidenceSpan, ExtractedRequirement, UserStory
 from app.validators.story_validator import (
+    find_duplicate_acceptance_criterion_ids,
     find_duplicate_story_ids,
     is_generic_ac,
     validate_story,
@@ -23,6 +24,7 @@ def _story(**over):
                              _ac("Given D, when E, then F is rejected with an error.", 2)],
         source_requirement_ids=[1],
         labels=["FR"],
+        story_points=3,
         evidence_reference=[EvidenceSpan(chunk_id="c1", quote="q")],
     )
     base.update(over)
@@ -34,6 +36,9 @@ def test_is_generic_ac():
     assert is_generic_ac("works as expected")
     assert is_generic_ac("")
     assert is_generic_ac("ok")  # too short
+    assert is_generic_ac(
+        "Given the documented preconditions apply, when the capability is exercised, then the outcome conforms to the requirement."
+    )
     assert not is_generic_ac("Given a valid order, when submitted, then it is accepted.")
 
 
@@ -44,7 +49,7 @@ def test_validate_clean_story_has_no_issues():
 
 
 def test_validate_flags_insufficient_acceptance_criteria():
-    issues = validate_story(_story(acceptance_criteria=[_ac("Given A, when B, then C is done.")]), {})
+    issues = validate_story(_story(acceptance_criteria=[]), {})
     assert "insufficient_acceptance_criteria" in issues
 
 
@@ -72,3 +77,34 @@ def test_find_duplicate_story_ids():
     c = _story(id="US3", title="Different", description="As a user, I want Z, so that W.")
     dupes = find_duplicate_story_ids([a, b, c])
     assert dupes == ["US2"]
+
+
+def test_duplicate_acceptance_criteria_detect_semantic_restatement():
+    story = _story(acceptance_criteria=[
+        _ac(
+            "Given a monthly period excluding maintenance, when uptime is measured, then availability is at least 99.9%.",
+            1,
+        ),
+        _ac(
+            "Given scheduled maintenance is excluded, when monthly availability is calculated, then uptime meets 99.9%.",
+            2,
+        ),
+    ])
+
+    assert find_duplicate_acceptance_criterion_ids(story) == ["s_ac_2"]
+    assert "duplicate_acceptance_criteria" in validate_story(story, {})
+
+
+def test_distinct_boundary_acceptance_criteria_are_not_duplicates():
+    story = _story(acceptance_criteria=[
+        _ac(
+            "Given three assets are checked out, when a fourth checkout is requested, then the request is denied.",
+            1,
+        ),
+        _ac(
+            "Given two assets are checked out, when a third checkout is requested, then the request is allowed.",
+            2,
+        ),
+    ])
+
+    assert find_duplicate_acceptance_criterion_ids(story) == []

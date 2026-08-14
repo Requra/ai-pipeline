@@ -11,7 +11,7 @@ For each pair, classify their relationship into exactly one of the following typ
 - Priority Conflict: Expressing significantly conflicting priorities for the same feature.
 - Complementary: They represent different facets of the same feature and work together.
 
-You must return a JSON array of conflict classification objects. Do not return any other text, explanation, or code fences outside the JSON.
+You must return a JSON array of conflict classification objects. When the classification is not "INDEPENDENT" or "DUPLICATE", you MUST also provide a "resolution_options" array with 2-3 short, actionable options to resolve the conflict. Do not return any other text, explanation, or code fences outside the JSON.
 
 Expected Output Format:
 [
@@ -21,6 +21,10 @@ Expected Output Format:
     "classification": "CONTRADICTION",
     "confidence": 0.95,
     "reason": "REQ-001 permits login using email/password, whereas REQ-002 explicitly limits login to Google SSO only.",
-    "clarification_question": "Should the system support email/password authentication alongside Google SSO, or should Google SSO be the only method?"
+    "clarification_question": "Should the system support email/password authentication alongside Google SSO, or should Google SSO be the only method?",
+    "resolution_options": [
+      "Support both email/password login and Google SSO login option.",
+      "Strictly enforce Google SSO only and deprecate email/password login."
+    ]
   }
 ]

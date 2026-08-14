@@ -26,6 +26,9 @@ from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 
+MVP_ENABLE_CONFLICT_DETECTION_DEFAULT = "true"
+MVP_ENABLE_QUALITY_REPAIR_DEFAULT = "true"
+
 # Load environment variables from .env if present
 load_dotenv()
 
@@ -40,6 +43,16 @@ def _env_int(name: str, default: int) -> int:
         return default
     try:
         return int(raw.strip())
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return float(raw.strip())
     except ValueError:
         return default
 
@@ -151,11 +164,23 @@ class Settings:
     MAX_CONCURRENT_JOBS: int = _env_int("MAX_CONCURRENT_JOBS", 4)
     # Per provider (LLM/transcription) network call timeout.
     PROVIDER_TIMEOUT_SECONDS: int = _env_int("PROVIDER_TIMEOUT_SECONDS", 120)
+    # Shared per-process guard for reasoning-model calls. This limits request
+    # bursts from parallel extraction chunks and concurrent jobs without
+    # changing pipeline content or the public response contract.
+    LLM_MAX_CONCURRENCY: int = _env_int("LLM_MAX_CONCURRENCY", 2)
+    # Number of retries after the initial attempt (2 = at most 3 attempts).
+    LLM_MAX_RETRIES: int = _env_int("LLM_MAX_RETRIES", 2)
+    LLM_RETRY_BASE_SECONDS: float = _env_float("LLM_RETRY_BASE_SECONDS", 1.0)
+    LLM_RETRY_MAX_SECONDS: float = _env_float("LLM_RETRY_MAX_SECONDS", 30.0)
+    LLM_QUOTA_COOLDOWN_SECONDS: float = _env_float("LLM_QUOTA_COOLDOWN_SECONDS", 300.0)
 
     # ------------------------------------------------------------------
     # Conflict Detection
     # ------------------------------------------------------------------
-    ENABLE_CONFLICT_DETECTION: bool = _env_flag("ENABLE_CONFLICT_DETECTION", "false")
+    ENABLE_CONFLICT_DETECTION: bool = _env_flag(
+        "ENABLE_CONFLICT_DETECTION",
+        MVP_ENABLE_CONFLICT_DETECTION_DEFAULT,
+    )
     CONFLICT_MIN_CONFIDENCE: float = float(os.getenv("CONFLICT_MIN_CONFIDENCE", "0.80"))
     CONFLICT_SIMILARITY_THRESHOLD: float = float(os.getenv("CONFLICT_SIMILARITY_THRESHOLD", "0.55"))
     CONFLICT_TOP_K: int = _env_int("CONFLICT_TOP_K", 5)
@@ -165,7 +190,10 @@ class Settings:
     # ------------------------------------------------------------------
     # Quality Repair
     # ------------------------------------------------------------------
-    ENABLE_QUALITY_REPAIR: bool = _env_flag("ENABLE_QUALITY_REPAIR", "false")
+    ENABLE_QUALITY_REPAIR: bool = _env_flag(
+        "ENABLE_QUALITY_REPAIR",
+        MVP_ENABLE_QUALITY_REPAIR_DEFAULT,
+    )
     MAX_REPAIR_ATTEMPTS: int = _env_int("MAX_REPAIR_ATTEMPTS", 1)
 
     # ------------------------------------------------------------------

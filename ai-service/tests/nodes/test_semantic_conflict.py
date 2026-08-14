@@ -134,3 +134,73 @@ async def test_conflict_detection_jaccard_fallback():
         
         assert any(w.code == "SEMANTIC_CONSTRAINT_CONFLICT" for w in warnings)
         assert any("semantic_conflict_constraint_conflict" in issue.rule_violated for issue in issues)
+
+
+@pytest.mark.asyncio
+async def test_complementary_relationship_is_informational_not_a_defect():
+    mock_llm = MagicMock()
+    mock_llm.ainvoke = AsyncMock(return_value=MagicMock(content="""
+    [
+      {
+        "requirement_a": "REQ-001",
+        "requirement_b": "REQ-002",
+        "classification": "COMPLEMENTARY",
+        "confidence": 0.95,
+        "reason": "The second rule constrains the first workflow.",
+        "clarification_question": "None",
+        "resolution_options": ["Revise both requirements."]
+      }
+    ]
+    """))
+    reqs = [
+        _req(1, "The system dashboard page shall load in less than one second."),
+        _req(2, "The main system page dashboard shall load under five seconds."),
+    ]
+    state = _state(reqs)
+
+    with patch.object(settings, "ENABLE_CONFLICT_DETECTION", True), \
+         patch.object(settings, "ENABLE_EMBEDDINGS", False), \
+         patch("app.nodes.dedupe_requirements.get_llm", return_value=mock_llm):
+        out = await dedupe_requirements_node(state)
+
+    warning = next(w for w in out["warnings"] if w.code == "SEMANTIC_COMPLEMENTARY")
+    assert warning.message.startswith("Related requirements")
+    assert "Conflict detected" not in warning.message
+    assert "Proposed Resolutions" not in warning.message
+    assert not out.get("quality_issues")
+
+
+@pytest.mark.asyncio
+async def test_orthogonal_numeric_constraints_are_not_published_as_conflict():
+    mock_llm = MagicMock()
+    mock_llm.ainvoke = AsyncMock(return_value=MagicMock(content="""
+    [
+      {
+        "requirement_a": "REQ-001",
+        "requirement_b": "REQ-002",
+        "classification": "CONSTRAINT_CONFLICT",
+        "confidence": 0.95,
+        "reason": "Both constrain checkout.",
+        "clarification_question": "Which constraint wins?",
+        "resolution_options": ["Change one requirement."]
+      }
+    ]
+    """))
+    reqs = [
+        _req(1, "Checkout requests require manager approval when asset value exceeds $1,000."),
+        _req(2, "Standard users may check out up to 3 assets simultaneously."),
+    ]
+    state = _state(reqs)
+
+    with patch.object(settings, "ENABLE_CONFLICT_DETECTION", True), \
+         patch.object(settings, "ENABLE_EMBEDDINGS", False), \
+         patch(
+             "app.nodes.dedupe_requirements._find_jaccard_candidates",
+             return_value=[(reqs[0], reqs[1], 0.5)],
+         ), \
+         patch("app.nodes.dedupe_requirements.get_llm", return_value=mock_llm):
+        out = await dedupe_requirements_node(state)
+
+    assert any(w.code == "SEMANTIC_COMPLEMENTARY" for w in out["warnings"])
+    assert not any(w.code == "SEMANTIC_CONSTRAINT_CONFLICT" for w in out["warnings"])
+    assert not out.get("quality_issues")

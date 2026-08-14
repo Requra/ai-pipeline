@@ -29,6 +29,18 @@ from app.rag.scoring import tokenize
 from app.rag.source_index import get_source_index
 from app.schemas.items import EvidenceSpan, ExtractedRequirement, PipelineWarning, SourceChunk
 from app.schemas.pipeline_state import PipelineState
+from app.services.semantic_quality import (
+    best_evidence_clause,
+    unsupported_numeric_claims,
+    unsupported_fact_terms,
+    has_polarity_conflict,
+    check_different_languages,
+)
+from app.services.audio_semantics import (
+    best_audio_evidence_clause,
+    is_audio_chunk,
+    normalize_audio_matching_text,
+)
 
 logger = logging.getLogger("app.nodes.retrieve_evidence")
 
@@ -36,6 +48,8 @@ RETRIEVE_TOP_K = 3
 MAX_EVIDENCE_PER_REQ = 4
 SNIPPET_MAX_CHARS = 240
 WEAK_CONFIDENCE_FACTOR = 0.85
+MIN_RETRIEVAL_SUPPORT = 0.35
+MIN_ASR_CONFIDENCE = 0.65
 
 
 def _build_query(req: ExtractedRequirement) -> str:
@@ -56,13 +70,101 @@ def _best_snippet(text: str, query_tokens: set, max_len: int = SNIPPET_MAX_CHARS
     return best[:max_len].strip()
 
 
-def _quote_support_score(req: ExtractedRequirement, chunk_texts: List[str]) -> float:
-    """Fraction of the requirement's evidence quotes found verbatim in source."""
-    quotes = [e.quote for e in req.evidence if (e.quote or "").strip()]
-    if not quotes:
-        return 0.0
-    found = sum(1 for q in quotes if any(q in ct for ct in chunk_texts))
-    return round(found / len(quotes), 4)
+def _document_language(source_docs: List[dict] | None, document_id: str | None) -> str | None:
+    if not source_docs or not document_id:
+        return None
+    for doc in source_docs:
+        if (doc.get("document_id") or doc.get("source_id")) == document_id:
+            return doc.get("language")
+    return None
+
+
+def _quote_support_score(
+    req: ExtractedRequirement,
+    chunks_by_id: dict[str, SourceChunk],
+    source_docs: List[dict] | None = None,
+) -> float:
+    """Score the strongest quote grounded in its declared chunk and document."""
+    scores: List[float] = []
+    for evidence in req.evidence:
+        quote = (evidence.quote or "").strip()
+        chunk = chunks_by_id.get(evidence.chunk_id)
+        if not quote or chunk is None or quote not in chunk.text:
+            evidence.support_score = 0.0
+            continue
+        if evidence.document_id and evidence.document_id != chunk.document_id:
+            evidence.support_score = 0.0
+            continue
+
+        doc_id = evidence.document_id or chunk.document_id
+        evidence_lang = getattr(chunk, "language", None) or _document_language(
+            source_docs,
+            doc_id,
+        )
+        diff_lang = check_different_languages(req.text, quote, None, evidence_lang)
+        asr_confidence = getattr(chunk, "asr_confidence", None)
+        low_asr_confidence = (
+            asr_confidence is not None
+            and float(asr_confidence) < MIN_ASR_CONFIDENCE
+        )
+
+        if is_audio_chunk(chunk):
+            score, supporting_clause = best_audio_evidence_clause(req.text, chunk.text)
+        else:
+            score, supporting_clause = best_evidence_clause(req.text, chunk.text)
+        if supporting_clause:
+            evidence.quote = supporting_clause
+        if evidence.origin == "fallback":
+            # A source snippet can still strongly support the claim even when
+            # verbatim alignment failed because punctuation/layout changed.
+            # It is capped so it can never look as strong as an exact quote.
+            score = min(score, 0.70)
+
+        is_partial = False
+
+        if diff_lang:
+            is_partial = True
+        else:
+            if score >= 0.60:
+                numeric_mismatch = bool(unsupported_numeric_claims(
+                    normalize_audio_matching_text(req.text)
+                    if is_audio_chunk(chunk) else req.text,
+                    [normalize_audio_matching_text(supporting_clause)]
+                    if is_audio_chunk(chunk) else [supporting_clause],
+                ))
+                unsupported_behavior = bool(
+                    unsupported_fact_terms(req.text, [supporting_clause])
+                )
+                polarity_conflict = has_polarity_conflict(
+                    req.text, [supporting_clause]
+                )
+                if numeric_mismatch or unsupported_behavior or polarity_conflict:
+                    evidence.support_score = 0.0
+                    continue
+                is_partial = low_asr_confidence
+            elif score < 0.25:
+                evidence.support_score = 0.0
+                continue
+            else:
+                is_partial = True
+
+        evidence.lexical_score = score
+        evidence.entailment_score = score
+        evidence.support_score = score
+        scores.append(score)
+
+        if is_partial:
+            req.needs_review = True
+            if low_asr_confidence:
+                reason = "[WEAK_EVIDENCE_SUPPORT: low ASR confidence]"
+            elif diff_lang:
+                reason = "[WEAK_EVIDENCE_SUPPORT: different languages]"
+            else:
+                reason = "[WEAK_EVIDENCE_SUPPORT: ambiguous/partial support]"
+            if reason not in (req.review_reason or ""):
+                req.review_reason = ((req.review_reason or "") + " " + reason).strip()
+
+    return round(max(scores, default=0.0), 4)
 
 
 async def retrieve_evidence_node(state: PipelineState) -> dict:
@@ -76,12 +178,13 @@ async def retrieve_evidence_node(state: PipelineState) -> dict:
 
     retriever = get_source_index(state.get("source_index_id") or job_id)
     chunks: List[SourceChunk] = state.get("chunks", []) or []
-    chunk_texts = [c.text for c in chunks]
+    chunks_by_id = {c.chunk_id: c for c in chunks}
+    source_docs = state.get("source_documents", []) or []
 
     if retriever is None or retriever.size == 0:
         # No index to retrieve from — still record quote support so quality can act.
         for req in reqs:
-            req.quote_support_score = _quote_support_score(req, chunk_texts)
+            req.quote_support_score = _quote_support_score(req, chunks_by_id, source_docs)
         warning = PipelineWarning(
             node_name="retrieve_evidence",
             code="NO_RETRIEVED_EVIDENCE",
@@ -100,7 +203,6 @@ async def retrieve_evidence_node(state: PipelineState) -> dict:
     hybrid = bool(state.get("enable_hybrid_retrieval"))
     embedder = None
     embedding_store = None
-    chunks_by_id = {c.chunk_id: c for c in chunks}
     if hybrid:
         try:
             from app.rag.embeddings import get_embedder
@@ -123,8 +225,8 @@ async def retrieve_evidence_node(state: PipelineState) -> dict:
         query_tokens = set(tokenize(query))
         bm25_hits = retriever.retrieve(query, top_k=RETRIEVE_TOP_K)
 
-        req.evidence_match_score = round(bm25_hits[0].score, 4) if bm25_hits else 0.0
-        req.quote_support_score = _quote_support_score(req, chunk_texts)
+        req.evidence_match_score = 0.0
+        req.quote_support_score = _quote_support_score(req, chunks_by_id, source_docs)
 
         hits = bm25_hits
         if hybrid:
@@ -150,39 +252,142 @@ async def retrieve_evidence_node(state: PipelineState) -> dict:
             except Exception as exc:  # pragma: no cover - defensive
                 logger.warning("hybrid retrieval failed for req %s: %s", req.id, type(exc).__name__)
 
-        if not hits:
-            no_hits += 1
-
-        # Attach supporting evidence from NEW chunks only, capped.
-        cited = {e.chunk_id for e in req.evidence}
+        # Retrieval results are candidates, not citations.  Only candidates
+        # that support the requirement proposition become evidence.
+        # Extraction evidence is still provisional here. A bad model quote
+        # must not block retrieval from finding a better clause in the same
+        # transcript window or document chunk.
+        cited = {
+            (e.chunk_id, re.sub(r"\s+", " ", (e.quote or "").strip().lower()))
+            for e in req.evidence
+        }
+        cited_chunk_ids = {e.chunk_id for e in req.evidence}
+        qualified_hits = 0
         for hit in hits:
             if len(req.evidence) >= MAX_EVIDENCE_PER_REQ:
                 limit_applied += 1
                 break
-            if hit.chunk_id in cited:
+            orig_chunk = chunks_by_id.get(hit.chunk_id)
+            # This recovery path is deliberately audio-only. Document
+            # extraction already has stable chunk boundaries, and retaining its
+            # established one-chunk behavior prevents response changes there.
+            if hit.chunk_id in cited_chunk_ids and not is_audio_chunk(orig_chunk):
                 continue
             snippet = _best_snippet(hit.text, query_tokens)
             if not snippet:
                 continue
-            
-            orig_chunk = chunks_by_id.get(hit.chunk_id)
-            orig_doc_id = getattr(orig_chunk, "document_id", None) if orig_chunk else None
 
-            req.evidence.append(EvidenceSpan(
-                chunk_id=hit.chunk_id,
-                quote=snippet,
-                page_number=hit.page_number,
-                speaker=hit.speaker,
-                timestamp=hit.timestamp,
-                document_id=orig_doc_id,
-            ))
-            cited.add(hit.chunk_id)
+            orig_doc_id = getattr(orig_chunk, "document_id", None) if orig_chunk else None
+            source_text = getattr(orig_chunk, "text", "") or snippet
+            if is_audio_chunk(orig_chunk):
+                support, supporting_clause = best_audio_evidence_clause(
+                    req.text, source_text
+                )
+            else:
+                support, supporting_clause = best_evidence_clause(
+                    req.text, source_text
+                )
+
+            evidence_lang = (
+                getattr(orig_chunk, "language", None)
+                if orig_chunk is not None
+                else None
+            ) or _document_language(source_docs, orig_doc_id)
+            diff_lang = check_different_languages(
+                req.text,
+                snippet,
+                None,
+                evidence_lang,
+            )
+            asr_confidence = (
+                getattr(orig_chunk, "asr_confidence", None)
+                if orig_chunk is not None
+                else None
+            )
+            low_asr_confidence = (
+                asr_confidence is not None
+                and float(asr_confidence) < MIN_ASR_CONFIDENCE
+            )
+
+            is_accepted = False
+            if diff_lang:
+                # A cross-language retrieval hit cannot be adjudicated by the
+                # deterministic lexical guard.  Do not promote it into a
+                # citation; only already-extracted evidence may be retained for
+                # review by the authoritative grounding node.
+                req.needs_review = True
+                reason = "[WEAK_EVIDENCE_SUPPORT: cross-language retrieval not promoted]"
+                if reason not in (req.review_reason or ""):
+                    req.review_reason = ((req.review_reason or "") + " " + reason).strip()
+                continue
+            else:
+                if support >= 0.60:
+                    numeric_mismatch = bool(unsupported_numeric_claims(
+                        normalize_audio_matching_text(req.text)
+                        if is_audio_chunk(orig_chunk) else req.text,
+                        [normalize_audio_matching_text(supporting_clause)]
+                        if is_audio_chunk(orig_chunk) else [supporting_clause],
+                    ))
+                    unsupported_behavior = bool(
+                        unsupported_fact_terms(req.text, [supporting_clause])
+                    )
+                    polarity_conflict = has_polarity_conflict(
+                        req.text, [supporting_clause]
+                    )
+                    if not (numeric_mismatch or unsupported_behavior or polarity_conflict):
+                        is_accepted = True
+                    else:
+                        continue
+                elif support < 0.25:
+                    continue
+                else:
+                    req.needs_review = True
+                    reason = "[WEAK_EVIDENCE_SUPPORT: ambiguous retrieval not promoted]"
+                    if reason not in (req.review_reason or ""):
+                        req.review_reason = ((req.review_reason or "") + " " + reason).strip()
+                    continue
+
+            if is_accepted:
+                evidence_key = (
+                    hit.chunk_id,
+                    re.sub(r"\s+", " ", supporting_clause.strip().lower()),
+                )
+                if evidence_key in cited:
+                    continue
+                req.evidence.append(EvidenceSpan(
+                    chunk_id=hit.chunk_id,
+                    quote=supporting_clause,
+                    page_number=hit.page_number,
+                    speaker=hit.speaker,
+                    timestamp=hit.timestamp,
+                    document_id=orig_doc_id,
+                    origin="retrieved",
+                    lexical_score=support,
+                    entailment_score=support,
+                    support_score=support,
+                ))
+                cited.add(evidence_key)
+                qualified_hits += 1
+                req.evidence_match_score = max(req.evidence_match_score or 0.0, support)
+
+                if low_asr_confidence:
+                    req.needs_review = True
+                    reason = "[WEAK_EVIDENCE_SUPPORT: low ASR confidence]"
+                    if reason not in (req.review_reason or ""):
+                        req.review_reason = ((req.review_reason or "") + " " + reason).strip()
+
+        if not qualified_hits and req.quote_support_score < MIN_RETRIEVAL_SUPPORT:
+            no_hits += 1
+
+        req.quote_support_score = max(
+            req.quote_support_score,
+            max((e.support_score for e in req.evidence), default=0.0),
+        )
 
         # Weak support: no grounded quote AND no relevant lexical/semantic match.
         if (
-            req.quote_support_score == 0.0
-            and req.evidence_match_score == 0.0
-            and (req.vector_match_score or 0.0) == 0.0
+            req.quote_support_score < MIN_RETRIEVAL_SUPPORT
+            and (req.evidence_match_score or 0.0) < MIN_RETRIEVAL_SUPPORT
         ):
             weak_support += 1
             req.needs_review = True

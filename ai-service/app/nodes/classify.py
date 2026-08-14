@@ -4,6 +4,8 @@ from app.schemas.items import ClassifiedRequirement
 from app.llm import get_llm
 from app.prompts.loader import load_prompt
 from app.prompts.registry import PromptId
+from app.services.semantic_quality import normalize_requirement_labels
+from app.progress import update_progress
 from pydantic import BaseModel
 from typing import List, Literal, Dict
 from collections import defaultdict
@@ -51,9 +53,25 @@ def _chunk_requirements(requirements, batch_size: int = 5):
 def _clamp_confidence(value: float) -> float:
     try:
         value = float(value)
-    except:
+    except (TypeError, ValueError):
         return 0.5
     return max(0.0, min(1.0, value))
+
+
+def _normalize_classification_payload(parsed) -> dict:
+    """Normalize harmless LLM envelope variations before schema validation."""
+    if isinstance(parsed, list):
+        return {"classifications": parsed}
+    if not isinstance(parsed, dict):
+        return parsed
+    if {"id", "labels", "confidence"}.issubset(parsed):
+        return {"classifications": [parsed]}
+    classifications = parsed.get("classifications")
+    if isinstance(classifications, dict):
+        return {"classifications": [classifications]}
+    if "data" in parsed:
+        return _normalize_classification_payload(parsed["data"])
+    return parsed
 
 
 async def _classify_batch(llm, batch):
@@ -79,10 +97,9 @@ async def _classify_batch(llm, batch):
 
         try:
             parsed = json.loads(content)
-            # Support both direct list or wrapped in "classifications"
-            if isinstance(parsed, list):
-                parsed = {"classifications": parsed}
-            return ClassificationResponse.model_validate(parsed)
+            return ClassificationResponse.model_validate(
+                _normalize_classification_payload(parsed)
+            )
         except Exception as e:
             print(f"Classification parse/validation error: {e}")
             return None
@@ -92,8 +109,6 @@ async def _classify_batch(llm, batch):
 
 
 # ---------------- MAIN NODE ----------------
-
-from app.progress import update_progress
 
 async def classify_node(state: PipelineState) -> dict:
     print("--- CLASSIFY NODE (MULTI-LABEL) ---")
@@ -150,6 +165,7 @@ async def classify_node(state: PipelineState) -> dict:
                 "evidence": getattr(fr, "evidence", []),
                 "needs_review": getattr(fr, "needs_review", False),
                 "review_reason": getattr(fr, "review_reason", None),
+                "priority": getattr(fr, "priority", "Medium"),
             }
 
             candidate_labels = set(base_kwargs["candidate_labels"] or [])
@@ -181,7 +197,10 @@ async def classify_node(state: PipelineState) -> dict:
             classified.append(
                 ClassifiedRequirement(
                     **base_kwargs,
-                    labels=list(data["labels"]) or ["FR"],
+                    labels=normalize_requirement_labels(
+                        base_kwargs["text"],
+                        list(data["labels"]) or ["FR"],
+                    ),
                     classification_confidence=_clamp_confidence(data["confidence"]),
                 )
             )
@@ -213,7 +232,8 @@ async def classify_node(state: PipelineState) -> dict:
                     needs_review=getattr(fr, "needs_review", True),
                     review_reason=(getattr(fr, "review_reason", "") or "LLM failure fallback"),
                     labels=labels,
-                    classification_confidence=confidence
+                    classification_confidence=confidence,
+                    priority=getattr(fr, "priority", "Medium")
                 )
             )
 

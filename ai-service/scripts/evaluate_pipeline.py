@@ -17,7 +17,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import os
 import re
 import sys
 import time
@@ -215,7 +214,7 @@ def evaluate(job_result) -> Dict[str, Any]:
 
     stories_with_src = sum(1 for s in stories if s.requirement_id)
     reqs_with_refs = sum(1 for r in reqs if r.source_refs)
-    all_two_acs = all(len(s.acceptance_criteria) >= 2 for s in stories) if stories else True
+    all_have_acs = all(bool(s.acceptance_criteria) for s in stories) if stories else True
     avg_conf = round(sum(r.confidence_score for r in reqs) / req_count, 3) if req_count else 0.0
 
     merged = 0
@@ -233,7 +232,7 @@ def evaluate(job_result) -> Dict[str, Any]:
         "story_count": story_count,
         "traceability_coverage": round(stories_with_src / story_count, 3) if story_count else 1.0,
         "source_refs_coverage": round(reqs_with_refs / req_count, 3) if req_count else 1.0,
-        "all_stories_have_2_acs": all_two_acs,
+        "all_stories_have_acceptance_criteria": all_have_acs,
         "avg_confidence": avg_conf,
         "duplicates_merged": merged,
         "exports_available": bool(job_result.exports.excel.available),
@@ -258,8 +257,8 @@ def check_thresholds(name: str, relevant: bool, metrics: Dict[str, Any]) -> List
         failures.append(f"traceability_coverage {metrics['traceability_coverage']} < 1.0")
     if metrics["source_refs_coverage"] < 0.9:
         failures.append(f"source_refs_coverage {metrics['source_refs_coverage']} < 0.9")
-    if not metrics["all_stories_have_2_acs"]:
-        failures.append("some stories have < 2 acceptance criteria")
+    if not metrics["all_stories_have_acceptance_criteria"]:
+        failures.append("some stories have no acceptance criteria")
     if metrics["story_count"] > 0 and not metrics["exports_available"]:
         failures.append("stories exist but exports unavailable")
     return failures

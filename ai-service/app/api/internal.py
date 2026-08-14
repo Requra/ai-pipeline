@@ -332,15 +332,20 @@ async def process_compatibility(
     for item in validated_inputs:
         MOCK_DOCUMENT_STORAGE[item["document_id"]] = item["raw_bytes"]
 
-    is_legacy_single = file is not None
     single_input = validated_inputs[0] if len(validated_inputs) == 1 else None
+    # Audio has one supported processing shape: a single byte stream routed to
+    # transcribe.  The multipart field name is only a compatibility detail and
+    # must not send one audio item through the multi-document ingest path.
+    is_single_source = file is not None or bool(
+        single_input and single_input["file_type"] == "audio"
+    )
     await prepare_and_dispatch_job(
         req,
         rec,
         background_tasks=background_tasks,
         request_id=request_id,
-        raw_bytes=single_input["raw_bytes"] if is_legacy_single and single_input else b"",
-        raw_inputs=[] if is_legacy_single else validated_inputs,
+        raw_bytes=single_input["raw_bytes"] if is_single_source and single_input else b"",
+        raw_inputs=[] if is_single_source else validated_inputs,
         raw_text="",
         file_type=single_input["file_type"] if single_input else "document",
         metadata=parsed_metadata,

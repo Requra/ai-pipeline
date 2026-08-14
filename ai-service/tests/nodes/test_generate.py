@@ -2,7 +2,7 @@ import pytest
 import json
 from unittest.mock import MagicMock, patch, AsyncMock
 from app.nodes.generate import generate_node
-from app.schemas.items import ClassifiedRequirement
+from app.schemas.items import ClassifiedRequirement, EvidenceSpan
 
 
 def _format_story(s):
@@ -104,3 +104,57 @@ async def test_generate_node_empty(base_state):
     print("\nEMPTY RESULT:", result)
 
     assert result["user_stories"] == []
+
+
+@pytest.mark.asyncio
+async def test_generate_runs_final_requirement_canonicalization(base_state):
+    state = base_state.copy()
+    state["job_id"] = "canonical-job"
+    state["classified_requirements"] = [
+        ClassifiedRequirement(
+            id=5,
+            text="The system shall produce CSV and PDF reports including applied filters.",
+            actor="System",
+            goal="produce reports",
+            candidate_labels=["FR"],
+            labels=["FR"],
+            confidence=0.9,
+            classification_confidence=0.9,
+            evidence=[
+                EvidenceSpan(chunk_id="c5", quote="produce CSV and PDF reports")
+            ],
+        ),
+        ClassifiedRequirement(
+            id=11,
+            text="The export service shall produce CSV and PDF reports including applied filters.",
+            actor="Export service",
+            goal="produce reports",
+            candidate_labels=["FR"],
+            labels=["FR"],
+            confidence=0.8,
+            classification_confidence=0.8,
+            evidence=[
+                EvidenceSpan(chunk_id="c11", quote="reports include applied filters")
+            ],
+        ),
+    ]
+
+    with patch("app.nodes.generate.get_llm", return_value=None):
+        result = await generate_node(state)
+
+    assert len(result["classified_requirements"]) == 1
+    assert len(result["user_stories"]) == 1
+    assert result["user_stories"][0].source_requirement_ids == [1]
+    assert {ev.chunk_id for ev in result["classified_requirements"][0].evidence} == {
+        "c5",
+        "c11",
+    }
+    assert any(
+        (
+            warning.get("code")
+            if isinstance(warning, dict)
+            else warning.code
+        )
+        == "PRE_GENERATION_DUPLICATE_MERGED"
+        for warning in result["warnings"]
+    )

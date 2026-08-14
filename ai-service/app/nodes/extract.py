@@ -22,9 +22,34 @@ import json
 import logging
 
 from app.config import settings
+from app.services.semantic_quality import infer_requirement_priority
+from app.services.audio_semantics import (
+    audio_text_requires_review,
+    is_audio_chunk,
+    normalize_audio_requirement_text,
+)
 from app.utils.json_parsing import loads_with_llm_repair
 
 logger = logging.getLogger(__name__)
+
+
+_AUDIO_EXTRACTION_CONTEXT = """
+This source is a reconstructed speech-transcript window. Preserve the meaning
+of the spoken statement even when ASR punctuation is imperfect. Keep one parent
+requirement when it contains a list of mandatory input fields, a purpose clause,
+or a measurable test condition. Do not create separate requirements for each
+field in a list, a "to facilitate/so that" purpose, or a load condition such as
+"up to 500 active sessions". Keep compound domain names together (for example,
+QR code, LDAP Active Directory, and TLS 1.3). Normalize the requirement text to
+English as usual, but copy the evidence quote exactly from the transcript.
+
+Extract an independently testable approval, permission, or access rule
+separately from a general capability when it has its own condition. Conversely,
+keep a prohibition and its required replacement action together when the source
+connects them (for example, "cannot be permanently deleted; must be
+soft-deleted and marked as Retired"). Ignore spoken document section headings,
+list numbers, and labels such as "Functional Requirements".
+""".strip()
 
 
 def _raw_io_enabled() -> bool:
@@ -146,6 +171,18 @@ def normalize_extraction_payload(parsed: Any, chunk: SourceChunk) -> dict:
         extraction_type = item.get("extraction_type")
         if extraction_type not in ("explicit", "implied"):
             extraction_type = None
+
+        audio_requirement = is_audio_chunk(chunk)
+        if audio_requirement:
+            text = normalize_audio_requirement_text(text)
+        priority = infer_requirement_priority(text, item.get("priority"))
+        needs_review = bool(item.get("needs_review"))
+        review_reason = item.get("review_reason")
+        if audio_requirement and audio_text_requires_review(text):
+            needs_review = True
+            marker = "[ASR_INCOMPLETE_FRAGMENT]"
+            review_reason = f"{review_reason or ''} {marker}".strip()
+
         normalized_reqs.append({
             "id": req_id,
             "text": text,
@@ -154,10 +191,10 @@ def normalize_extraction_payload(parsed: Any, chunk: SourceChunk) -> dict:
             "candidate_labels": norm_labels,
             "confidence": item.get("confidence") or 0.85,
             "evidence": evidence,
-            "priority": item.get("priority") or "Medium",
+            "priority": priority,
             "extraction_type": extraction_type,
-            "needs_review": item.get("needs_review") or False,
-            "review_reason": item.get("review_reason")
+            "needs_review": needs_review,
+            "review_reason": review_reason,
         })
 
     return {"requirements": normalized_reqs}
@@ -228,7 +265,8 @@ async def process_chunk(llm, chunk: SourceChunk) -> List[ExtractedRequirement]:
         # verbatim-quote grounding + explicit/implied marker).
         system_text = load_prompt(PromptId.EXTRACT_REQUIREMENTS_V2)
 
-        user_text = f"Extract requirements from this text:\n\n{clean_text}"
+        audio_context = f"\n\n{_AUDIO_EXTRACTION_CONTEXT}" if is_audio_chunk(chunk) else ""
+        user_text = f"Extract requirements from this text:\n\n{clean_text}{audio_context}"
         
         # Call LLM with strict instructions
         try:
@@ -302,7 +340,8 @@ async def process_chunk(llm, chunk: SourceChunk) -> List[ExtractedRequirement]:
                     page_number=chunk.page_number,
                     speaker=chunk.speaker,
                     timestamp=str(chunk.start_time_sec) if chunk.start_time_sec is not None else None,
-                    document_id=getattr(chunk, "document_id", None)
+                    document_id=getattr(chunk, "document_id", None),
+                    origin="fallback",
                 )]
                 r.needs_review = True
                 r.review_reason = (r.review_reason or "") + " [AUTO_FIX: Missing evidence quote fallback to source snippet]"
@@ -323,6 +362,7 @@ async def process_chunk(llm, chunk: SourceChunk) -> List[ExtractedRequirement]:
                         penalty = min(penalty, 0.9)
                     elif kind == "fallback":
                         ev.quote = aligned_quote
+                        ev.origin = "fallback"
                         r.needs_review = True
                         r.review_reason = (r.review_reason or "") + " [AUTO_FIX: Quote replaced with source snippet (no match found)]"
                         penalty = min(penalty, 0.7)

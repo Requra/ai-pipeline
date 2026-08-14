@@ -24,6 +24,11 @@ class SourceChunk(BaseModel):
     start_time_sec: Optional[float] = None
     end_time_sec: Optional[float] = None
     document_id: Optional[str] = None
+    paragraph_index: Optional[int] = None
+    heading: Optional[str] = None
+    section: Optional[str] = None
+    language: Optional[str] = None
+    asr_confidence: Optional[float] = None
 
 class RetrievedChunk(BaseModel):
     """A chunk returned by the lexical retriever, annotated with its score.
@@ -48,6 +53,12 @@ class EvidenceSpan(BaseModel):
     speaker: Optional[str] = None
     timestamp: Optional[str] = None
     document_id: Optional[str] = None
+    # Internal provenance and support signals.  format_node maps them into the
+    # existing SourceRefV1.confidence_score; they never add public fields.
+    origin: Literal["extracted", "retrieved", "fallback"] = "extracted"
+    lexical_score: float = 0.0
+    entailment_score: float = 0.0
+    support_score: float = 0.0
 
 class ExtractedRequirement(BaseModel):
     id: int
@@ -112,6 +123,7 @@ class UserStory(BaseModel):
     labels: List[RequirementType]
     priority: str = "Medium"
     evidence_reference: List[EvidenceSpan] = Field(default_factory=list)
+    story_points: int = 0
 
     # Legacy Fields (Backwards Compatibility)
     source_fr_id: Optional[int] = None

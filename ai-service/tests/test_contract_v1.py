@@ -4,6 +4,8 @@ from app.schemas.items import (
     UserStory,
     AcceptanceCriterion,
     ClassifiedRequirement,
+    EvidenceSpan,
+    RequirementCoverage,
     QualityIssue,
     PipelineWarning
 )
@@ -23,27 +25,36 @@ async def test_contract_v1_completed():
         "chunks": [],
         "extracted_requirements": [],
         "classified_requirements": [
-            ClassifiedRequirement(
+                ClassifiedRequirement(
                 id=1,
                 text="The system must register users.",
                 actor="System",
                 goal="register users",
                 confidence=0.95,
-                evidence=[],
+                    evidence=[EvidenceSpan(
+                        chunk_id="completed-source",
+                        quote="The system must register users.",
+                        support_score=1.0,
+                    )],
                 labels=["FR"]
             )
         ],
         "requirement_coverages": [],
         "user_stories": [
-            UserStory(
+                UserStory(
                 id="test-completed-job_story_1",
                 title="Register users",
                 description="As a System, I want to register users.",
                 acceptance_criteria=[
                     AcceptanceCriterion(id="ac1", text="Requirement implemented", criterion_type="plain")
                 ],
-                source_requirement_ids=[1],
-                labels=["FR"]
+                    source_requirement_ids=[1],
+                    evidence_reference=[EvidenceSpan(
+                        chunk_id="completed-source",
+                        quote="The system must register users.",
+                        support_score=1.0,
+                    )],
+                    labels=["FR"]
             )
         ],
         "quality_issues": [],
@@ -125,13 +136,17 @@ async def test_contract_v1_partial_with_error():
         "chunks": [],
         "extracted_requirements": [],
         "classified_requirements": [
-            ClassifiedRequirement(
+                ClassifiedRequirement(
                 id=1,
                 text="The system must register users.",
                 actor="System",
                 goal="register users",
                 confidence=0.95,
-                evidence=[],
+                    evidence=[EvidenceSpan(
+                        chunk_id="relationship-source",
+                        quote="The system must export reports.",
+                        support_score=1.0,
+                    )],
                 labels=["FR"]
             )
         ],
@@ -221,3 +236,104 @@ async def test_contract_v1_failed():
     assert jr.error.code == "EXTRACT_FAILED"
     assert jr.error.message == "No chunks or raw text provided"
     assert jr.error.recoverable is False
+
+
+@pytest.mark.asyncio
+async def test_contract_v1_normalizes_relationships_without_changing_shape():
+    state: PipelineState = {
+        "job_id": "relationship-normalization",
+        "raw_bytes": b"requirements",
+        "file_type": "text",
+        "metadata": {"filename": "requirements.txt"},
+        "raw_text": "Requirements",
+        "source_metadata": None,
+        "chunks": [],
+        "extracted_requirements": [],
+        "classified_requirements": [
+            ClassifiedRequirement(
+                id=7,
+                text="The system must export reports.",
+                actor="System",
+                goal="export reports",
+                confidence=0.9,
+                evidence=[EvidenceSpan(
+                    chunk_id="relationship-source",
+                    quote="The system must export reports.",
+                    support_score=1.0,
+                )],
+                labels=["FR"],
+            )
+        ],
+        "requirement_coverages": [
+            RequirementCoverage(
+                requirement_id=7,
+                coverage_type="covered_by_story",
+                story_ids=["internal-story-42", "missing-story"],
+                acceptance_criteria_ids=["internal-ac-42", "missing-ac"],
+            )
+        ],
+        "user_stories": [
+                UserStory(
+                id="internal-story-42",
+                title="Export reports",
+                description="As a user, I want to export reports, so that I can share them.",
+                acceptance_criteria=[
+                    AcceptanceCriterion(
+                        id="internal-ac-42",
+                        text="Given a report, when export is selected, then a file is created.",
+                        criterion_type="Given-When-Then",
+                    )
+                ],
+                    source_requirement_ids=[7],
+                    evidence_reference=[EvidenceSpan(
+                        chunk_id="relationship-source",
+                        quote="The system must export reports.",
+                        support_score=1.0,
+                    )],
+                    labels=["FR"],
+            )
+        ],
+        "quality_issues": [
+            QualityIssue(
+                item_id=7,
+                item_type="requirement",
+                severity="medium",
+                rule_violated="TEST_RULE",
+                details="Review the requirement.",
+            ),
+            QualityIssue(
+                item_id=1,
+                item_type="story",
+                severity="medium",
+                rule_violated="STORY_RULE",
+                details="Review the story.",
+            ),
+        ],
+        "warnings": [],
+        "export_rows": [],
+        "summary": None,
+        "job_result": None,
+        "is_useful": True,
+        "relevance_score": 1.0,
+        "status": "success",
+        "error": None,
+        "started_at": None,
+        "processing_time_ms": 1,
+        "functional_requirements": [],
+    }
+
+    result = await format_node(state)
+    job = result["job_result"]
+
+    assert job.contract_version == "1.0"
+    assert job.requirements[0].id == "REQ-001"
+    assert job.user_stories[0].id == "US-001"
+    assert job.user_stories[0].requirement_id == "REQ-001"
+    assert job.requirement_coverages[0].requirement_id == "REQ-001"
+    assert job.requirement_coverages[0].story_ids == ["US-001"]
+    assert job.requirement_coverages[0].acceptance_criteria_ids == ["internal-ac-42"]
+    assert [(issue.item_type, issue.item_id) for issue in job.quality_issues] == [
+        ("requirement", 1),
+        ("story", 1),
+    ]
+    assert job.user_stories[0].quality.issues == ["Review the story."]

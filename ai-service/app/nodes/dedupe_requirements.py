@@ -27,6 +27,7 @@ from typing import List, Optional, Tuple
 from app.nodes.extract import project_legacy_requirements
 from app.progress import update_progress
 from app.rag.scoring import tokenize
+from app.services.semantic_quality import fact_tokens, meaningful_tokens
 from app.schemas.items import ExtractedRequirement, PipelineWarning, QualityIssue
 from app.schemas.pipeline_state import PipelineState
 from app.config import settings
@@ -78,8 +79,94 @@ def _actors_conflict(a: ExtractedRequirement, b: ExtractedRequirement) -> bool:
     na, nb = _norm_actor(a.actor), _norm_actor(b.actor)
     if na and nb and na != nb:
         # "user"/"users" style differences should not count as a conflict.
-        return not (na.rstrip("s") == nb.rstrip("s"))
+        if na.rstrip("s") == nb.rstrip("s"):
+            return False
+        technical_terms = {
+            "system", "service", "application", "workspace", "portal",
+            "platform", "api", "database",
+        }
+        # LLM extraction frequently alternates between "system" and a named
+        # technical component for the same source proposition.
+        if any(term in na for term in technical_terms) and any(
+            term in nb for term in technical_terms
+        ):
+            return False
+        return True
     return False
+
+
+def _numeric_constraint_context(text: str) -> set[str]:
+    """Return the measurement concepts surrounding numeric constraints."""
+    token_matches = list(re.finditer(r"[$€£]?\d[\d,]*(?:\.\d+)?|[a-z]+", (text or "").lower()))
+    numeric_positions = [
+        index for index, match in enumerate(token_matches)
+        if re.fullmatch(r"[$€£]?\d[\d,]*(?:\.\d+)?", match.group(0))
+    ]
+    context: set[str] = set()
+    for index in numeric_positions:
+        start = max(0, index - 6)
+        end = min(len(token_matches), index + 7)
+        window = " ".join(match.group(0) for match in token_matches[start:end])
+        context.update(fact_tokens(window))
+    return context - {
+        "asset", "standard", "system", "user", "shall", "must", "allow",
+        "requirement", "request", "number", "value", "than", "under", "over",
+    }
+
+
+def _orthogonal_numeric_constraints(a: ExtractedRequirement, b: ExtractedRequirement) -> bool:
+    """True when two numeric rules constrain different workflow dimensions.
+
+    Sharing an entity or workflow does not make a monetary threshold conflict
+    with a quantity, duration, availability, or performance limit. An LLM may
+    propose a conflict only when the measurement contexts materially overlap.
+    """
+    a_context = _numeric_constraint_context(a.text)
+    b_context = _numeric_constraint_context(b.text)
+    if not a_context or not b_context:
+        return False
+    return len(a_context & b_context) < 2
+
+
+def _conditional_approval_and_quantity_are_composable(
+    a: ExtractedRequirement,
+    b: ExtractedRequirement,
+) -> bool:
+    """Recognise compatible approval gates and independent quantity limits.
+
+    An approval threshold and a maximum number of items can both govern the
+    same request. Treating that pair as a scope conflict creates a misleading
+    question and reduces the quality score. We only override an LLM conflict
+    label when neither side explicitly grants an exemption or negates the
+    other rule.
+    """
+    texts = ((a.text or "").lower(), (b.text or "").lower())
+    if any(re.search(
+        r"\b(?:no|not|never|without|exempt|except)\b|"
+        r"(?:\u0628\u062f\u0648\u0646|\u0627\u0633\u062a\u062b\u0646\u0627\u0621)",
+        text,
+    ) for text in texts):
+        return False
+    approval = re.compile(
+        r"\b(?:approv(?:e|al)|authori[sz](?:e|ation)|permission|consent)\b|"
+        r"(?:\u0645\u0648\u0627\u0641\u0642\u0629|\u062a\u0635\u0631\u064a\u062d|\u0627\u0639\u062a\u0645\u0627\u062f)",
+        re.IGNORECASE,
+    )
+    conditional = re.compile(
+        r"\b(?:if|when|unless|above|below|over|under|exceeds?|at\s+least|"
+        r"more\s+than|less\s+than)\b|"
+        r"(?:\u0625\u0630\u0627|\u0639\u0646\u062f|\u064a\u062a\u062c\u0627\u0648\u0632|\u0623\u0643\u062b\u0631\s+\u0645\u0646)",
+        re.IGNORECASE,
+    )
+    quantity = re.compile(
+        r"\b(?:up\s+to|at\s+most|maximum|max(?:imum)?|simultaneous(?:ly)?|"
+        r"number\s+of|quantity)\b|"
+        r"(?:\u062d\u062a\u0649|\u0627\u0644\u062d\u062f\s+\u0627\u0644\u0623\u0642\u0635\u0649|\u0639\u062f\u062f)",
+        re.IGNORECASE,
+    )
+    approval_text = next((text for text in texts if approval.search(text)), "")
+    quantity_text = next((text for text in texts if quantity.search(text)), "")
+    return bool(approval_text and quantity_text and conditional.search(approval_text))
 
 
 def _higher_priority(p1: str, p2: str) -> str:
@@ -102,6 +189,14 @@ def _merge_into(base: ExtractedRequirement, other: ExtractedRequirement) -> None
     for label in other.candidate_labels:
         if label not in base.candidate_labels:
             base.candidate_labels.append(label)
+    if hasattr(base, "labels") and hasattr(other, "labels"):
+        for label in getattr(other, "labels", []) or []:
+            if label not in base.labels:
+                base.labels.append(label)
+        base.classification_confidence = max(
+            getattr(base, "classification_confidence", 0.0),
+            getattr(other, "classification_confidence", 0.0),
+        )
 
     base.actor = base.actor or other.actor
     base.goal = base.goal or other.goal
@@ -114,6 +209,146 @@ def _merge_into(base: ExtractedRequirement, other: ExtractedRequirement) -> None
     reasons = [r for r in (base.review_reason, other.review_reason) if r]
     if reasons:
         base.review_reason = " ".join(dict.fromkeys(reasons))
+
+
+def _containment_duplicate(a: ExtractedRequirement, b: ExtractedRequirement) -> bool:
+    """Return whether one extraction is an atomic subset of the other."""
+    tokens_a, tokens_b = fact_tokens(a.text), fact_tokens(b.text)
+    if min(len(tokens_a), len(tokens_b)) < 4 or len(tokens_a) == len(tokens_b):
+        return False
+    smaller, larger, larger_text = (
+        (tokens_a, tokens_b, b.text)
+        if len(tokens_a) < len(tokens_b)
+        else (tokens_b, tokens_a, a.text)
+    )
+    # A source-level composite normally joins clauses with a conjunction or
+    # semicolon. Requiring that marker avoids collapsing merely related peers.
+    is_composite = (
+        ";" in (larger_text or "")
+        or "," in (larger_text or "")
+        or bool(re.search(r"\b(?:and|or)\b", larger_text or "", re.I))
+    )
+    shared = smaller & larger
+    # One source window can yield a composite rule and an atomic restatement of
+    # its mandated action. The restatement may add only a purpose clause, so it
+    # has less token overlap than a textual paraphrase but no new testable rule.
+    return (
+        is_composite
+        and len(shared) >= 4
+        and len(shared) / len(smaller) >= 0.60
+    )
+
+
+def _canonical_components(
+    reqs: List[ExtractedRequirement],
+) -> tuple[List[List[int]], List[int]]:
+    """Cluster exact, near, and atomic/composite duplicate extractions."""
+    parent = list(range(len(reqs)))
+    actor_review_ids: List[int] = []
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    norms = [_normalize_text(req.text) for req in reqs]
+    token_sets = [fact_tokens(req.text) for req in reqs]
+    for left in range(len(reqs)):
+        for right in range(left + 1, len(reqs)):
+            exact = bool(norms[left]) and norms[left] == norms[right]
+            near = (
+                min(len(token_sets[left]), len(token_sets[right])) >= 4
+                and _jaccard(token_sets[left], token_sets[right])
+                >= NEAR_DUPLICATE_THRESHOLD
+            )
+            contained = _containment_duplicate(reqs[left], reqs[right])
+            if exact or contained:
+                # Exact text with different actor fields is an extraction
+                # inconsistency, not a second source proposition.
+                union(left, right)
+            elif near:
+                if _actors_conflict(reqs[left], reqs[right]):
+                    reqs[right].needs_review = True
+                    note = "[POSSIBLE_DUPLICATE: similar proposition has a materially different actor]"
+                    reqs[right].review_reason = " ".join(
+                        part for part in (reqs[right].review_reason, note) if part
+                    )
+                    actor_review_ids.append(reqs[right].id)
+                else:
+                    union(left, right)
+
+    grouped: dict[int, List[int]] = {}
+    for index in range(len(reqs)):
+        grouped.setdefault(find(index), []).append(index)
+    return list(grouped.values()), actor_review_ids
+
+
+def canonicalize_requirements(
+    reqs: List[ExtractedRequirement],
+    *,
+    reassign_ids: bool = True,
+) -> tuple[List[ExtractedRequirement], int, dict[int, int], List[int]]:
+    """Canonicalize requirements and return a stable old-to-new ID mapping.
+
+    The helper is reusable from existing nodes, so a final deterministic pass
+    can run immediately before story generation without adding a graph node or
+    changing the public response contract.
+    """
+    if len(reqs) <= 1:
+        identity = {req.id: req.id for req in reqs}
+        return list(reqs), 0, identity, []
+
+    original_ids = {id(req): req.id for req in reqs}
+    components, possible_dup_ids = _canonical_components(reqs)
+    canonical: List[ExtractedRequirement] = []
+    component_old_ids: List[List[int]] = []
+    merged_count = 0
+
+    for component in components:
+        representative_index = max(
+            component,
+            key=lambda index: (
+                len(meaningful_tokens(reqs[index].text)),
+                len(reqs[index].text or ""),
+                reqs[index].confidence,
+                -index,
+            ),
+        )
+        representative = reqs[representative_index]
+        old_ids = [original_ids[id(reqs[index])] for index in component]
+        for index in component:
+            if index == representative_index:
+                continue
+            _merge_into(representative, reqs[index])
+            merged_count += 1
+        canonical.append(representative)
+        component_old_ids.append(old_ids)
+
+    source_position = {id(req): index for index, req in enumerate(reqs)}
+    ordering = sorted(
+        range(len(canonical)),
+        key=lambda index: source_position[id(canonical[index])],
+    )
+    canonical = [canonical[index] for index in ordering]
+    component_old_ids = [component_old_ids[index] for index in ordering]
+
+    old_to_new: dict[int, int] = {}
+    for position, (req, old_ids) in enumerate(
+        zip(canonical, component_old_ids),
+        start=1,
+    ):
+        new_id = position if reassign_ids or merged_count else old_ids[0]
+        req.id = new_id
+        for old_id in old_ids:
+            old_to_new[old_id] = new_id
+
+    return canonical, merged_count, old_to_new, possible_dup_ids
 
 
 # --- Conflict Detection Helpers ---
@@ -188,7 +423,7 @@ def _format_req_id(req_id: int) -> str:
 
 
 def _parse_req_int_id(req_str_id: str) -> Optional[int]:
-    match = re.search(r"\d+", req_str_id)
+    match = re.search(r"\d+", str(req_str_id))
     return int(match.group(0)) if match else None
 
 
@@ -202,6 +437,28 @@ def _normalize_classification(raw_class: str) -> str:
     # Lowercase, clean punctuation/spaces, convert to upper
     cleaned = s2.replace(" ", "_").replace("-", "_").upper()
     return re.sub(r"_+", "_", cleaned).strip("_")
+
+
+def _normalize_resolution_options(value, classification: str, req_a_id: str, req_b_id: str) -> List[str]:
+    """Validate advisory options and provide safe deterministic fallbacks."""
+    options: List[str] = []
+    if isinstance(value, list):
+        for item in value:
+            if not isinstance(item, str):
+                continue
+            cleaned = re.sub(r"\s+", " ", item).strip()
+            if cleaned and cleaned not in options:
+                options.append(cleaned[:300])
+            if len(options) == 3:
+                break
+    if classification in {"INDEPENDENT", "DUPLICATE"}:
+        return options
+    if len(options) >= 2:
+        return options
+    return [
+        f"Clarify the intended scope and precedence between {req_a_id} and {req_b_id} with the requirement owner.",
+        f"Revise {req_a_id} and {req_b_id} into an explicit, testable rule that removes the ambiguity.",
+    ]
 
 
 def _batch_candidates_by_tokens(
@@ -311,42 +568,7 @@ async def dedupe_requirements_node(state: PipelineState) -> dict:
     if len(reqs) <= 1:
         return {}  # nothing to dedupe
 
-    groups: List[dict] = []  # {"base": req, "norm": str, "tokens": set}
-    merged_count = 0
-    possible_dup_ids: List[int] = []
-
-    for req in reqs:
-        norm = _normalize_text(req.text)
-        tokens = set(tokenize(req.text))
-
-        best = None
-        for group in groups:
-            exact = bool(norm) and norm == group["norm"]
-            near = _jaccard(tokens, group["tokens"]) >= NEAR_DUPLICATE_THRESHOLD
-            if not (exact or near):
-                continue
-            if _actors_conflict(group["base"], req):
-                # Similar text, different actor → keep separate, flag for review.
-                req.needs_review = True
-                req.review_reason = (req.review_reason or "") + " [POSSIBLE_DUPLICATE: similar to another requirement but with a different actor]"
-                possible_dup_ids.append(req.id)
-                best = "conflict"
-                break
-            best = group
-            break
-
-        if best is None or best == "conflict":
-            groups.append({"base": req, "norm": norm, "tokens": tokens})
-            continue
-
-        _merge_into(best["base"], req)
-        # Widen the group's token set so transitive duplicates still match.
-        best["tokens"] |= tokens
-        merged_count += 1
-
-    deduped = [g["base"] for g in groups]
-    for new_id, req in enumerate(deduped, start=1):
-        req.id = new_id
+    deduped, merged_count, _, possible_dup_ids = canonicalize_requirements(reqs)
 
     # --- Conflict Detection Phase ---
     candidates = []
@@ -402,6 +624,12 @@ async def dedupe_requirements_node(state: PipelineState) -> dict:
                         
                     reason = conflict.get("reason", "")
                     question = conflict.get("clarification_question", "")
+                    resolution_options = _normalize_resolution_options(
+                        conflict.get("resolution_options"),
+                        classification,
+                        req_a_id,
+                        req_b_id,
+                    )
                     
                     if not req_a_id or not req_b_id:
                         continue
@@ -409,16 +637,46 @@ async def dedupe_requirements_node(state: PipelineState) -> dict:
                         continue
                     if classification not in valid_classifications:
                         continue
-                    
+
                     req_a_int = _parse_req_int_id(req_a_id)
+                    req_b_int = _parse_req_int_id(req_b_id)
+                    req_a = next((req for req in deduped if req.id == req_a_int), None)
+                    req_b = next((req for req in deduped if req.id == req_b_int), None)
+                    if (
+                        classification in {"CONSTRAINT_CONFLICT", "SCOPE_CONFLICT"}
+                        and req_a is not None
+                        and req_b is not None
+                        and (
+                            _orthogonal_numeric_constraints(req_a, req_b)
+                            or _conditional_approval_and_quantity_are_composable(req_a, req_b)
+                        )
+                    ):
+                        classification = "COMPLEMENTARY"
+                        reason = (
+                            "The requirements constrain different measurable "
+                            "dimensions of the same workflow and can both apply."
+                        )
+                        question = ""
+                        resolution_options = []
                     
-                    # Formatting warning and issues text cleanly
-                    details = (
-                        f"Conflict detected between {req_a_id} and {req_b_id}:\n"
-                        f"  - Category: {classification}\n"
-                        f"  - Reason: {reason}\n"
-                        f"  - Clarification Question: {question}"
-                    )
+                    options_str = ""
+                    if resolution_options and classification != "COMPLEMENTARY":
+                        options_str = "\n  - Proposed Resolutions:\n" + "\n".join(f"    {idx}. {opt}" for idx, opt in enumerate(resolution_options, start=1))
+
+                    if classification == "COMPLEMENTARY":
+                        details = (
+                            f"Related requirements {req_a_id} and {req_b_id} are complementary:\n"
+                            f"  - Reason: {reason}"
+                        )
+                    else:
+                        # Formatting warning and issues text cleanly
+                        details = (
+                            f"Conflict detected between {req_a_id} and {req_b_id}:\n"
+                            f"  - Category: {classification}\n"
+                            f"  - Reason: {reason}\n"
+                            f"  - Clarification Question: {question}"
+                            f"{options_str}"
+                        )
                     
                     conflict_warnings.append(PipelineWarning(
                         node_name="dedupe_requirements",
@@ -426,7 +684,9 @@ async def dedupe_requirements_node(state: PipelineState) -> dict:
                         message=details
                     ))
                     
-                    if req_a_int is not None:
+                    # Complementary relationships are useful context, not a
+                    # quality defect and do not require conflict resolution.
+                    if req_a_int is not None and classification != "COMPLEMENTARY":
                         severity = "high" if classification in ("CONTRADICTION", "PERMISSION_CONFLICT") else "medium"
                         conflict_issues.append(QualityIssue(
                             item_id=req_a_int,

@@ -25,6 +25,25 @@ def _print_results(title, classified):
     print("=" * 80 + "\n")
 
 
+@pytest.mark.asyncio
+async def test_classify_accepts_a_single_unwrapped_classification(base_state):
+    state = base_state.copy()
+    state["functional_requirements"] = [
+        FunctionalRequirement(id=1, text="The system shall encrypt stored data.", actor="System", goal="encrypt data")
+    ]
+    mock_llm = MagicMock()
+    mock_llm.ainvoke = AsyncMock(return_value=MagicMock(content=json.dumps({
+        "id": 1, "labels": ["NFR"], "confidence": 0.91,
+    })))
+
+    with patch("app.nodes.classify.get_llm", return_value=mock_llm):
+        result = await classify_node(state)
+
+    classified = _safe_result(result)
+    assert classified[0].labels == ["NFR"]
+    assert classified[0].classification_confidence == pytest.approx(0.91)
+
+
 # ---------------- REAL TEST ----------------
 
 @pytest.mark.asyncio
@@ -81,7 +100,7 @@ async def test_classify_node_real(base_state):
 
     for item in classified:
         assert item.labels
-        assert all(l in {"FR", "NFR", "BR"} for l in item.labels)
+        assert all(label in {"FR", "NFR", "BR"} for label in item.labels)
         assert 0.0 <= item.confidence <= 1.0
 
 
@@ -139,5 +158,5 @@ async def test_classify_node_ambiguous_cases(base_state):
 
     for item in classified:
         assert item.labels
-        assert all(l in {"FR", "NFR", "BR"} for l in item.labels)
+        assert all(label in {"FR", "NFR", "BR"} for label in item.labels)
         assert 0.0 <= item.confidence <= 1.0

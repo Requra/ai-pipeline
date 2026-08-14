@@ -1,12 +1,150 @@
 import logging
 import time
 import asyncio
+import random
+import threading
+import weakref
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import httpx
 import openai
 from typing import Optional, List, Dict, Any
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+_gate_lock = threading.Lock()
+_sync_gates: Dict[int, threading.BoundedSemaphore] = {}
+_quota_blocked_until: Dict[tuple[str, str], float] = {}
+_async_gates: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, Dict[int, asyncio.Semaphore]]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _configured_concurrency() -> int:
+    return max(1, int(getattr(settings, "LLM_MAX_CONCURRENCY", 2)))
+
+
+def _sync_gate() -> threading.BoundedSemaphore:
+    limit = _configured_concurrency()
+    with _gate_lock:
+        gate = _sync_gates.get(limit)
+        if gate is None:
+            gate = threading.BoundedSemaphore(limit)
+            _sync_gates[limit] = gate
+        return gate
+
+
+def _async_gate() -> asyncio.Semaphore:
+    """Return one shared gate per event loop and configured limit."""
+    loop = asyncio.get_running_loop()
+    limit = _configured_concurrency()
+    with _gate_lock:
+        gates_for_loop = _async_gates.setdefault(loop, {})
+        gate = gates_for_loop.get(limit)
+        if gate is None:
+            gate = asyncio.Semaphore(limit)
+            gates_for_loop[limit] = gate
+        return gate
+
+
+def _retry_after_seconds(exc: Exception) -> Optional[float]:
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if not headers:
+        return None
+    value = headers.get("retry-after")
+    if value is None:
+        return None
+
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        pass
+
+    try:
+        retry_at = parsedate_to_datetime(str(value))
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _retry_delay_seconds(exc: Exception, attempt: int) -> float:
+    base = max(0.0, float(getattr(settings, "LLM_RETRY_BASE_SECONDS", 1.0)))
+    maximum = max(base, float(getattr(settings, "LLM_RETRY_MAX_SECONDS", 30.0)))
+    retry_after = _retry_after_seconds(exc)
+    exponential = base * (2 ** max(0, attempt - 1))
+    requested_delay = max(exponential, retry_after or 0.0)
+    jitter = random.uniform(0.0, min(1.0, requested_delay * 0.25))
+    return min(maximum, requested_delay + jitter)
+
+
+_PERMANENT_QUOTA_MARKERS = (
+    "insufficient_quota",
+    "insufficient quota",
+    "insufficient credits",
+    "not enough credits",
+    "requires more credits",
+    "can only afford",
+    "credit balance",
+    "credits exhausted",
+    "out of credits",
+    "no remaining tokens",
+    "token quota",
+    "token limit exceeded",
+    "token limit for this account",
+    "tokens left",
+    "quota exceeded",
+    "daily quota",
+    "monthly quota",
+    "usage limit reached",
+    "free-models-per-day",
+    "payment required",
+)
+
+
+def _error_text(exc: Exception) -> str:
+    """Collect provider details without depending on one SDK error shape."""
+    parts = [str(exc)]
+    body = getattr(exc, "body", None)
+    if body is not None:
+        parts.append(str(body))
+    response = getattr(exc, "response", None)
+    response_text = getattr(response, "text", None)
+    if response_text:
+        parts.append(str(response_text))
+    return " ".join(parts).lower()
+
+
+def _is_permanent_quota_error(exc: Exception) -> bool:
+    """Identify exhausted credits or token quota, which backoff cannot fix."""
+    response = getattr(exc, "response", None)
+    if getattr(response, "status_code", None) == 402:
+        return True
+    details = _error_text(exc)
+    return any(marker in details for marker in _PERMANENT_QUOTA_MARKERS)
+
+
+def _mark_quota_exhausted(provider: str, model: str) -> None:
+    cooldown = max(
+        0.0,
+        float(getattr(settings, "LLM_QUOTA_COOLDOWN_SECONDS", 300.0)),
+    )
+    with _gate_lock:
+        _quota_blocked_until[(provider, model)] = time.monotonic() + cooldown
+
+
+def _quota_cooldown_remaining(provider: str, model: str) -> float:
+    key = (provider, model)
+    with _gate_lock:
+        blocked_until = _quota_blocked_until.get(key, 0.0)
+        remaining = blocked_until - time.monotonic()
+        if remaining <= 0:
+            _quota_blocked_until.pop(key, None)
+            return 0.0
+        return remaining
 
 
 class ResilientLLMClient:
@@ -65,6 +203,8 @@ class ResilientLLMClient:
                 api_key=settings.OPENROUTER_API_KEY,
                 base_url=settings.OPENROUTER_BASE_URL,
                 default_headers=extra_headers if extra_headers else None,
+                timeout=settings.PROVIDER_TIMEOUT_SECONDS,
+                max_retries=0,
             )
         elif provider == "groq":
             return ChatOpenAI(
@@ -72,16 +212,22 @@ class ResilientLLMClient:
                 temperature=0,
                 api_key=settings.GROQ_API_KEY,
                 base_url="https://api.groq.com/openai/v1",
+                timeout=settings.PROVIDER_TIMEOUT_SECONDS,
+                max_retries=0,
             )
         else:  # openai
             return ChatOpenAI(
                 model=model,
                 temperature=0,
                 api_key=settings.OPENAI_API_KEY,
+                timeout=settings.PROVIDER_TIMEOUT_SECONDS,
+                max_retries=0,
             )
 
     def _is_retryable_error(self, exc: Exception) -> bool:
         # Catch rate limit, connection, timeout, and internal server errors
+        if _is_permanent_quota_error(exc):
+            return False
         if isinstance(exc, (
             openai.RateLimitError,
             openai.APIConnectionError,
@@ -110,6 +256,16 @@ class ResilientLLMClient:
         for config in self.providers:
             provider = config["provider"]
             model = config["model"]
+            cooldown = _quota_cooldown_remaining(provider, model)
+            if cooldown > 0:
+                logger.warning(
+                    "Skipping quota-exhausted provider %s:%s for another %.1fs",
+                    provider, model, cooldown,
+                )
+                last_error = RuntimeError(
+                    f"Provider {provider}:{model} is temporarily unavailable after quota exhaustion"
+                )
+                continue
             
             try:
                 client = self._instantiate_client(provider, model)
@@ -118,11 +274,16 @@ class ResilientLLMClient:
                 last_error = e
                 continue
 
-            for attempt in range(1, 4):
+            max_attempts = 1 + max(0, int(getattr(settings, "LLM_MAX_RETRIES", 2)))
+            for attempt in range(1, max_attempts + 1):
                 start_time = time.time()
                 try:
-                    logger.info("Invoking LLM (sync) using %s:%s (attempt %d/3)", provider, model, attempt)
-                    response = client.invoke(messages, **kwargs)
+                    logger.info(
+                        "Invoking LLM (sync) using %s:%s (attempt %d/%d)",
+                        provider, model, attempt, max_attempts,
+                    )
+                    with _sync_gate():
+                        response = client.invoke(messages, **kwargs)
                     latency_ms = int((time.time() - start_time) * 1000)
 
                     self._enrich_response_metadata(response, provider, model, latency_ms)
@@ -130,14 +291,26 @@ class ResilientLLMClient:
                     return response
                 except Exception as exc:
                     latency_ms = int((time.time() - start_time) * 1000)
-                    if not self._is_retryable_error(exc) or attempt == 3:
+                    if _is_permanent_quota_error(exc):
+                        _mark_quota_exhausted(provider, model)
+                        logger.warning(
+                            "Permanent quota exhaustion on %s:%s; skipping retries and trying the next configured provider",
+                            provider, model,
+                        )
+                        last_error = exc
+                        break
+                    if not self._is_retryable_error(exc) or attempt == max_attempts:
                         logger.warning("Failed LLM attempt (sync) using %s:%s in %dms: %s", provider, model, latency_ms, exc)
                         last_error = exc
                         if not self._is_retryable_error(exc):
                             raise exc
                         break  # move to next provider
-                    logger.warning("Retryable error on %s:%s (attempt %d): %s. Retrying in 1s...", provider, model, attempt, exc)
-                    time.sleep(1.0)
+                    delay = _retry_delay_seconds(exc, attempt)
+                    logger.warning(
+                        "Retryable error on %s:%s (attempt %d): %s. Retrying in %.2fs...",
+                        provider, model, attempt, exc, delay,
+                    )
+                    time.sleep(delay)
 
         raise RuntimeError(f"All configured LLM providers failed. Last error: {last_error}") from last_error
 
@@ -146,6 +319,16 @@ class ResilientLLMClient:
         for config in self.providers:
             provider = config["provider"]
             model = config["model"]
+            cooldown = _quota_cooldown_remaining(provider, model)
+            if cooldown > 0:
+                logger.warning(
+                    "Skipping quota-exhausted provider %s:%s for another %.1fs",
+                    provider, model, cooldown,
+                )
+                last_error = RuntimeError(
+                    f"Provider {provider}:{model} is temporarily unavailable after quota exhaustion"
+                )
+                continue
 
             try:
                 client = self._instantiate_client(provider, model)
@@ -154,11 +337,16 @@ class ResilientLLMClient:
                 last_error = e
                 continue
 
-            for attempt in range(1, 4):
+            max_attempts = 1 + max(0, int(getattr(settings, "LLM_MAX_RETRIES", 2)))
+            for attempt in range(1, max_attempts + 1):
                 start_time = time.time()
                 try:
-                    logger.info("Invoking LLM (async) using %s:%s (attempt %d/3)", provider, model, attempt)
-                    response = await client.ainvoke(messages, **kwargs)
+                    logger.info(
+                        "Invoking LLM (async) using %s:%s (attempt %d/%d)",
+                        provider, model, attempt, max_attempts,
+                    )
+                    async with _async_gate():
+                        response = await client.ainvoke(messages, **kwargs)
                     latency_ms = int((time.time() - start_time) * 1000)
 
                     self._enrich_response_metadata(response, provider, model, latency_ms)
@@ -166,14 +354,26 @@ class ResilientLLMClient:
                     return response
                 except Exception as exc:
                     latency_ms = int((time.time() - start_time) * 1000)
-                    if not self._is_retryable_error(exc) or attempt == 3:
+                    if _is_permanent_quota_error(exc):
+                        _mark_quota_exhausted(provider, model)
+                        logger.warning(
+                            "Permanent quota exhaustion on %s:%s; skipping retries and trying the next configured provider",
+                            provider, model,
+                        )
+                        last_error = exc
+                        break
+                    if not self._is_retryable_error(exc) or attempt == max_attempts:
                         logger.warning("Failed LLM attempt (async) using %s:%s in %dms: %s", provider, model, latency_ms, exc)
                         last_error = exc
                         if not self._is_retryable_error(exc):
                             raise exc
                         break  # move to next provider
-                    logger.warning("Retryable error on %s:%s (attempt %d): %s. Retrying in 1s...", provider, model, attempt, exc)
-                    await asyncio.sleep(1.0)
+                    delay = _retry_delay_seconds(exc, attempt)
+                    logger.warning(
+                        "Retryable error on %s:%s (attempt %d): %s. Retrying in %.2fs...",
+                        provider, model, attempt, exc, delay,
+                    )
+                    await asyncio.sleep(delay)
 
         raise RuntimeError(f"All configured LLM providers failed. Last error: {last_error}") from last_error
 
@@ -200,47 +400,13 @@ class ResilientLLMClient:
 
 
 def get_llm(model_name: Optional[str] = None):
-    """Return a resilient chat LLM client or direct client.
+    """Return the common resilient, rate-limited reasoning client.
 
-    Uses `settings.LLM_PROVIDER` as primary and parses `settings.LLM_FALLBACK_CHAIN`
-    for any subsequent providers to route to on failure.
+    Every node uses the same concurrency and retry policy, whether or not a
+    fallback provider is configured.
     """
     provider = settings.LLM_PROVIDER.lower().strip()
     if provider not in ("openrouter", "openai", "groq"):
         raise RuntimeError(f"Unsupported LLM_PROVIDER: {settings.LLM_PROVIDER}")
 
-    if settings.LLM_FALLBACK_CHAIN:
-        return ResilientLLMClient(primary_provider=provider, model_name=model_name)
-
-    from langchain_openai import ChatOpenAI
-
-    if provider == "openrouter":
-        model = model_name or settings.OPENROUTER_MODEL or "openai/gpt-4o-mini"
-        extra_headers = {}
-        if settings.OPENROUTER_APP_NAME:
-            extra_headers["X-OpenRouter-Title"] = settings.OPENROUTER_APP_NAME
-        if settings.OPENROUTER_APP_URL:
-            extra_headers["HTTP-Referer"] = settings.OPENROUTER_APP_URL
-
-        return ChatOpenAI(
-            model=model,
-            temperature=0,
-            api_key=settings.OPENROUTER_API_KEY,
-            base_url=settings.OPENROUTER_BASE_URL,
-            default_headers=extra_headers if extra_headers else None,
-        )
-    elif provider == "groq":
-        model = model_name or settings.GROQ_MODEL or "llama-3.3-70b-versatile"
-        return ChatOpenAI(
-            model=model,
-            temperature=0,
-            api_key=settings.GROQ_API_KEY,
-            base_url="https://api.groq.com/openai/v1",
-        )
-    else:  # openai
-        model = model_name or settings.OPENAI_MODEL or "gpt-4o-mini"
-        return ChatOpenAI(
-            model=model,
-            temperature=0,
-            api_key=settings.OPENAI_API_KEY,
-        )
+    return ResilientLLMClient(primary_provider=provider, model_name=model_name)
