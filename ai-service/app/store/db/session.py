@@ -40,14 +40,18 @@ class Database:
     @property
     def engine(self) -> AsyncEngine:
         if self._engine is None:
+            from app.config import settings
+
             connect_args = {}
             if "ssl=require" in self.url or "sslmode=require" in self.url or "neon.tech" in self.url:
                 connect_args["ssl"] = "require"
             self._engine = create_async_engine(
                 self.url,
                 pool_pre_ping=True,
-                pool_size=10,
-                max_overflow=5,
+                pool_size=getattr(settings, "DB_POOL_SIZE", 5),
+                max_overflow=getattr(settings, "DB_MAX_OVERFLOW", 10),
+                pool_timeout=getattr(settings, "DB_POOL_TIMEOUT_SECONDS", 30),
+                pool_recycle=getattr(settings, "DB_POOL_RECYCLE_SECONDS", 1800),
                 future=True,
                 connect_args=connect_args,
             )
