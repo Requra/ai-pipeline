@@ -168,3 +168,43 @@ async def test_api_accepts_valid_control_files():
             files=[("files", ("valid.mp3", create_minimal_valid_mp3(), "audio/mpeg"))],
         )
         assert resp_mp3.status_code == 202, f"Expected 202 for valid MP3, got {resp_mp3.status_code}: {resp_mp3.text}"
+
+        # Valid Arabic / Unicode TXT
+        arabic_text = "متطلبات النظام: يجب على النظام توفير استعادة كلمة المرور عبر البريد الإلكتروني.".encode("utf-8")
+        resp_arabic = await client.post(
+            "/internal/process",
+            headers=AUTH_HEADERS,
+            data={"job_id": "valid-arabic-job-1", "tenant_id": "t1", "project_id": "p1"},
+            files=[("files", ("arabic_reqs.txt", arabic_text, "text/plain"))],
+        )
+        assert resp_arabic.status_code == 202, f"Expected 202 for valid Arabic TXT, got {resp_arabic.status_code}: {resp_arabic.text}"
+
+
+@pytest.mark.asyncio
+async def test_api_rejects_riff_non_wave():
+    """Reject RIFF file that is AVI or non-WAVE container when uploaded as .wav."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        fake_avi = b"RIFF\x20\x00\x00\x00AVI LIST\x00"
+        resp = await client.post(
+            "/internal/process",
+            headers=AUTH_HEADERS,
+            data={"job_id": "fake-avi-job-1", "tenant_id": "t1", "project_id": "p1"},
+            files=[("files", ("fake_audio.wav", fake_avi, "audio/wav"))],
+        )
+        assert resp.status_code == 415
+
+
+@pytest.mark.asyncio
+async def test_api_rejects_binary_disguised_as_text():
+    """Reject binary payload with excessive control characters uploaded as .txt."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        binary_text = b"Some text\x01\x02\x03\x04\x05\x06\x07\x08\x0b\x0c\x0e\x0f" * 10
+        resp = await client.post(
+            "/internal/process",
+            headers=AUTH_HEADERS,
+            data={"job_id": "fake-txt-job-1", "tenant_id": "t1", "project_id": "p1"},
+            files=[("files", ("binary.txt", binary_text, "text/plain"))],
+        )
+        assert resp.status_code == 415

@@ -54,12 +54,27 @@ def is_valid_pdf(raw_bytes: bytes) -> bool:
 
 
 def is_valid_docx(raw_bytes: bytes) -> bool:
-    """Validate expected DOCX OOXML ZIP members. Reject generic, malformed, or arbitrary ZIPs."""
+    """Validate expected DOCX OOXML ZIP members and guard against ZIP bombs."""
     if not raw_bytes.startswith(SUPPORTED_TYPES["docx"]):
         return False
     try:
         with zipfile.ZipFile(io.BytesIO(raw_bytes)) as z:
-            namelist = z.namelist()
+            infolist = z.infolist()
+            # Guard against excessive member counts
+            if len(infolist) > 500:
+                return False
+
+            total_uncompressed = sum(info.file_size for info in infolist)
+            # Guard against excessive total uncompressed size (> 50 MB)
+            if total_uncompressed > 50 * 1024 * 1024:
+                return False
+
+            # Guard against extreme decompression ratio (> 100:1)
+            compressed_size = max(len(raw_bytes), 1)
+            if total_uncompressed / compressed_size > 100.0 and total_uncompressed > 1024 * 1024:
+                return False
+
+            namelist = [info.filename for info in infolist]
             return "[Content_Types].xml" in namelist and any(
                 "word/document.xml" in name or name.startswith("word/") for name in namelist
             )
@@ -119,7 +134,11 @@ def is_valid_text(raw_bytes: bytes) -> bool:
         return False
 
     try:
-        sample.decode("utf-8")
+        text_sample = sample.decode("utf-8")
+        # Check non-printable ASCII control characters (excluding tab, LF, CR)
+        control_chars = sum(1 for c in text_sample if ord(c) < 32 and c not in ("\t", "\n", "\r"))
+        if len(text_sample) > 0 and (control_chars / len(text_sample)) > 0.05:
+            return False
         return True
     except UnicodeDecodeError:
         return False
