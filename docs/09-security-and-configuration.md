@@ -1,6 +1,6 @@
-# Security and configuration
+# Security and Configuration
 
-Purpose: state the implemented security boundaries and configuration contract, including missing protections. Audience: maintainers, security reviewers, and operators.
+Purpose: State the implemented security boundaries and configuration contract, including verified protections and known limitations. Audience: Maintainers, security reviewers, and operators.
 
 ## Authentication and authorization
 
@@ -14,7 +14,7 @@ Tenant/project values are carried into jobs, source rows, chunks, embeddings, an
 
 ## Secrets and sensitive data
 
-Provider keys and service tokens are loaded from environment variables. Use `ai-service/.env.example` as the complete template; it includes runtime settings and the test/client-only helpers used by the fixture runner. Never commit `.env` or `openai_key.txt`. Logs redact request bodies, query values, headers, raw LLM I/O, and credentials by default. `DEBUG_LLM_IO` is force-disabled in production.
+Provider keys and service tokens are loaded from environment variables. Use `ai-service/.env.example` as the complete template; it includes runtime settings and the test/client-only helpers used by the fixture runner. Never commit `.env` or provider keys. Logs redact request bodies, query values, headers, raw LLM I/O, and credentials by default. `DEBUG_LLM_IO` is force-disabled in production.
 
 Ingest can mask detected emails, phones, API-key-like strings, and Luhn-valid credit-card candidates when `ENABLE_PII_MASKING` is enabled (default true). The masking statistics are internal state and are not exposed in the V1 result. This is pattern-based masking, not a complete data-loss-prevention system.
 
@@ -22,37 +22,38 @@ Ingest can mask detected emails, phones, API-key-like strings, and Luhn-valid cr
 
 - Uploaded documents and transcripts can contain sensitive meeting/project information and are sent to configured providers as prompt context. Provider data handling is outside this repository.
 - Retrieved context is source-grounding context, not an authorization boundary by itself. Tenant/project scope and backend authorization must be correct before retrieval.
-- Prompt injection defenses are not a separate implemented subsystem. Source text is inserted into extraction/relevance/generation contexts; reviewers should treat untrusted documents as instructions-capable content and validate outputs/evidence.
+- Prompt injection defenses are not a separate subsystem. Source text is inserted into extraction/relevance/generation contexts; reviewers should treat untrusted documents as instruction-capable content and validate outputs/evidence.
 - Structured output parsing, quote checks, quality gates, and deterministic fallbacks reduce malformed or ungrounded output but do not guarantee factual correctness.
 
 ## Configuration inventory
 
-| Variable | Purpose / default |
+| Variable | Purpose / Default |
 |---|---|
-| `ENV` | Environment name; production enables fail-fast security/config checks. |
+| `ENV` | Environment name (`development`, `production`, `test`); production enables fail-fast security/config checks. |
 | `AI_INTERNAL_SERVICE_TOKEN` | Bearer token for `/internal/*`; required in production. |
 | `ALLOWED_ORIGINS` | Comma-separated CORS origins; explicit in production. |
 | `DATABASE_URL` | PostgreSQL async DSN; empty selects memory stores. |
-| `REDIS_URL`, `QUEUE_NAME` | Redis/RQ dispatch and transient input cache. |
-| `LLM_PROVIDER` | Primary chat provider routing. |
+| `DATABASE_POOL_SIZE`, `DATABASE_MAX_OVERFLOW` | PostgreSQL connection pool bounds (default 5 base, 10 overflow). |
+| `DATABASE_POOL_TIMEOUT`, `DATABASE_POOL_RECYCLE` | Pool timeout (30s) and recycle time (1800s). |
+| `REDIS_URL`, `QUEUE_NAME` | Redis/RQ dispatch and transient input cache. Required in production unless `ALLOW_INPROCESS_QUEUE_IN_PRODUCTION` is true. |
+| `LLM_PROVIDER` | Primary chat provider routing (`groq`, `openrouter`, `openai`). |
 | `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `GROQ_API_KEY` | Chat provider credentials; `OPENROUTER_MODEL`, `OPENAI_MODEL`, `GROQ_MODEL` select models. |
-| `LLM_FALLBACK_CHAIN` | Optional JSON fallback provider/model list used after the primary provider fails. |
-| `GOOGLE_API_KEY`, `GPT_OSS_API_KEY`, `BASE_URL_KEY` | Reserved compatibility settings exposed by configuration; not used by the supported provider routing in the current service. |
-| `TRANSCRIBE_PROVIDER`, `DEEPGRAM_API_KEY`, `GROQ_WHISPER_MODEL`, `GROQ_LANGUAGE`, `ENABLE_AUDIO` | Audio provider, optional language hint, and opt-in behavior. |
-| `ENABLE_EMBEDDINGS`, `EMBEDDING_PROVIDER`, `EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS`, `ENABLE_HYBRID_RETRIEVAL` | Chunk vector and hybrid retrieval controls. |
+| `LLM_FALLBACK_CHAIN` | Optional JSON fallback provider/model list used after primary provider failure. |
+| `TRANSCRIBE_PROVIDER`, `DEEPGRAM_API_KEY`, `GROQ_WHISPER_MODEL`, `ENABLE_AUDIO` | Audio STT provider, API keys, Whisper model, and audio enablement. |
+| `SOURCE_MAX_CONCURRENCY`, `STT_MAX_CONCURRENCY` | Concurrency bounds for source preparation (default 4) and STT (default 2). |
+| `MAX_AUDIO_DURATION_MINUTES` | Maximum allowed audio duration per recording (default 120 minutes). |
+| `ENABLE_EMBEDDINGS`, `EMBEDDING_PROVIDER`, `EMBEDDING_MODEL`, `ENABLE_HYBRID_RETRIEVAL` | Chunk vector and hybrid retrieval controls. |
 | `BACKEND_BASE_URL`, `BACKEND_SERVICE_TOKEN`, `ALLOWED_DOWNLOAD_DOMAINS`, `CALLBACK_TIMEOUT_SECONDS` | Backend source recovery, approved public file hosts, and callback trust boundary. The allowlist has safe S3/Cloudinary/GCS/CloudFront defaults when unset. |
 | `ENABLE_PII_MASKING`, `DEBUG_LLM_IO` | Privacy/logging behavior; raw I/O is disabled in production. |
 | `ENABLE_CONFLICT_DETECTION`, `CONFLICT_*` | Optional requirement conflict candidate/classification behavior. |
 | `ENABLE_QUALITY_REPAIR`, `MAX_REPAIR_ATTEMPTS` | Optional bounded story repair loop. |
 | `MAX_JOB_RUNTIME_SECONDS`, `MAX_CONCURRENT_JOBS`, `PROVIDER_TIMEOUT_SECONDS` | Worker/provider execution limits. |
-| `JOB_RESULT_RETENTION_DAYS`, `CHUNK_RETENTION_DAYS` | Intended retention configuration; no cleanup scheduler is implemented here. |
-
-`AI_SERVICE_BASE_URL` and `TEST_DATABASE_URL` are not API runtime settings. They are optional helpers for the fixture upload script and the marked database integration test respectively. `PYTHONUNBUFFERED` is supplied by Docker Compose rather than this application template.
+| `JOB_RESULT_RETENTION_DAYS`, `CHUNK_RETENTION_DAYS` | Retention periods enforced by `python -m app.maintenance.cleanup`. |
 
 ## Gaps to track
 
 - No application-level user/tenant authorization exists in this service.
 - No durable callback outbox/retry exists.
-- No complete prompt-injection policy or provider data-retention control exists in code.
+- No complete prompt-injection policy exists in code.
 - Pattern masking can miss sensitive data and can produce false positives.
 - Rate limiting and abuse controls are not implemented in FastAPI routes in this repository.

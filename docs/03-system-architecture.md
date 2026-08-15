@@ -1,61 +1,62 @@
-# System architecture
+# System Architecture
 
-Purpose: describe the runtime components and boundaries that surround the AI pipeline. Audience: backend engineers, platform engineers, and technical reviewers.
+Purpose: Describe the runtime components and architectural boundaries that surround the AI pipeline. Audience: Backend engineers, platform engineers, and technical reviewers.
 
 ## Runtime topology
 
 ```mermaid
 flowchart LR
-    Caller["Backend or local caller"] --> API["FastAPI API\napp.main + /internal routes"]
-    API --> JobStore["Job store\nMemory or PostgreSQL"]
-    API --> Queue["Queue\nIn-process or Redis/RQ"]
-    Queue --> Worker["Worker\napp.worker.main"]
-    Worker --> Recover["Input recovery\nRedis cache or backend client"]
-    Recover --> Graph["Compiled LangGraph\n15 pipeline nodes"]
-    Graph --> Provider["LLM/STT/embedding providers"]
-    Graph --> Store["Chunks, embeddings, decomposed results\nMemory or PostgreSQL/pgvector"]
-    Worker --> Callback["Allowlisted backend callback\noptional, best effort"]
-    Caller --> Health["/health and /ready"]
+    Caller["Backend or Local Caller"] --> API["FastAPI API\napp.main + /internal routes"]
+    API --> JobStore[("Job Store\nMemory or PostgreSQL")]
+    API --> Queue["Queue\nIn-Process or Redis/RQ"]
+    Queue --> Worker["Worker Process\napp.worker.main"]
+    Worker --> Recover["Input Recovery\nRedis Cache or Backend Client"]
+    Recover --> Graph["Compiled LangGraph\n13 Pipeline Nodes"]
+    Graph --> Provider["LLM / STT / Embedding Providers"]
+    Graph --> Store[("Chunks, Embeddings, Results\nMemory or PostgreSQL/pgvector")]
+    Worker --> Callback["Allowlisted Backend Callback\nOptional, Best-Effort"]
+    Caller --> Health["/health and /ready Probes"]
 ```
 
 ## Component boundaries
 
 | Component | Runs as | Source of truth / boundary |
 |---|---|---|
-| FastAPI API | API process | Validates requests, creates jobs, exposes status and results. It does not execute the production RQ job itself. |
-| In-process queue | API process | Development/test fallback; runs `run_job_entry()` with a semaphore. Not durable. |
-| Redis/RQ | Separate Redis and worker process | Redis dispatches jobs and temporarily caches inline input for six hours. It is not authoritative. |
-| Worker | `python -m app.worker.main` | Reconstructs input, runs the graph, persists artifacts, updates status, and attempts callbacks. |
-| Store bundle | API and worker | `app.store.factory` selects memory when `DATABASE_URL` is empty, PostgreSQL/pgvector otherwise. |
+| FastAPI API | API process | Validates requests, fingerprints inputs, creates jobs, exposes status and results. It does not execute the production worker graph directly. |
+| In-process queue | API process | Development/test fallback; runs `run_job_entry()` with a concurrency semaphore. Not cross-process durable. |
+| Redis/RQ | Separate Redis and worker process | Dispatches jobs and temporarily caches inline input (6-hour TTL). It is not authoritative storage. |
+| Worker | `python -m app.worker.main` | Reconstructs input, runs the 13-node graph, persists artifacts, updates status, and attempts callbacks. |
+| Store bundle | API and worker | `app.store.factory` selects memory when `DATABASE_URL` is empty, PostgreSQL/pgvector with configurable connection pooling otherwise. |
 | Backend client | Worker | Fetches backend-owned sources and posts terminal callbacks. Host, redirect, size, and checksum checks are enforced. |
-| External providers | Network services | Chat: OpenRouter/OpenAI/Groq through `ResilientLLMClient`; STT: Groq/Deepgram; embeddings: OpenAI/OpenRouter. |
+| External providers | Network services | Chat: OpenRouter/OpenAI/Groq through `ResilientLLMClient`; STT: Groq/Deepgram with fallback; embeddings: OpenAI/OpenRouter. |
 
 ## Request-to-result sequence
 
 ```mermaid
 sequenceDiagram
-    participant B as Backend/caller
+    autonumber
+    participant B as Backend / Caller
     participant A as FastAPI API
-    participant D as Durable store
-    participant Q as Redis/RQ or in-process queue
-    participant W as Worker
-    participant P as Providers
-    participant C as Backend callback
+    participant D as PostgreSQL (Durable Store)
+    participant Q as Redis / RQ (Queue & Cache)
+    participant W as RQ Worker
+    participant P as Providers (LLM / STT)
+    participant C as Backend Callback
 
-    B->>A: POST /internal/jobs (bearer token)
-    A->>D: create or compare job fingerprint
-    A->>Q: enqueue job and cache transient input when needed
+    B->>A: POST /internal/jobs (Bearer Token)
+    A->>D: Create or compare job fingerprint (Idempotency)
+    A->>Q: Enqueue job ID & cache transient input (6h TTL)
     A-->>B: 202 QUEUED (or idempotent/conflict response)
-    Q->>W: execute job
-    W->>D: mark PROCESSING and add attempt
-    W->>W: recover input and invoke compiled graph
-    W->>P: LLM/STT/embedding calls as enabled
-    W->>D: persist source chunks, embeddings, result, events
-    W->>D: mark terminal status
-    W->>C: optional allowlisted callback
-    B->>A: GET status/result (polling alternative)
-    A->>D: read durable job/result
-    A-->>B: status or JobResult
+    Q->>W: Dequeue job
+    W->>D: Mark PROCESSING and record attempt
+    W->>W: Recover input and invoke 13-node compiled graph
+    W->>P: LLM / STT / embedding calls as enabled
+    W->>D: Persist source chunks, embeddings, result, events
+    W->>D: Mark terminal status (COMPLETED / PARTIAL / REJECTED)
+    W->>C: Optional allowlisted callback (best-effort)
+    B->>A: GET /internal/jobs/{job_id}/result (polling alternative)
+    A->>D: Read durable job/result
+    A-->>B: Status or JobResult payload
 ```
 
 ## Trust and ownership boundaries

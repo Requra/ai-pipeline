@@ -1,6 +1,6 @@
-# Deployment and operations
+# Deployment and Operations
 
-Purpose: document the deployment-shaped topology and operational behavior that is present in the repository. Audience: platform engineers and release reviewers.
+Purpose: Document the deployment-shaped topology, operational behavior, CI gates, and maintenance routines. Audience: Platform engineers and release reviewers.
 
 ## Verified deployment shape
 
@@ -16,7 +16,7 @@ The API and worker share PostgreSQL and Redis. `Dockerfile` installs Python depe
 
 ## Release and startup checks
 
-The application lifespan calls `run_startup_checks()`; production configuration is validated by `collect_config_problems()`/`validate_required_config()`. In production, required LLM configuration, internal auth, explicit CORS origins, and `DATABASE_URL` are fail-fast requirements. Optional audio and embeddings add requirements only when enabled.
+The application lifespan calls `run_startup_checks()`; production configuration is validated by `collect_config_problems()` and `validate_required_config()`. In production, required LLM configuration, internal auth, explicit CORS origins, `DATABASE_URL`, and `REDIS_URL` (unless overridden) are fail-fast requirements. Optional audio and embeddings add requirements only when enabled.
 
 Deploy in this order:
 
@@ -28,11 +28,27 @@ docker compose up -d ai-service ai-worker
 docker compose ps
 ```
 
-These commands are verified against the Compose service names and container commands; a live deployment was not performed as part of this documentation audit.
+## Continuous Integration & Release Gates
+
+The repository includes GitHub Actions CI workflows in `.github/workflows/`:
+
+- `.github/workflows/ci.yml`: Runs on push and pull requests; executes automated pytest test suite and contract drift checks with mock provider configuration.
+- `.github/workflows/real_e2e_evaluation.yml`: Scheduled weekly / manual workflow; executes `scripts/run_production_readiness_suite.py` against real AI providers (Groq LLM + Groq Whisper + Neon PostgreSQL) and generates `docs/reports/MIXED_SOURCE_REAL_E2E_PROD_READINESS.md`.
 
 ## Migrations
 
 Run `poetry run alembic upgrade head` in the migration container or from `ai-service`. The current chain is `0001_initial` → `0002_job_idempotency`. Do not use ORM auto-create as a production migration substitute; the migration explicitly enables pgvector and creates the IVFFLAT index.
+
+## Maintenance and Retention Cleanup
+
+To enforce retention policies for expired job results, chunks, and embeddings:
+
+```bash
+# Run standalone maintenance cleanup
+python -m app.maintenance.cleanup
+```
+
+In production, schedule this command as a recurring cron job or container task.
 
 ## Health and rollback
 
@@ -46,6 +62,4 @@ Run `poetry run alembic upgrade head` in the migration container or from `ai-ser
 
 - Callback delivery is one best-effort HTTP attempt; there is no durable outbox/retry worker.
 - Redis is transient and input-cache expiry can make retries fail without backend raw-source recovery.
-- Retention settings exist but no scheduled cleanup implementation is present in this repository.
 - Provider costs, rate limits, and token budgets are not centrally metered here; provider metadata is recorded opportunistically.
-- There is no checked-in CI workflow in `.github/`; local tests and deployment checks must be wired into the external release system.
