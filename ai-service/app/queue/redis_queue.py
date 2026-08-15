@@ -28,7 +28,11 @@ def get_redis_connection(url: Optional[str] = None):
     """Return a redis client for the configured URL (lazy import)."""
     import redis
 
-    return redis.Redis.from_url(url or settings.REDIS_URL)
+    return redis.Redis.from_url(
+        url or settings.REDIS_URL,
+        socket_connect_timeout=3,
+        socket_timeout=3,
+    )
 
 
 class RedisQueue:
