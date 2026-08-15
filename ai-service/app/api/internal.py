@@ -274,19 +274,20 @@ async def process_compatibility(
             detail="each uploaded file must have a unique document ID; supply distinct document_ids for duplicate content",
         )
 
-    input_types = {item["file_type"] == "audio" for item in validated_inputs}
-    if len(input_types) > 1:
-        raise HTTPException(
-            status_code=400,
-            detail="mixed document and audio uploads are not supported; submit them as separate jobs",
-        )
-    if validated_inputs[0]["file_type"] == "audio" and len(validated_inputs) > 1:
+    audio_count = sum(1 for item in validated_inputs if item["file_type"] == "audio")
+    doc_count = sum(1 for item in validated_inputs if item["file_type"] != "audio")
+    if audio_count > 1:
         raise HTTPException(
             status_code=400,
             detail="multiple audio uploads are not supported; submit one audio file per job",
         )
 
-    mapped_input_type = "backend_audio" if validated_inputs[0]["file_type"] == "audio" else "backend_document"
+    if audio_count > 0 and doc_count > 0:
+        mapped_input_type = "backend_sources"
+    elif audio_count > 0:
+        mapped_input_type = "backend_audio"
+    else:
+        mapped_input_type = "backend_document"
 
     from app.api.schemas import SourceDocumentIn, CreateJobRequest, JobOptionsIn
     source_docs = [
@@ -333,23 +334,20 @@ async def process_compatibility(
         MOCK_DOCUMENT_STORAGE[item["document_id"]] = item["raw_bytes"]
 
     single_input = validated_inputs[0] if len(validated_inputs) == 1 else None
-    # Audio has one supported processing shape: a single byte stream routed to
-    # transcribe.  The multipart field name is only a compatibility detail and
-    # must not send one audio item through the multi-document ingest path.
-    is_single_source = file is not None or bool(
-        single_input and single_input["file_type"] == "audio"
-    )
+    is_single_source = len(validated_inputs) == 1
+    found_audio_fmt = next((item["audio_format"] for item in validated_inputs if item.get("audio_format")), None)
+
     await prepare_and_dispatch_job(
         req,
         rec,
         background_tasks=background_tasks,
         request_id=request_id,
         raw_bytes=single_input["raw_bytes"] if is_single_source and single_input else b"",
-        raw_inputs=[] if is_single_source else validated_inputs,
+        raw_inputs=validated_inputs,
         raw_text="",
-        file_type=single_input["file_type"] if single_input else "document",
+        file_type=single_input["file_type"] if single_input else ("sources" if mapped_input_type == "backend_sources" else "document"),
         metadata=parsed_metadata,
-        audio_format=single_input["audio_format"] if single_input else None,
+        audio_format=single_input["audio_format"] if single_input else found_audio_fmt,
         transcribe_options={},
     )
 

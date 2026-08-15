@@ -6,7 +6,13 @@ from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
-InputTypeLiteral = Literal["text", "backend_document", "backend_transcript", "backend_audio"]
+InputTypeLiteral = Literal[
+    "text",
+    "backend_document",
+    "backend_transcript",
+    "backend_audio",
+    "backend_sources",
+]
 
 
 class SourceDocumentIn(BaseModel):
