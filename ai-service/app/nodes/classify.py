@@ -160,6 +160,7 @@ async def classify_node(state: PipelineState) -> dict:
                 "text": getattr(fr, "text", ""),
                 "actor": getattr(fr, "actor", None),
                 "goal": getattr(fr, "goal", None),
+                "disposition": getattr(fr, "disposition", "accepted"),
                 "candidate_labels": getattr(fr, "candidate_labels", []),
                 "confidence": getattr(fr, "confidence", 0.0),
                 "evidence": getattr(fr, "evidence", []),
@@ -167,6 +168,13 @@ async def classify_node(state: PipelineState) -> dict:
                 "review_reason": getattr(fr, "review_reason", None),
                 "priority": getattr(fr, "priority", "Medium"),
             }
+
+            # Disposition-driven label enforcement
+            if base_kwargs["disposition"] in ("rejected", "deferred"):
+                if "Out-of-Scope" not in base_kwargs["candidate_labels"]:
+                    base_kwargs["candidate_labels"].append("Out-of-Scope")
+            elif base_kwargs["disposition"] in ("proposed", "uncertain"):
+                base_kwargs["needs_review"] = True
 
             candidate_labels = set(base_kwargs["candidate_labels"] or [])
             special_intersection = candidate_labels.intersection(special_non_story_labels)
@@ -214,7 +222,10 @@ async def classify_node(state: PipelineState) -> dict:
         special_non_story_labels = {"Open Question", "Out-of-Scope", "Assumption"}
         
         for fr in frs:
+            disp = getattr(fr, "disposition", "accepted")
             candidate_labels = set(getattr(fr, "candidate_labels", []) or [])
+            if disp in ("rejected", "deferred"):
+                candidate_labels.add("Out-of-Scope")
             special_intersection = candidate_labels.intersection(special_non_story_labels)
             
             labels = [list(special_intersection)[0]] if special_intersection else ["FR"]
@@ -226,7 +237,8 @@ async def classify_node(state: PipelineState) -> dict:
                     text=getattr(fr, "text", ""),
                     actor=getattr(fr, "actor", None),
                     goal=getattr(fr, "goal", None),
-                    candidate_labels=getattr(fr, "candidate_labels", []),
+                    disposition=disp,
+                    candidate_labels=list(candidate_labels),
                     confidence=getattr(fr, "confidence", 0.0),
                     evidence=getattr(fr, "evidence", []),
                     needs_review=getattr(fr, "needs_review", True),
