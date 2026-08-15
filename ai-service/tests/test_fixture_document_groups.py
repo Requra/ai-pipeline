@@ -11,7 +11,7 @@ import json
 import sys
 from contextlib import ExitStack
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, AsyncMock, patch
 
 import pytest
 
@@ -66,9 +66,14 @@ async def _run_group(group: str, *, conflict: bool):
     state["metadata"] = {"fixture_group": group}
     llm = _fixture_llm(conflict=conflict)
 
+    mock_embedder = MagicMock()
+    mock_embedder.embed_documents = AsyncMock(side_effect=lambda texts: [[1.0] * 1536 for _ in texts])
+
     with ExitStack() as stack:
         stack.enter_context(patch.object(settings, "ENABLE_CONFLICT_DETECTION", conflict))
         stack.enter_context(patch("app.llm.get_llm", return_value=llm))
+        stack.enter_context(patch("app.services.source_processing.extractors.get_llm", return_value=llm))
+        stack.enter_context(patch("app.rag.requirement_embeddings.get_embedder", return_value=mock_embedder))
         for node in evaluation._NODES_WITH_LLM:
             stack.enter_context(patch(f"app.nodes.{node}.get_llm", return_value=llm))
         stack.enter_context(patch("app.nodes.dedupe_requirements.get_llm", return_value=llm))

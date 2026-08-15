@@ -196,6 +196,7 @@ async def run_fixture(name: str, raw_text: str, use_real: bool = False):
         llm = make_mock_llm()
         with ExitStack() as stack:
             stack.enter_context(patch("app.llm.get_llm", return_value=llm))
+            stack.enter_context(patch("app.services.source_processing.extractors.get_llm", return_value=llm))
             for node in _NODES_WITH_LLM:
                 stack.enter_context(patch(f"app.nodes.{node}.get_llm", return_value=llm))
             result = await pipeline.ainvoke(state)
