@@ -503,9 +503,31 @@ def unsupported_fact_terms(text: str, sources: Iterable[str]) -> set[str]:
         result.remove("deny")
     if numeric_upper_bound_entails(text, sources):
         result.difference_update({"block", "deny", "proceed", "reject"})
+    if active_prohibition_entails(text, sources):
+        result.difference_update({"block", "deny", "reject", "prevent"})
     if "retain" in result and retention_entails(text, sources):
         result.remove("retain")
     return result
+
+
+def active_prohibition_entails(text: str, sources: Iterable[str]) -> bool:
+    """Recognize rejection/blocking entailed by an explicit source prohibition."""
+    candidate = re.sub(r"\s+", " ", text or "").strip().lower()
+    if not re.search(
+        r"\b(?:den(?:y|ied)|reject(?:ed|s)?|block(?:ed|s)?|prevent(?:ed|s)?|"
+        r"cannot|can't|does\s+not\s+allow|not\s+allowed|not\s+permitted)\b",
+        candidate,
+    ):
+        return False
+    prohibition_re = re.compile(
+        r"\b(?:cannot|can't|must\s+not|shall\s+not|never|under\s+no\s+circumstances|"
+        r"prohibited|strictly\s+forbidden)\b",
+        re.I,
+    )
+    for source in sources:
+        if prohibition_re.search(source or ""):
+            return True
+    return False
 
 
 def introduces_unsupported_approval_outcome(text: str, sources: Iterable[str]) -> bool:
@@ -703,6 +725,8 @@ def evaluate_polarity(text: str, sources: Iterable[str]) -> str:
         return "ENTAILED"
     if numeric_upper_bound_entails(text, sources):
         return "ENTAILED"
+    if active_prohibition_entails(text, sources):
+        return "ENTAILED"
 
     source_clauses = []
     for source in sources:
@@ -867,6 +891,12 @@ def normalize_story_points(value, source_texts: Sequence[str] = ()) -> int:
 
 def infer_requirement_category(text: str, labels: Sequence[str] = ()) -> str:
     """Map source language to a stable, user-facing category."""
+    if "Out-of-Scope" in labels:
+        return "Out-of-Scope"
+    if "Open Question" in labels:
+        return "Open Question"
+    if "Assumption" in labels:
+        return "Assumption"
     lowered = (text or "").lower()
     categories = (
         ("Security & Access Control", ("authentication", "multi-factor", "mfa", "permission", "role", "access", "encrypt", "tls", "ssl", "credential")),

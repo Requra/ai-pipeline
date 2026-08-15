@@ -112,7 +112,14 @@ def _audio_clause_covers_material_facts(requirement: str, clause: str) -> bool:
     clause_facts -= modals
     if len(requirement_facts) < 3:
         return True
-    return requirement_facts.issubset(clause_facts)
+    if requirement_facts.issubset(clause_facts):
+        return True
+    # Bounded multi-utterance / conversational coverage allowance
+    coverage = (
+        len(requirement_facts & clause_facts) / len(requirement_facts)
+        if requirement_facts else 0.0
+    )
+    return coverage >= 0.85
 
 
 def _reconcile_evidence_warnings(
@@ -142,6 +149,7 @@ def _reconcile_evidence_warnings(
                 f"{len(unresolved_ids)} requirement(s) still lack verified "
                 f"source evidence after grounding: {public_ids}."
             ),
+            "unresolved_requirement_ids": unresolved_ids,
         })
     return reconciled
 
@@ -397,10 +405,18 @@ async def evidence_grounding_node(state: PipelineState) -> dict:
                         if audio_evidence else [supporting_clause],
                     ))
                     unsupported_behavior = bool(
-                        unsupported_fact_terms(req.text, [supporting_clause])
+                        unsupported_fact_terms(
+                            normalize_audio_matching_text(req.text)
+                            if audio_evidence else req.text,
+                            [normalize_audio_matching_text(supporting_clause)]
+                            if audio_evidence else [supporting_clause],
+                        )
                     )
                     polarity_conflict = has_polarity_conflict(
-                        req.text, [supporting_clause]
+                        normalize_audio_matching_text(req.text)
+                        if audio_evidence else req.text,
+                        [normalize_audio_matching_text(supporting_clause)]
+                        if audio_evidence else [supporting_clause],
                     )
                     incomplete_audio_clause = (
                         audio_evidence
