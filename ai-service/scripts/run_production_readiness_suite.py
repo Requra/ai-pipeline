@@ -46,19 +46,16 @@ GROUND_TRUTH_AUDIO_TEXT = (
 
 class ProductionReadinessSuite:
     def __init__(self):
+        from scripts.readiness_reporter import resolve_runtime_metadata
+
+        llm_model = getattr(settings, "GROQ_MODEL", "llama-3.1-8b-instant") or "llama-3.3-70b-versatile"
         self.report_data: Dict[str, Any] = {
-            "metadata": {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "branch": "feat/doc-audio-processing",
-                "commit": "e50b215",
-                "python_version": sys.version.split()[0],
-                "llm_provider": "groq",
-                "llm_model": "llama-3.3-70b-versatile",
-                "stt_provider": "groq",
-                "stt_model": "whisper-large-v3",
-                "database": "PostgreSQL 16 + pgvector (Neon)",
-                "real_provider_execution_confirmed": True,
-            },
+            "metadata": resolve_runtime_metadata(
+                llm_provider=getattr(settings, "LLM_PROVIDER", "groq"),
+                llm_model=llm_model,
+                stt_provider=getattr(settings, "TRANSCRIBE_PROVIDER", "groq"),
+                stt_model="whisper-large-v3",
+            ),
             "matrix": [],
             "golden_e2e": {},
             "performance_timings": {},
@@ -686,7 +683,7 @@ class ProductionReadinessSuite:
 
     async def run_concurrency_benchmarks(self, client: AsyncClient):
         print("\n========================================================")
-        print(">>> 4. BOUNDED CONCURRENCY BENCHMARKS (1, 3, 5 JOBS)")
+        print(">>> 4. BOUNDED CONCURRENCY BENCHMARKS (1, 2, 3 JOBS)")
         print("========================================================")
         
         pdf_path = FIXTURES_DIR / "requirements.pdf"
@@ -697,21 +694,31 @@ class ProductionReadinessSuite:
             await asyncio.sleep(4.0)
             t0 = time.monotonic()
             job_ids = [f"bench-c{num_jobs}-{i}-{int(time.time())}" for i in range(num_jobs)]
+            latencies: List[float] = []
             
             async def _submit_and_wait(j_id: str) -> Dict[str, Any]:
                 files = [
                     ("files", ("requirements.pdf", open(pdf_path, "rb"), "application/pdf")),
                     ("files", ("meeting-audio.mp3", open(audio_path, "rb"), "audio/mpeg")),
                 ]
+                job_start = time.monotonic()
                 await client.post("/internal/process", headers=self.auth_headers, data={"job_id": j_id, "project_id": "proj-bench", "tenant_id": "tenant-bench", "document_ids": ["d1", "d2"], "language": "en"}, files=files)
-                return await self.poll_job_completion(client, j_id, max_wait_sec=360)
+                res = await self.poll_job_completion(client, j_id, max_wait_sec=360)
+                latencies.append(time.monotonic() - job_start)
+                return res
             
             results = await asyncio.gather(*(_submit_and_wait(jid) for jid in job_ids), return_exceptions=True)
             elapsed = time.monotonic() - t0
             
             success_count = sum(1 for r in results if isinstance(r, dict) and r.get("status") in ("COMPLETED", "completed", "PARTIAL", "partial"))
-            mean_time = elapsed / num_jobs
-            print(f"Level {num_jobs}: {success_count}/{num_jobs} succeeded in {elapsed:.2f}s (mean={mean_time:.2f}s)")
+            sorted_lat = sorted(latencies) if latencies else [0.0]
+            p50 = sorted_lat[len(sorted_lat) // 2] if sorted_lat else 0.0
+            p95_idx = min(len(sorted_lat) - 1, int(len(sorted_lat) * 0.95))
+            p95 = sorted_lat[p95_idx] if sorted_lat else 0.0
+            max_lat = max(sorted_lat) if sorted_lat else 0.0
+            mean_time = sum(sorted_lat) / len(sorted_lat) if sorted_lat else 0.0
+            
+            print(f"Level {num_jobs}: {success_count}/{num_jobs} succeeded in {elapsed:.2f}s (p50={p50:.2f}s, p95={p95:.2f}s, max={max_lat:.2f}s)")
             
             self.report_data["concurrency_benchmarks"].append({
                 "concurrency": num_jobs,
@@ -719,6 +726,10 @@ class ProductionReadinessSuite:
                 "succeeded": success_count,
                 "total_wall_seconds": round(elapsed, 2),
                 "mean_e2e_seconds": round(mean_time, 2),
+                "p50_latency_seconds": round(p50, 2),
+                "p95_latency_seconds": round(p95, 2),
+                "max_latency_seconds": round(max_lat, 2),
+                "latencies_seconds": [round(lat, 2) for lat in sorted_lat],
                 "errors_or_429s": num_jobs - success_count,
             })
 

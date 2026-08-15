@@ -78,9 +78,9 @@ def _sample_report_data(golden_status: str = "COMPLETED", all_pass: bool = True,
             "fallback_status": "BLOCKED — SECOND PROVIDER (DEEPGRAM) NOT CONFIGURED IN ENVIRONMENT" if fallback_blocked else "AVAILABLE",
         },
         "concurrency_benchmarks": [
-            {"concurrency": 1, "total_jobs": 1, "succeeded": 1, "total_wall_seconds": 12.5, "mean_e2e_seconds": 12.5, "errors_or_429s": 0},
-            {"concurrency": 2, "total_jobs": 2, "succeeded": 2, "total_wall_seconds": 24.1, "mean_e2e_seconds": 12.05, "errors_or_429s": 0},
-            {"concurrency": 3, "total_jobs": 3, "succeeded": 3, "total_wall_seconds": 38.6, "mean_e2e_seconds": 12.87, "errors_or_429s": 0},
+            {"concurrency": 1, "total_jobs": 1, "succeeded": 1, "p50_latency_seconds": 12.5, "p95_latency_seconds": 12.5, "max_latency_seconds": 12.5, "total_wall_seconds": 12.5, "mean_e2e_seconds": 12.5, "errors_or_429s": 0},
+            {"concurrency": 2, "total_jobs": 2, "succeeded": 2, "p50_latency_seconds": 12.05, "p95_latency_seconds": 12.10, "max_latency_seconds": 12.15, "total_wall_seconds": 24.1, "mean_e2e_seconds": 12.05, "errors_or_429s": 0},
+            {"concurrency": 3, "total_jobs": 3, "succeeded": 3, "p50_latency_seconds": 12.87, "p95_latency_seconds": 13.00, "max_latency_seconds": 13.10, "total_wall_seconds": 38.6, "mean_e2e_seconds": 12.87, "errors_or_429s": 0},
         ],
     }
 
@@ -139,9 +139,9 @@ def test_markdown_report_rendering_strict_parity():
     assert "6.33%" in md  # WER
 
     # 3. Check Concurrency row rendering
-    assert "| 1 | 1/1 | 12.50s | 12.50s | 0 |" in md
-    assert "| 2 | 2/2 | 12.05s | 24.10s | 0 |" in md
-    assert "| 3 | 3/3 | 12.87s | 38.60s | 0 |" in md
+    assert "| 1 | 1/1 | 12.50s | 12.50s | 12.50s | 12.50s | 0 |" in md
+    assert "| 2 | 2/2 | 12.05s | 12.10s | 12.15s | 24.10s | 0 |" in md
+    assert "| 3 | 3/3 | 12.87s | 13.00s | 13.10s | 38.60s | 0 |" in md
 
     # 4. Check token counts are marked NOT CAPTURED instead of hallucinated
     assert "Token Counters:** NOT CAPTURED" in md
