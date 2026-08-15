@@ -1148,7 +1148,14 @@ async def generate_node(state: PipelineState) -> dict:
                 goal = "satisfy this requirement"
 
             agile_actor = normalize_actor_to_agile_role(actor)
-            fallback_title, fallback_description = _source_bound_story_wording([req])
+            fallback_title, _ = _source_bound_story_wording([req])
+            if not fallback_title or fallback_title.startswith("Story for"):
+                fallback_title = f"Story for requirement {req.id}"
+
+            fallback_description = (
+                f"As {agile_actor}, I want {goal}, so that the documented "
+                "requirement is fulfilled."
+            )
 
             user_story = UserStory(
                 id=story_id,

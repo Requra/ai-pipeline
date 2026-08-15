@@ -66,16 +66,29 @@ async def detect_file_type_node(state: PipelineState) -> dict:
                     "sha256_hash": normalized.get("sha256_hash"),
                 })
 
-        if len(detected_kinds) != 1:
-            return {
-                "status": "rejected",
-                "error": "FILE_TYPE_REJECTED: mixed document and audio inputs are not supported",
-            }
-        if detected_kinds == {"audio"} and len(normalized_inputs) > 1:
+        audio_count = sum(1 for item in normalized_inputs if item["file_type"] == "audio")
+        from app.config import settings
+        max_audio = getattr(settings, "MAX_AUDIO_SOURCES_PER_JOB", 1)
+        if audio_count > max_audio:
             return {
                 "status": "rejected",
                 "error": "FILE_TYPE_REJECTED: multiple audio inputs are not supported",
             }
+
+        has_audio = "audio" in detected_kinds
+        has_doc = "document" in detected_kinds
+        if has_audio and has_doc:
+            overall_file_type = "sources"
+        elif has_audio:
+            overall_file_type = "audio"
+        else:
+            overall_file_type = "document"
+
+        audio_fmt = None
+        for item in normalized_inputs:
+            if item.get("file_type") == "audio":
+                audio_fmt = item.get("audio_format")
+                break
 
         first = normalized_inputs[0]
         return {
@@ -87,8 +100,8 @@ async def detect_file_type_node(state: PipelineState) -> dict:
                 mime_type=first["mime_type"],
                 sha256_hash=first.get("sha256_hash") or hashlib.sha256(first["raw_bytes"]).hexdigest(),
             ),
-            "file_type": "audio" if detected_kinds == {"audio"} else "document",
-            "audio_format": first.get("audio_format") if detected_kinds == {"audio"} else None,
+            "file_type": overall_file_type,
+            "audio_format": audio_fmt,
             "status": "type_detected",
         }
 
