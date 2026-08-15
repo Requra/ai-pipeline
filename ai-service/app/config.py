@@ -175,6 +175,14 @@ class Settings:
     LLM_QUOTA_COOLDOWN_SECONDS: float = _env_float("LLM_QUOTA_COOLDOWN_SECONDS", 300.0)
 
     # ------------------------------------------------------------------
+    # Source processing & concurrency
+    # ------------------------------------------------------------------
+    SOURCE_PROCESS_CONCURRENCY: int = _env_int("SOURCE_PROCESS_CONCURRENCY", 3)
+    STT_CONCURRENCY: int = _env_int("STT_CONCURRENCY", 2)
+    MAX_AUDIO_SOURCES_PER_JOB: int = _env_int("MAX_AUDIO_SOURCES_PER_JOB", 1)
+    ENABLE_MIXED_SOURCE_JOBS: bool = _env_flag("ENABLE_MIXED_SOURCE_JOBS", "true")
+
+    # ------------------------------------------------------------------
     # Conflict Detection
     # ------------------------------------------------------------------
     ENABLE_CONFLICT_DETECTION: bool = _env_flag(
