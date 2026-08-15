@@ -175,12 +175,26 @@ class Settings:
     LLM_QUOTA_COOLDOWN_SECONDS: float = _env_float("LLM_QUOTA_COOLDOWN_SECONDS", 300.0)
 
     # ------------------------------------------------------------------
-    # Source processing & concurrency
+    # Source processing & operational limits
     # ------------------------------------------------------------------
     SOURCE_PROCESS_CONCURRENCY: int = _env_int("SOURCE_PROCESS_CONCURRENCY", 3)
     STT_CONCURRENCY: int = _env_int("STT_CONCURRENCY", 2)
     MAX_AUDIO_SOURCES_PER_JOB: int = _env_int("MAX_AUDIO_SOURCES_PER_JOB", 1)
+    MAX_SOURCES_PER_JOB: int = _env_int("MAX_SOURCES_PER_JOB", 10)
+    MAX_DOCUMENT_BYTES: int = _env_int("MAX_DOCUMENT_BYTES", 20 * 1024 * 1024)       # 20 MB
+    MAX_AUDIO_BYTES: int = _env_int("MAX_AUDIO_BYTES", 50 * 1024 * 1024)             # 50 MB
+    MAX_TOTAL_UPLOAD_BYTES: int = _env_int("MAX_TOTAL_UPLOAD_BYTES", 100 * 1024 * 1024) # 100 MB
+    MAX_AUDIO_DURATION_SECONDS: int = _env_int("MAX_AUDIO_DURATION_SECONDS", 1800)   # 30 minutes
+    INPUT_CACHE_TTL_SECONDS: int = _env_int("INPUT_CACHE_TTL_SECONDS", 86400)         # 24 hours
     ENABLE_MIXED_SOURCE_JOBS: bool = _env_flag("ENABLE_MIXED_SOURCE_JOBS", "true")
+
+    # ------------------------------------------------------------------
+    # Database Connection Pool
+    # ------------------------------------------------------------------
+    DB_POOL_SIZE: int = _env_int("DB_POOL_SIZE", 5)
+    DB_MAX_OVERFLOW: int = _env_int("DB_MAX_OVERFLOW", 10)
+    DB_POOL_TIMEOUT_SECONDS: int = _env_int("DB_POOL_TIMEOUT_SECONDS", 30)
+    DB_POOL_RECYCLE_SECONDS: int = _env_int("DB_POOL_RECYCLE_SECONDS", 1800)
 
     # ------------------------------------------------------------------
     # Conflict Detection

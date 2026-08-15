@@ -213,6 +213,12 @@ async def process_compatibility(
             detail="use either the legacy 'file' field or repeated 'files' fields, not both",
         )
 
+    if len(uploads) > settings.MAX_SOURCES_PER_JOB:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many uploaded files ({len(uploads)} > maximum allowed {settings.MAX_SOURCES_PER_JOB})",
+        )
+
     if document_ids and document_id:
         raise HTTPException(
             status_code=400,
@@ -229,15 +235,35 @@ async def process_compatibility(
             detail="legacy document_id is only valid with a single uploaded file; use document_ids for multiple files",
         )
 
-    # 4. Validate each stream independently. Client filenames/content types are
-    # metadata only; signature detection decides the accepted type.
-    from app.services.file_inspection import detect_mime_and_type, MAX_DOC_SIZE, MAX_AUDIO_SIZE
+    # 4. Stream and validate each input safely without unbounded memory allocation.
+    from app.services.file_inspection import detect_mime_and_type
     import hashlib
+    import io
+
+    total_aggregate_bytes = 0
     validated_inputs: List[Dict[str, Any]] = []
     for index, upload in enumerate(uploads):
-        file_bytes = await upload.read()
+        hasher = hashlib.sha256()
+        buffer = io.BytesIO()
+        file_size = 0
         filename = upload.filename or f"upload-{index + 1}"
-        file_size = len(file_bytes)
+
+        # Stream incrementally in 64 KB blocks
+        while True:
+            chunk = await upload.read(65536)
+            if not chunk:
+                break
+            file_size += len(chunk)
+            total_aggregate_bytes += len(chunk)
+            if total_aggregate_bytes > settings.MAX_TOTAL_UPLOAD_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Aggregate upload size exceeds limit of {settings.MAX_TOTAL_UPLOAD_BYTES} bytes",
+                )
+            buffer.write(chunk)
+            hasher.update(chunk)
+
+        file_bytes = buffer.getvalue()
         if file_size == 0:
             raise HTTPException(status_code=400, detail=f"file '{filename}' is empty")
 
@@ -247,12 +273,12 @@ async def process_compatibility(
                 status_code=415,
                 detail=f"file '{filename}' has an unsupported media type or unrecognized signature",
             )
-        limit = MAX_AUDIO_SIZE if file_type == "audio" else MAX_DOC_SIZE
+        limit = settings.MAX_AUDIO_BYTES if file_type == "audio" else settings.MAX_DOCUMENT_BYTES
         if file_size > limit:
             kind = "Audio" if file_type == "audio" else "Document"
             raise HTTPException(status_code=413, detail=f"{kind} file '{filename}' is too large ({file_size} > {limit})")
 
-        file_hash = hashlib.sha256(file_bytes).hexdigest()
+        file_hash = hasher.hexdigest()
         supplied_id = document_ids[index] if document_ids else document_id
         if supplied_id is not None and not supplied_id.strip():
             raise HTTPException(status_code=400, detail="document IDs must be non-empty when supplied")
@@ -276,10 +302,10 @@ async def process_compatibility(
 
     audio_count = sum(1 for item in validated_inputs if item["file_type"] == "audio")
     doc_count = sum(1 for item in validated_inputs if item["file_type"] != "audio")
-    if audio_count > 1:
+    if audio_count > settings.MAX_AUDIO_SOURCES_PER_JOB:
         raise HTTPException(
             status_code=400,
-            detail="multiple audio uploads are not supported; submit one audio file per job",
+            detail=f"multiple audio uploads are not supported; submit at most {settings.MAX_AUDIO_SOURCES_PER_JOB} audio file per job",
         )
 
     if audio_count > 0 and doc_count > 0:
