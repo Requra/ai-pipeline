@@ -17,6 +17,46 @@ from app.services.audio_semantics import reconstruct_audio_chunks
 logger = logging.getLogger(__name__)
 
 
+def get_audio_duration_seconds(raw_bytes: bytes, file_subtype: str = "mp3") -> Optional[float]:
+    """Inspect or measure audio duration in seconds safely using WAV header or ffprobe."""
+    if not raw_bytes:
+        return 0.0
+    # Try wave module for wav headers
+    if raw_bytes.startswith(b"RIFF") and b"WAVE" in raw_bytes[:12]:
+        try:
+            import io
+            import wave
+            with wave.open(io.BytesIO(raw_bytes), "rb") as w:
+                frames = w.getnframes()
+                rate = w.getframerate()
+                if rate > 0:
+                    return frames / float(rate)
+        except Exception:
+            pass
+
+    # Try ffprobe if available
+    try:
+        import os
+        import subprocess
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=f".{file_subtype}", delete=False) as tf:
+            tf.write(raw_bytes)
+            tf_path = tf.name
+        try:
+            cmd = [
+                "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1", tf_path
+            ]
+            out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, text=True, timeout=5)
+            return float(out.strip())
+        finally:
+            if os.path.exists(tf_path):
+                os.remove(tf_path)
+    except Exception:
+        pass
+    return None
+
+
 async def process_audio_source(
     source: SourceInput,
     job_id: str,
@@ -58,7 +98,23 @@ async def process_audio_source(
             error_message=f"No audio bytes provided for '{filename}'",
         )
 
-    # 2. STT Provider selection
+    # 2. Validate audio duration and STT cost protection limit
+    duration_sec = get_audio_duration_seconds(raw_bytes, file_subtype)
+    if duration_sec is not None and duration_sec > settings.MAX_AUDIO_DURATION_SECONDS:
+        logger.warning(
+            "Audio duration %.1fs exceeds MAX_AUDIO_DURATION_SECONDS (%ds) for document_id=%s (%s)",
+            duration_sec, settings.MAX_AUDIO_DURATION_SECONDS, document_id, filename
+        )
+        return ProcessedSource(
+            document_id=document_id,
+            filename=filename,
+            source_type="audio",
+            status="failed",
+            error_code="AUDIO_DURATION_EXCEEDED",
+            error_message=f"Audio duration {duration_sec:.1f}s exceeds maximum allowed limit of {settings.MAX_AUDIO_DURATION_SECONDS}s",
+        )
+
+    # 3. STT Provider selection
     provider = settings.TRANSCRIBE_PROVIDER
     primary_fn = _transcribe_groq if provider == "groq" else _transcribe_deepgram
     fallback_fn = _transcribe_deepgram if provider == "groq" else _transcribe_groq
