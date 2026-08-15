@@ -21,6 +21,13 @@ class MockAIMessage:
             self.usage_metadata = usage_metadata
 
 
+@pytest.fixture(autouse=True)
+def _clear_quota_cooldown():
+    _quota_blocked_until.clear()
+    yield
+    _quota_blocked_until.clear()
+
+
 def test_resilient_llm_client_fallback(monkeypatch):
     monkeypatch.setattr(settings, "LLM_PROVIDER", "openrouter")
     monkeypatch.setattr(settings, "LLM_FALLBACK_CHAIN", '[{"provider":"groq","model":"llama-3.3-70b-versatile"}]')

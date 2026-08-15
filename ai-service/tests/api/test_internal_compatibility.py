@@ -151,7 +151,7 @@ def test_process_multipart_compatibility_audio(client, mocked_pipeline):
 
     initial_state = mocked_pipeline.ainvoke.await_args.args[0]
     assert initial_state["raw_bytes"] == mp3_bytes
-    assert initial_state["raw_inputs"] == []
+    assert len(initial_state["raw_inputs"]) == 1
     assert initial_state["file_type"] == "audio"
     assert initial_state["audio_format"] == "mp3"
 
@@ -171,7 +171,7 @@ def test_process_single_audio_in_files_uses_single_source_transcription_path(
     assert response.status_code == 202
     initial_state = mocked_pipeline.ainvoke.await_args.args[0]
     assert initial_state["raw_bytes"] == mp3_bytes
-    assert initial_state["raw_inputs"] == []
+    assert len(initial_state["raw_inputs"]) == 1
     assert initial_state["file_type"] == "audio"
     assert initial_state["audio_format"] == "mp3"
 
@@ -333,11 +333,11 @@ def test_duplicate_multi_upload_is_idempotent_and_changed_second_file_conflicts(
         ),
         (
             [
-                ("valid.txt", b"The system must have enough text to be a valid upload.", "text/plain"),
-                ("audio.mp3", b"ID3\x03\x00\x00\x00\x00\x00\x00", "audio/mpeg"),
+                ("audio1.mp3", b"ID3\x03\x00\x00\x00\x00\x00\x01", "audio/mpeg"),
+                ("audio2.mp3", b"ID3\x03\x00\x00\x00\x00\x00\x02", "audio/mpeg"),
             ],
             400,
-            "mixed document and audio",
+            "multiple audio",
         ),
     ],
 )
@@ -346,6 +346,38 @@ def test_process_multi_upload_validation(client, files, expected_status, message
     response = client.post("/internal/process", headers=AUTH, data=data, files=multipart_files)
     assert response.status_code == expected_status
     assert message in response.json()["detail"].lower()
+
+
+def test_process_mixed_document_and_audio_accepted(client, mocked_pipeline):
+    """Mixed document and audio in the same request body is accepted as backend_sources."""
+    mp3_bytes = b"ID3\x03\x00\x00\x00\x00\x00\x00"
+    txt_bytes = b"The system must allow users to reset their password via SMS."
+    data, files = _multi_upload(
+        [
+            ("requirements.txt", txt_bytes, "text/plain"),
+            ("meeting.mp3", mp3_bytes, "audio/mpeg"),
+        ],
+        job_id="compat-mixed-1",
+        document_ids=["doc-reqs", "audio-meeting"],
+    )
+
+    response = client.post("/internal/process", headers=AUTH, data=data, files=files)
+    assert response.status_code == 202
+    assert response.json()["status"] == "QUEUED"
+
+    stores = get_stores()
+    job = _run(stores.jobs.get_job("compat-mixed-1"))
+    assert job is not None
+    assert job.input_type == "backend_sources"
+
+    docs = _run(stores.chunks.get_documents("compat-mixed-1"))
+    assert len(docs) == 2
+    assert {d.source_type for d in docs} == {"text", "audio"}
+
+    initial_state = mocked_pipeline.ainvoke.await_args.args[0]
+    assert len(initial_state["raw_inputs"]) == 2
+    assert initial_state["file_type"] == "sources"
+    assert initial_state["audio_format"] == "mp3"
 
 
 def test_process_multi_upload_rejects_oversized_document(client):
