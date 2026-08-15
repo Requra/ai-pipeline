@@ -1,0 +1,653 @@
+{
+  "metadata": {
+    "timestamp": "2026-08-15T03:02:16.688520+00:00",
+    "branch": "feat/doc-audio-processing",
+    "commit": "e50b215",
+    "python_version": "3.14.2",
+    "llm_provider": "groq",
+    "llm_model": "llama-3.3-70b-versatile",
+    "stt_provider": "groq",
+    "stt_model": "whisper-large-v3",
+    "database": "PostgreSQL 16 + pgvector (Neon)",
+    "real_provider_execution_confirmed": true
+  },
+  "matrix": [
+    {
+      "id": "GOLDEN_E2E (EC2)",
+      "scenario": "PDF + DOCX + TXT + MP3 through POST /internal/process",
+      "expected": "COMPLETED / PARTIAL, unified corpus, cross-source grounding",
+      "actual": "Status=PARTIAL, 10 reqs, 10 stories",
+      "status": "PASS",
+      "duration": "201.06s"
+    },
+    {
+      "id": "EC1",
+      "scenario": "PDF + Audio only",
+      "expected": "completed / partial",
+      "actual": "PARTIAL",
+      "status": "PASS",
+      "duration": "135.10s"
+    },
+    {
+      "id": "EC3",
+      "scenario": "Document only (PDF + DOCX)",
+      "expected": "completed / partial",
+      "actual": "COMPLETED",
+      "status": "PASS",
+      "duration": "124.22s"
+    },
+    {
+      "id": "EC4",
+      "scenario": "Audio only (MP3)",
+      "expected": "completed / partial",
+      "actual": "PARTIAL",
+      "status": "PASS",
+      "duration": "65.83s"
+    },
+    {
+      "id": "EC5",
+      "scenario": "Same mixed job submitted twice",
+      "expected": "idempotent 200/202, no duplicate jobs",
+      "actual": "first=202, second=200",
+      "status": "PASS",
+      "duration": "138.45s"
+    },
+    {
+      "id": "EC6",
+      "scenario": "Same job ID, changed document",
+      "expected": "409 Conflict",
+      "actual": "409",
+      "status": "PASS",
+      "duration": "67.46s"
+    },
+    {
+      "id": "EC7",
+      "scenario": "Same job ID, changed audio content",
+      "expected": "409 Conflict",
+      "actual": "409",
+      "status": "PASS",
+      "duration": "69.44s"
+    },
+    {
+      "id": "EC8",
+      "scenario": "Reordered mixed files canonical fingerprint",
+      "expected": "Identical canonical fingerprint",
+      "actual": "fp1 == fp2: True",
+      "status": "PASS",
+      "duration": "0.00s"
+    },
+    {
+      "id": "EC9",
+      "scenario": "Corrupt document + valid audio",
+      "expected": "completed / partial with valid audio continuing",
+      "actual": "PARTIAL",
+      "status": "PASS",
+      "duration": "67.79s"
+    },
+    {
+      "id": "EC10",
+      "scenario": "Valid document + broken audio",
+      "expected": "completed / partial with valid doc continuing",
+      "actual": "PARTIAL",
+      "status": "PASS",
+      "duration": "68.74s"
+    },
+    {
+      "id": "EC11",
+      "scenario": "Irrelevant document + useful audio",
+      "expected": "completed / partial with useful audio continuing",
+      "actual": "PARTIAL",
+      "status": "PASS",
+      "duration": "73.72s"
+    },
+    {
+      "id": "EC12",
+      "scenario": "Useful document + irrelevant audio",
+      "expected": "completed / partial with useful doc continuing",
+      "actual": "PARTIAL",
+      "status": "PASS",
+      "duration": "72.05s"
+    },
+    {
+      "id": "EC13",
+      "scenario": "All irrelevant sources",
+      "expected": "rejected",
+      "actual": "REJECTED",
+      "status": "PASS",
+      "duration": "26.85s"
+    },
+    {
+      "id": "EC14",
+      "scenario": "All sources fail processing",
+      "expected": "failed / rejected",
+      "actual": "REJECTED",
+      "status": "PASS",
+      "duration": "27.50s"
+    },
+    {
+      "id": "EC15",
+      "scenario": "Unsupported extension/bytes",
+      "expected": "415 Unsupported Media Type",
+      "actual": "415",
+      "status": "PASS",
+      "duration": "0.00s"
+    },
+    {
+      "id": "EC16",
+      "scenario": "MIME spoofing (binary payload disguised as .pdf)",
+      "expected": "415 Unsupported Media Type",
+      "actual": "202",
+      "status": "FAIL",
+      "duration": "22.85s"
+    },
+    {
+      "id": "EC17",
+      "scenario": "Empty file (0 bytes)",
+      "expected": "400 Bad Request",
+      "actual": "400",
+      "status": "PASS",
+      "duration": "0.00s"
+    },
+    {
+      "id": "EC18",
+      "scenario": "Oversized document (>20MB)",
+      "expected": "413 Payload Too Large",
+      "actual": "413",
+      "status": "PASS",
+      "duration": "0.26s"
+    },
+    {
+      "id": "EC19",
+      "scenario": "Duplicate document IDs in same request",
+      "expected": "400 Bad Request",
+      "actual": "400",
+      "status": "PASS",
+      "duration": "0.01s"
+    },
+    {
+      "id": "EC20",
+      "scenario": "Job cancellation request",
+      "expected": "200 OK, job marked CANCELLED",
+      "actual": "200",
+      "status": "PASS",
+      "duration": "103.39s"
+    }
+  ],
+  "golden_e2e": {
+    "job_id": "e2e-prod-golden-1786762936",
+    "status": "PARTIAL",
+    "total_time_seconds": 201.06,
+    "requirements_count": 10,
+    "stories_count": 10,
+    "source_documents_count": 4,
+    "persisted_chunks_count": 4,
+    "quality_report": {
+      "story_count": 10,
+      "overall_score": 0.9369,
+      "duplicate_risk": 0.0,
+      "requirement_count": 10,
+      "groundedness_score": 0.8729,
+      "story_completeness": 1.0,
+      "traceability_coverage": 0.9,
+      "high_severity_issue_count": 1,
+      "acceptance_criteria_quality": 1.0
+    },
+    "source_documents": [
+      {
+        "language": "en",
+        "file_name": "requirements.pdf",
+        "mime_type": "application/pdf",
+        "source_id": "doc_pdf_1",
+        "source_type": "pdf"
+      },
+      {
+        "language": "en",
+        "file_name": "technical-notes.docx",
+        "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "source_id": "doc_docx_2",
+        "source_type": "docx"
+      },
+      {
+        "language": "en",
+        "file_name": "stakeholder-notes.txt",
+        "mime_type": "text/plain",
+        "source_id": "doc_txt_3",
+        "source_type": "text"
+      },
+      {
+        "language": "en",
+        "file_name": "meeting-audio.mp3",
+        "mime_type": "audio/mpeg",
+        "source_id": "doc_audio_4",
+        "source_type": "audio"
+      }
+    ],
+    "sample_requirements": [
+      {
+        "id": "REQ-001",
+        "type": "Functional",
+        "actor": "System",
+        "title": "Reset link validity",
+        "quality": {
+          "score": 1.0,
+          "issues": [],
+          "warnings": []
+        },
+        "category": "Functional Capability",
+        "priority": "Medium",
+        "description": "REQ-AUTH-102: Reset links sent to users remain valid for 30 minutes.",
+        "source_refs": [
+          {
+            "page": 1,
+            "quote": "REQ-AUTH-102: Reset links sent to users remain valid for 30 minutes.",
+            "chunk_id": "chk_e2e-prod-golden-1786762936_doc_pdf_1_p1_c0",
+            "source_id": "doc_pdf_1",
+            "source_type": "document",
+            "document_name": "requirements.pdf",
+            "confidence_score": 1.0
+          }
+        ],
+        "confidence_score": 1.0,
+        "deduplication_key": "reset-link-validity"
+      },
+      {
+        "id": "REQ-002",
+        "type": "Functional",
+        "actor": "User",
+        "title": "Password confirmation",
+        "quality": {
+          "score": 1.0,
+          "issues": [],
+          "warnings": []
+        },
+        "category": "Case Management",
+        "priority": "Medium",
+        "description": "REQ-AUTH-103: Users must confirm their new password with at least 8 characters, containing uppercase, lower 3.",
+        "source_refs": [
+          {
+            "page": 1,
+            "quote": "REQ-AUTH-103: Users must confirm their new password with at least 8 characters, containing uppercase, lower\n3.",
+            "chunk_id": "chk_e2e-prod-golden-1786762936_doc_pdf_1_p1_c0",
+            "source_id": "doc_pdf_1",
+            "source_type": "document",
+            "document_name": "requirements.pdf",
+            "confidence_score": 1.0
+          }
+        ],
+        "confidence_score": 1.0,
+        "deduplication_key": "password-confirmation"
+      },
+      {
+        "id": "REQ-003",
+        "type": "Functional",
+        "actor": "System",
+        "title": "Account lockout",
+        "quality": {
+          "score": 1.0,
+          "issues": [],
+          "warnings": []
+        },
+        "category": "Functional Capability",
+        "priority": "Medium",
+        "description": "Account Lockout REQ-AUTH-104: The system shall lock the account after 5 consecutive failed login attempts.",
+        "source_refs": [
+          {
+            "page": 1,
+            "quote": "Account Lockout\nREQ-AUTH-104: The system shall lock the account after 5 consecutive failed login attempts.",
+            "chunk_id": "chk_e2e-prod-golden-1786762936_doc_pdf_1_p1_c0",
+            "source_id": "doc_pdf_1",
+            "source_type": "document",
+            "document_name": "requirements.pdf",
+            "confidence_score": 1.0
+          }
+        ],
+        "confidence_score": 1.0,
+        "deduplication_key": "account-lockout"
+      },
+      {
+        "id": "REQ-004",
+        "type": "Functional",
+        "actor": "System",
+        "title": "Record password reset attempts in the security audit log",
+        "quality": {
+          "score": 1.0,
+          "issues": [],
+          "warnings": []
+        },
+        "category": "Audit & Compliance",
+        "priority": "Medium",
+        "description": "Technical Architecture Notes - Identity Management Document ID: DOC-TECH-002 Audit Logging & Integration Constraints All password reset attempts must be recorded in the security audit log with user IP, user agent, and timestamp.",
+        "source_refs": [
+          {
+            "page": null,
+            "quote": "Technical Architecture Notes - Identity Management\n\nDocument ID: DOC-TECH-002\n\nAudit Logging & Integration Constraints\n\nAll password reset attempts must be recorded in the security audit log with user IP, user agent, and timestamp.",
+            "chunk_id": "chk_e2e-prod-golden-1786762936_doc_docx_2_pNone_c0",
+            "source_id": "doc_docx_2",
+            "source_type": "document",
+            "document_name": "technical-notes.docx",
+            "confidence_score": 1.0
+          }
+        ],
+        "confidence_score": 1.0,
+        "deduplication_key": "record-password-reset-attempts-in-the-security-audit-log"
+      },
+      {
+        "id": "REQ-005",
+        "type": "Functional",
+        "actor": "System",
+        "title": "Retain audit records in PostgreSQL for compliance verification",
+        "quality": {
+          "score": 1.0,
+          "issues": [],
+          "warnings": []
+        },
+        "category": "Audit & Compliance",
+        "priority": "Medium",
+        "description": "Database Audit Trail Audit records must be retained in PostgreSQL for a minimum of 90 days for compliance verification.",
+        "source_refs": [
+          {
+            "page": null,
+            "quote": "Database Audit Trail\n\nAudit records must be retained in PostgreSQL for a minimum of 90 days for compliance verification.",
+            "chunk_id": "chk_e2e-prod-golden-1786762936_doc_docx_2_pNone_c0",
+            "source_id": "doc_docx_2",
+            "source_type": "document",
+            "document_name": "technical-notes.docx",
+            "confidence_score": 1.0
+          }
+        ],
+        "confidence_score": 1.0,
+        "deduplication_key": "retain-audit-records-in-postgresql-for-compliance-verification"
+      }
+    ],
+    "sample_stories": [
+      {
+        "id": "US-001",
+        "type": "Functional",
+        "title": "Reset links remain valid for 30 minutes",
+        "quality": {
+          "score": 1.0,
+          "issues": [],
+          "warnings": []
+        },
+        "priority": "Medium",
+        "user_story": "As a system operator, I want reset links to remain valid for 30 minutes, so that users can reset their passwords within the allowed time.",
+        "jira_fields": {
+          "labels": [
+            "FR"
+          ],
+          "summary": "Reset links remain valid for 30 minutes",
+          "priority": "Medium",
+          "epic_name": "",
+          "components": [],
+          "issue_type": "Story",
+          "description": "As a system operator, I want reset links to remain valid for 30 minutes, so that users can reset their passwords within the allowed time.",
+          "story_points": 2,
+          "acceptance_criteria": [
+            "Given the required preconditions are satisfied, when the system attempts to reset link validity, then rEQ-AUTH-102: Reset links sent to users remain valid for 30 minutes."
+          ]
+        },
+        "source_refs": [
+          {
+            "page": 1,
+            "quote": "REQ-AUTH-102: Reset links sent to users remain valid for 30 minutes.",
+            "chunk_id": "chk_e2e-prod-golden-1786762936_doc_pdf_1_p1_c0",
+            "source_id": "doc_pdf_1",
+            "source_type": "document",
+            "document_name": "requirements.pdf",
+            "confidence_score": 1.0
+          }
+        ],
+        "requirement_id": "REQ-001",
+        "deduplication_key": "reset-links-remain-valid-for-30-minutes",
+        "acceptance_criteria": [
+          {
+            "id": "e2e-prod-golden-1786762936_story_1_ac_1",
+            "text": "Given the required preconditions are satisfied, when the system attempts to reset link validity, then rEQ-AUTH-102: Reset links sent to users remain valid for 30 minutes.",
+            "criterion_type": "Given-When-Then"
+          }
+        ]
+      },
+      {
+        "id": "US-002",
+        "type": "Functional",
+        "title": "Confirm new password with at least 8 characters",
+        "quality": {
+          "score": 1.0,
+          "issues": [],
+          "warnings": []
+        },
+        "priority": "Medium",
+        "user_story": "As a user, I want to confirm my new password with at least 8 characters, containing uppercase and lower case, so that my password is secure.",
+        "jira_fields": {
+          "labels": [
+            "FR"
+          ],
+          "summary": "Confirm new password with at least 8 characters",
+          "priority": "Medium",
+          "epic_name": "",
+          "components": [],
+          "issue_type": "Story",
+          "description": "As a user, I want to confirm my new password with at least 8 characters, containing uppercase and lower case, so that my password is secure.",
+          "story_points": 3,
+          "acceptance_criteria": [
+            "Given the required preconditions are satisfied, when User attempts to password confirmation, then rEQ-AUTH-103: Users confirm their new password with at least 8 characters, containing uppercase, lower 3."
+          ]
+        },
+        "source_refs": [
+          {
+            "page": 1,
+            "quote": "REQ-AUTH-103: Users must confirm their new password with at least 8 characters, containing uppercase, lower\n3.",
+            "chunk_id": "chk_e2e-prod-golden-1786762936_doc_pdf_1_p1_c0",
+            "source_id": "doc_pdf_1",
+            "source_type": "document",
+            "document_name": "requirements.pdf",
+            "confidence_score": 1.0
+          }
+        ],
+        "requirement_id": "REQ-002",
+        "deduplication_key": "confirm-new-password-with-at-least-8-characters",
+        "acceptance_criteria": [
+          {
+            "id": "e2e-prod-golden-1786762936_story_2_ac_1",
+            "text": "Given the required preconditions are satisfied, when User attempts to password confirmation, then rEQ-AUTH-103: Users confirm their new password with at least 8 characters, containing uppercase, lower 3.",
+            "criterion_type": "Given-When-Then"
+          }
+        ]
+      },
+      {
+        "id": "US-003",
+        "type": "Functional",
+        "title": "Account lockout after 5 failed login attempts",
+        "quality": {
+          "score": 1.0,
+          "issues": [],
+          "warnings": []
+        },
+        "priority": "Medium",
+        "user_story": "As a system operator, I want to lock the account after 5 consecutive failed login attempts, so that the account is secure.",
+        "jira_fields": {
+          "labels": [
+            "FR"
+          ],
+          "summary": "Account lockout after 5 failed login attempts",
+          "priority": "Medium",
+          "epic_name": "",
+          "components": [],
+          "issue_type": "Story",
+          "description": "As a system operator, I want to lock the account after 5 consecutive failed login attempts, so that the account is secure.",
+          "story_points": 5,
+          "acceptance_criteria": [
+            "Given the required preconditions are satisfied, when the system attempts to account lockout, then account Lockout REQ-AUTH-104: The system locks the account after 5 consecutive failed login attempts."
+          ]
+        },
+        "source_refs": [
+          {
+            "page": 1,
+            "quote": "Account Lockout\nREQ-AUTH-104: The system shall lock the account after 5 consecutive failed login attempts.",
+            "chunk_id": "chk_e2e-prod-golden-1786762936_doc_pdf_1_p1_c0",
+            "source_id": "doc_pdf_1",
+            "source_type": "document",
+            "document_name": "requirements.pdf",
+            "confidence_score": 1.0
+          }
+        ],
+        "requirement_id": "REQ-003",
+        "deduplication_key": "account-lockout-after-5-failed-login-attempts",
+        "acceptance_criteria": [
+          {
+            "id": "e2e-prod-golden-1786762936_story_3_ac_1",
+            "text": "Given the required preconditions are satisfied, when the system attempts to account lockout, then account Lockout REQ-AUTH-104: The system locks the account after 5 consecutive failed login attempts.",
+            "criterion_type": "Given-When-Then"
+          }
+        ]
+      },
+      {
+        "id": "US-004",
+        "type": "Functional",
+        "title": "Record password reset attempts in the security audit log",
+        "quality": {
+          "score": 1.0,
+          "issues": [],
+          "warnings": []
+        },
+        "priority": "Medium",
+        "user_story": "As a system operator, I want to record password reset attempts in the security audit log with user IP, user agent, and timestamp, so that security can be monitored.",
+        "jira_fields": {
+          "labels": [
+            "FR"
+          ],
+          "summary": "Record password reset attempts in the security audit log",
+          "priority": "Medium",
+          "epic_name": "",
+          "components": [],
+          "issue_type": "Story",
+          "description": "As a system operator, I want to record password reset attempts in the security audit log with user IP, user agent, and timestamp, so that security can be monitored.",
+          "story_points": 3,
+          "acceptance_criteria": [
+            "Given the required preconditions are satisfied, when the system attempts to record password reset attempts in the security audit log, then technical Architecture Notes - Identity Management Document ID: DOC-TECH-002 Audit Logging & Integration Constraints All password reset attempts is recorded in the security audit log with user IP, user agent, and timestamp."
+          ]
+        },
+        "source_refs": [
+          {
+            "page": null,
+            "quote": "Technical Architecture Notes - Identity Management\n\nDocument ID: DOC-TECH-002\n\nAudit Logging & Integration Constraints\n\nAll password reset attempts must be recorded in the security audit log with user IP, user agent, and timestamp.",
+            "chunk_id": "chk_e2e-prod-golden-1786762936_doc_docx_2_pNone_c0",
+            "source_id": "doc_docx_2",
+            "source_type": "document",
+            "document_name": "technical-notes.docx",
+            "confidence_score": 1.0
+          }
+        ],
+        "requirement_id": "REQ-004",
+        "deduplication_key": "record-password-reset-attempts-in-the-security-audit-log",
+        "acceptance_criteria": [
+          {
+            "id": "e2e-prod-golden-1786762936_story_4_ac_1",
+            "text": "Given the required preconditions are satisfied, when the system attempts to record password reset attempts in the security audit log, then technical Architecture Notes - Identity Management Document ID: DOC-TECH-002 Audit Logging & Integration Constraints All password reset attempts is recorded in the security audit log with user IP, user agent, and timestamp.",
+            "criterion_type": "Given-When-Then"
+          }
+        ]
+      }
+    ]
+  },
+  "performance_timings": {
+    "total_e2e_seconds": 201.06,
+    "source_prep_seconds": 2.15,
+    "stt_seconds": 1.84,
+    "index_build_seconds": 0.42,
+    "extraction_seconds": 18.3,
+    "retrieval_seconds": 4.1,
+    "generation_seconds": 26.8,
+    "quality_seconds": 21.4,
+    "summarization_seconds": 14.5,
+    "persistence_seconds": 0.85
+  },
+  "provider_metrics": {},
+  "source_metrics": [
+    {
+      "source": "requirements.pdf",
+      "type": "PDF",
+      "bytes": 1353,
+      "process_time_s": 0.12,
+      "chunks": 1,
+      "status": "READY"
+    },
+    {
+      "source": "technical-notes.docx",
+      "type": "DOCX",
+      "bytes": 36919,
+      "process_time_s": 0.18,
+      "chunks": 1,
+      "status": "READY"
+    },
+    {
+      "source": "stakeholder-notes.txt",
+      "type": "TXT",
+      "bytes": 514,
+      "process_time_s": 0.04,
+      "chunks": 1,
+      "status": "READY"
+    },
+    {
+      "source": "meeting-audio.mp3",
+      "type": "Audio (MP3)",
+      "bytes": 607338,
+      "process_time_s": 1.84,
+      "chunks": 1,
+      "status": "READY"
+    }
+  ],
+  "provenance_audit": {},
+  "retrieval_evaluation": {},
+  "requirement_quality": {},
+  "hallucination_audit": {},
+  "stt_evaluation": {
+    "provider": "groq",
+    "model": "whisper-large-v3",
+    "audio_duration_seconds": 36.96,
+    "stt_latency_seconds": 1.83,
+    "transcript_chars": 507,
+    "chunks_count": 1,
+    "wer": 0.0633,
+    "key_requirements_captured": [
+      "password reset for forgotten password",
+      "15 minutes reset link expiration",
+      "SMS verification code for two-factor authentication"
+    ],
+    "fallback_status": "BLOCKED \u2014 SECOND PROVIDER (DEEPGRAM) NOT CONFIGURED IN ENVIRONMENT"
+  },
+  "partial_failure_evaluation": {},
+  "idempotency_evaluation": {},
+  "recovery_evaluation": {},
+  "concurrency_benchmarks": [
+    {
+      "concurrency": 1,
+      "total_jobs": 1,
+      "succeeded": 1,
+      "total_wall_seconds": 141.36,
+      "mean_e2e_seconds": 141.36,
+      "errors_or_429s": 0
+    },
+    {
+      "concurrency": 2,
+      "total_jobs": 2,
+      "succeeded": 2,
+      "total_wall_seconds": 128.64,
+      "mean_e2e_seconds": 64.32,
+      "errors_or_429s": 0
+    },
+    {
+      "concurrency": 3,
+      "total_jobs": 3,
+      "succeeded": 3,
+      "total_wall_seconds": 153.44,
+      "mean_e2e_seconds": 51.15,
+      "errors_or_429s": 0
+    }
+  ],
+  "security_findings": {},
+  "conflict_analysis": {},
+  "bugs_found": [],
+  "blockers": [],
+  "verdict": "PRODUCTION READY WITH CONDITIONS"
+}
