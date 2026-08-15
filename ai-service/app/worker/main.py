@@ -105,13 +105,13 @@ def main() -> None:
 
     run_startup_checks()
 
-    from rq import Queue, Worker
+    from rq import Queue, SimpleWorker
 
     from app.queue.redis_queue import get_redis_connection
 
     conn = _connect_redis_with_retry(get_redis_connection)
     queue = Queue(settings.QUEUE_NAME, connection=conn)
-    worker = Worker([queue], connection=conn)
+    worker = SimpleWorker([queue], connection=conn)
     logger.info("AI worker starting — queue=%s", settings.QUEUE_NAME)
     worker.work(with_scheduler=True)
 
