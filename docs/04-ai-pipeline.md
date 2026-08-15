@@ -17,36 +17,34 @@ Code paths use the package shorthand `app/...` below; repository-relative, they 
 
 `POST /internal/jobs` in `ai-service/app/api/internal.py` accepts `CreateJobRequest` from `ai-service/app/api/schemas.py`. Every `/internal/*` route depends on `require_internal_auth()` and therefore expects the bearer value configured in `AI_INTERNAL_SERVICE_TOKEN`.
 
-The four input types are:
+The five primary input types are:
 
 | Input type | Required input | Initial file type | Pipeline path |
 |---|---|---|---|
-| `text` | non-empty `content` | `text` | ingest → parse/chunk |
-| `backend_transcript` | non-empty `content` | `transcript` | ingest → parse/chunk; no STT |
-| `backend_document` | `source_documents` references | `document` | worker fetch/recovery → detect → ingest → parse/chunk |
-| `backend_audio` | `source_documents` references | `audio` | worker fetch/recovery → detect → ingest → transcribe → parse/chunk |
+| `text` | non-empty `content` | `text` | detect → prepare_sources → build_source_index |
+| `backend_transcript` | non-empty `content` | `transcript` | detect → prepare_sources → build_source_index; no STT |
+| `backend_document` | `source_documents` references | `document` | worker fetch/recovery → detect → prepare_sources → build_source_index |
+| `backend_audio` | `source_documents` references | `audio` | worker fetch/recovery → detect → prepare_sources (STT + PII) → build_source_index |
+| `backend_sources` | mixed `source_documents` | `sources` | worker fetch/recovery → detect → prepare_sources (parallel docs + STT) → build_source_index |
 
 `project_id` is required by the request schema; `tenant_id` is optional in the Python model but important for cross-tenant isolation. `content` and source references are validated in `create_job()` before job creation. The request fingerprint in `app/services/fingerprint.py` makes duplicate submission safe by distinguishing identical requests from reused job ids with different content/options.
 
 Compatibility entry points are also real and tested:
 
 - `POST /process-json` and `POST /process` in `ai-service/app/main.py` are unauthenticated demo/dev routes.
-- `POST /internal/process-json` and `POST /internal/process` in `ai-service/app/api/internal.py` are protected compatibility routes.
+- `POST /internal/process-json` and `POST /internal/process` in `ai-service/app/api/internal.py` are protected compatibility routes supporting multipart mixed-source streaming.
 - All routes funnel into the same dispatch and graph path; they are not separate pipelines.
 
 ## Pipeline overview
 
 ```mermaid
 flowchart LR
-    A["API job or compatibility upload"] --> B["Job validation, fingerprint, auth"]
+    A["API job or multipart upload"] --> B["Job validation, fingerprint, auth"]
     B --> C["Worker input recovery\nRedis cache or backend source"]
-    C --> D["detect_file_type"]
-    D --> E["ingest\nparse, normalize, PII mask, relevance"]
-    E -->|audio| F["transcribe\nGroq or Deepgram"]
-    E -->|document/text/transcript| G["parse_to_chunks"]
-    F --> G
+    C --> D["detect_file_type\nmagic bytes, ZIP bomb & size limits"]
+    D --> E["prepare_sources\nbounded doc extraction + STT + per-source relevance"]
     E -->|rejected/error| N["format"]
-    G --> H["build_source_index\nBM25 + optional chunk embeddings"]
+    E -->|sources prepared| H["build_source_index\nBM25 + optional chunk embeddings"]
     H --> I["extract\nstructured requirements"]
     I --> J["dedupe_requirements\nmerge + optional conflict detection"]
     J --> K["retrieve_evidence\nlexical or hybrid"]
@@ -63,7 +61,7 @@ flowchart LR
     T --> U["polling or backend callback"]
 ```
 
-The graph is built in `ai-service/app/graph/pipeline.py` by `build_pipeline()` and exported as `graph`. It registers 15 nodes. `PIPELINE_RECURSION_LIMIT = 60` is a LangGraph step budget, not a cycle count. The only graph loop is quality repair back to `quality_gate` and is bounded by `MAX_REPAIR_ATTEMPTS`.
+The graph is built in `ai-service/app/graph/pipeline.py` by `build_pipeline()` and exported as `graph`. `PIPELINE_RECURSION_LIMIT = 60` is a LangGraph step budget, not a cycle count. The only graph loop is quality repair back to `quality_gate` and is bounded by `MAX_REPAIR_ATTEMPTS`.
 
 ## Detailed execution trace
 
