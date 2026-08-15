@@ -40,12 +40,16 @@ class Database:
     @property
     def engine(self) -> AsyncEngine:
         if self._engine is None:
+            connect_args = {}
+            if "ssl=require" in self.url or "sslmode=require" in self.url or "neon.tech" in self.url:
+                connect_args["ssl"] = "require"
             self._engine = create_async_engine(
                 self.url,
                 pool_pre_ping=True,
                 pool_size=10,
                 max_overflow=5,
                 future=True,
+                connect_args=connect_args,
             )
         return self._engine
 
