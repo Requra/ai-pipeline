@@ -69,6 +69,8 @@ def get_embedder() -> Optional[Embedder]:
     """Return a configured embedder, or None when embeddings are unusable."""
     if _override is not None:
         return _override
+    if not settings.ENABLE_EMBEDDINGS:
+        return None
     provider = settings.EMBEDDING_PROVIDER
     key = embedding_key_for(provider)
     if not key:
