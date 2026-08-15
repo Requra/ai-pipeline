@@ -1,0 +1,7 @@
+{
+  "name": "requra-ai-redis",
+  "type": "redis",
+  "spec": {
+    "plan": "nf-addon-micro"
+  }
+}

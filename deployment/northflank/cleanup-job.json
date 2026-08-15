@@ -1,0 +1,27 @@
+{
+  "name": "requra-ai-cleanup",
+  "billing": {
+    "deploymentPlan": "nf-compute-micro"
+  },
+  "jobType": "cron",
+  "cronSettings": {
+    "schedule": "0 2 * * *"
+  },
+  "runSettings": {
+    "docker": {
+      "cmd": "python -m app.maintenance.cleanup"
+    }
+  },
+  "buildSettings": {
+    "buildEngine": "kaniko",
+    "dockerfile": {
+      "dockerFilePath": "/ai-service/Dockerfile",
+      "dockerWorkDir": "/ai-service"
+    }
+  },
+  "vcsData": {
+    "projectType": "github",
+    "projectUrl": "https://github.com/Requra/ai-pipeline",
+    "projectBranch": "feat/doc-audio-processing"
+  }
+}
