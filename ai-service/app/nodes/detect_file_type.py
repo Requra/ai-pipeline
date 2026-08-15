@@ -18,7 +18,7 @@ async def detect_file_type_node(state: PipelineState) -> dict:
     Inspect raw bytes to determine file type and metadata.
     Does not trust state['file_type'] from frontend.
     """
-    print("--- DETECT FILE TYPE NODE ---")
+    logger.info("--- DETECT FILE TYPE NODE ---")
     update_progress(state.get("job_id"), "detect_file_type", 5, "PROCESSING")
     
     raw_inputs = state.get("raw_inputs") or []
