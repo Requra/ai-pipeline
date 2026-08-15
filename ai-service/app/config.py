@@ -130,6 +130,7 @@ class Settings:
     # ------------------------------------------------------------------
     REDIS_URL: Optional[str] = os.getenv("REDIS_URL")
     QUEUE_NAME: str = os.getenv("QUEUE_NAME", "ai_jobs")
+    ALLOW_INPROCESS_QUEUE_IN_PRODUCTION: bool = _env_flag("ALLOW_INPROCESS_QUEUE_IN_PRODUCTION", "false")
 
     # ------------------------------------------------------------------
     # Retention
@@ -353,6 +354,10 @@ def collect_config_problems() -> List[str]:
         if not settings.DATABASE_URL:
             problems.append(
                 "DATABASE_URL is required in production for durable job/chunk/result storage."
+            )
+        if not settings.REDIS_URL and not getattr(settings, "ALLOW_INPROCESS_QUEUE_IN_PRODUCTION", False):
+            problems.append(
+                "REDIS_URL is required in production for durable queue infrastructure (or set ALLOW_INPROCESS_QUEUE_IN_PRODUCTION=true)."
             )
 
     return problems

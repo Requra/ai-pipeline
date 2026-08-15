@@ -251,9 +251,10 @@ def _origins_configured() -> bool:
 
 async def _probe_database() -> Dict[str, Any]:
     url = getattr(settings, "DATABASE_URL", None)
+    is_prod = _flag(getattr(settings, "is_production", False))
     if not isinstance(url, str) or not url:
-        # Not configured → in-memory store; ok for dev, reported as not-durable.
-        return {"ok": True, "configured": False, "durable": False}
+        # In production, DB is required; in dev, in-memory store is permitted.
+        return {"ok": not is_prod, "configured": False, "durable": False}
     try:
         from app.store.db import get_database
 
@@ -279,8 +280,11 @@ async def _probe_schema(db) -> bool:
 
 def _probe_redis() -> Dict[str, Any]:
     url = getattr(settings, "REDIS_URL", None)
+    is_prod = _flag(getattr(settings, "is_production", False))
+    allow_inprocess = _flag(getattr(settings, "ALLOW_INPROCESS_QUEUE_IN_PRODUCTION", False))
     if not isinstance(url, str) or not url:
-        return {"ok": True, "configured": False, "backend": "in-process"}
+        ok = not is_prod or allow_inprocess
+        return {"ok": ok, "configured": False, "backend": "in-process"}
     try:
         from app.queue.redis_queue import get_redis_connection
 
