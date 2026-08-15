@@ -301,10 +301,12 @@ def _ensure_requirement_summary_coverage(
             or getattr(req, "candidate_labels", None)
             or []
         )
-        if "Open Question" in labels:
-            target = summary.open_questions
-        elif "Out-of-Scope" in labels:
+        disp = getattr(req, "disposition", "accepted")
+
+        if disp in ("rejected", "deferred") or "Out-of-Scope" in labels:
             target = summary.out_of_scope
+        elif "Open Question" in labels or disp in ("proposed", "uncertain"):
+            target = summary.open_questions
         elif "Assumption" in labels:
             target = summary.assumptions
         else:

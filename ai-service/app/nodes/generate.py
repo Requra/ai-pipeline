@@ -574,13 +574,49 @@ def rebuild_requirement_coverages(
     preserved_non_story = {
         coverage.requirement_id: coverage
         for coverage in existing_coverages
-        if coverage.coverage_type == "non_story"
+        if coverage.coverage_type in ("non_story", "needs_review")
     }
+    special_non_story_labels = {"Open Question", "Out-of-Scope", "Assumption"}
     coverages: List[RequirementCoverage] = []
     for requirement in requirements:
+        disp = getattr(requirement, "disposition", "accepted")
+        labels = set(getattr(requirement, "labels", []) or []) | set(getattr(requirement, "candidate_labels", []) or [])
+        evidence = getattr(requirement, "evidence", []) or []
+
         if requirement.id in preserved_non_story:
             coverages.append(preserved_non_story[requirement.id])
             continue
+
+        if disp in ("rejected", "deferred"):
+            coverages.append(RequirementCoverage(
+                requirement_id=requirement.id,
+                coverage_type="non_story",
+                story_ids=[],
+                acceptance_criteria_ids=[],
+                reason=f"Requirement with disposition '{disp}' is excluded from active user story generation.",
+            ))
+            continue
+
+        if labels & special_non_story_labels:
+            coverages.append(RequirementCoverage(
+                requirement_id=requirement.id,
+                coverage_type="non_story",
+                story_ids=[],
+                acceptance_criteria_ids=[],
+                reason="Open questions, assumptions, and out-of-scope items are not converted into user stories.",
+            ))
+            continue
+
+        if disp in ("proposed", "uncertain"):
+            coverages.append(RequirementCoverage(
+                requirement_id=requirement.id,
+                coverage_type="needs_review",
+                story_ids=[],
+                acceptance_criteria_ids=[],
+                reason=f"Requirement disposition '{disp}' requires stakeholder clarification before generating user stories.",
+            ))
+            continue
+
         linked_story = next(
             (
                 story
@@ -595,7 +631,11 @@ def rebuild_requirement_coverages(
                 coverage_type="needs_review",
                 story_ids=[],
                 acceptance_criteria_ids=[],
-                reason="No semantically aligned generated story remained after validation.",
+                reason=(
+                    "Requirement lacks verified source evidence after grounding; user story generation was gated."
+                    if not evidence
+                    else "No semantically aligned generated story remained after validation."
+                ),
             ))
             continue
         coverages.append(RequirementCoverage(
@@ -768,21 +808,45 @@ async def generate_node(state: PipelineState) -> dict:
     for req in classified:
         labels = set(_normalize_labels(getattr(req, "labels", None)))
         candidate_labels = set(getattr(req, "candidate_labels", []) or [])
-        
-        # If any label (final or candidate) is in the special set, skip generation
-        if (labels | candidate_labels) & special_non_story_labels:
-            to_skip.append(req)
+        disp = getattr(req, "disposition", "accepted")
+        evidence = getattr(req, "evidence", []) or []
+
+        has_chunks = bool(state.get("chunks"))
+        if disp in ("rejected", "deferred"):
+            to_skip.append((
+                req,
+                "non_story",
+                f"Requirement disposition '{disp}' is excluded from active user story generation.",
+            ))
+        elif disp in ("proposed", "uncertain"):
+            to_skip.append((
+                req,
+                "needs_review",
+                f"Requirement disposition '{disp}' requires stakeholder clarification before generating user stories.",
+            ))
+        elif (labels | candidate_labels) & special_non_story_labels:
+            to_skip.append((
+                req,
+                "non_story",
+                "Open questions, assumptions, and out-of-scope items are not converted into user stories.",
+            ))
+        elif has_chunks and not evidence and getattr(req, "needs_review", False):
+            to_skip.append((
+                req,
+                "needs_review",
+                "Requirement lacks verified source evidence after grounding; user story generation was gated.",
+            ))
         else:
             to_generate.append(req)
 
     requirement_coverages = []
-    for req in to_skip:
+    for req, cov_type, reason in to_skip:
         coverage = RequirementCoverage(
             requirement_id=req.id,
-            coverage_type="non_story",
+            coverage_type=cov_type,
             story_ids=[],
             acceptance_criteria_ids=[],
-            reason="Open questions, assumptions, and out-of-scope items are not converted into user stories."
+            reason=reason,
         )
         requirement_coverages.append(coverage)
 

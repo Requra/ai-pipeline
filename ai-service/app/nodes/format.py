@@ -50,6 +50,8 @@ def v1_type_from_labels(labels) -> str:
     stories so a story's type reflects its source labels (not a hard-coded
     'Functional')."""
     labs = set(labels or [])
+    if "Out-of-Scope" in labs or "Open Question" in labs:
+        return "Unknown"
     # A measurable quality attribute remains non-functional even when an LLM
     # also emits FR. BR may coexist with either, but does not override them.
     if "NFR" in labs or "Constraint" in labs or "Assumption" in labs:
@@ -170,6 +172,34 @@ def _calibrated_requirement_confidence(
     if getattr(requirement, "needs_review", False):
         calibrated = min(calibrated, 0.79)
     return round(min(1.0, max(0.0, calibrated)), 4)
+
+
+def _reconcile_public_warnings(warnings: list, req_id_map: dict[int, str]) -> list:
+    """Reconcile internal requirement ID strings in warnings to canonical public IDs."""
+    reconciled = []
+    for w in warnings:
+        w_dict = w if isinstance(w, dict) else (w.model_dump() if hasattr(w, "model_dump") else dict(w))
+        message = w_dict.get("message", "")
+
+        # If the warning provides unresolved_requirement_ids, rebuild the message cleanly
+        unresolved_ids = w_dict.get("unresolved_requirement_ids")
+        if unresolved_ids:
+            mapped_public_ids = [req_id_map[r_id] for r_id in unresolved_ids if r_id in req_id_map]
+            if mapped_public_ids:
+                message = (
+                    f"{len(mapped_public_ids)} requirement(s) still lack verified "
+                    f"source evidence after grounding: {', '.join(mapped_public_ids)}."
+                )
+                w_dict["message"] = message
+        elif "REQ-" in message:
+            for int_id, pub_id in req_id_map.items():
+                old_code = f"REQ-{int_id:03d}"
+                if old_code != pub_id and old_code in message:
+                    message = message.replace(old_code, pub_id)
+            w_dict["message"] = message
+
+        reconciled.append(w_dict)
+    return reconciled
 
 
 def parse_pipeline_error(err_str: str, status: str) -> Optional[PipelineError]:
@@ -301,13 +331,27 @@ async def format_node(state: PipelineState) -> dict:
         )
         
         # Check for fatal ungrounded requirement issues or high severity defects
+        actionable_req_ids = {
+            r.id for r in coerced_reqs
+            if getattr(r, "disposition", "accepted") == "accepted"
+            and "Out-of-Scope" not in (getattr(r, "labels", []) or [])
+            and "Open Question" not in (getattr(r, "labels", []) or [])
+        }
         has_fatal_quality_issue = any(
             (getattr(q, "severity", None) == "high" or (isinstance(q, dict) and q.get("severity") == "high"))
             and (
-                getattr(q, "item_type", None) in ("requirement", "pipeline") or
-                (isinstance(q, dict) and q.get("item_type") in ("requirement", "pipeline")) or
-                getattr(q, "rule_violated", "") in ("missing_evidence", "missing_verified_evidence", "USEFUL_INPUT_WITH_EMPTY_EXTRACTION") or
-                (isinstance(q, dict) and q.get("rule_violated") in ("missing_evidence", "missing_verified_evidence", "USEFUL_INPUT_WITH_EMPTY_EXTRACTION"))
+                (
+                    (getattr(q, "item_type", None) == "requirement" or (isinstance(q, dict) and q.get("item_type") == "requirement"))
+                    and (getattr(q, "item_id", None) in actionable_req_ids or (isinstance(q, dict) and q.get("item_id") in actionable_req_ids))
+                ) or
+                getattr(q, "item_type", None) == "pipeline" or
+                (isinstance(q, dict) and q.get("item_type") == "pipeline") or
+                (
+                    (getattr(q, "rule_violated", "") in ("missing_evidence", "missing_verified_evidence") or (isinstance(q, dict) and q.get("rule_violated") in ("missing_evidence", "missing_verified_evidence")))
+                    and (getattr(q, "item_id", None) in actionable_req_ids or (isinstance(q, dict) and q.get("item_id") in actionable_req_ids))
+                ) or
+                getattr(q, "rule_violated", "") == "USEFUL_INPUT_WITH_EMPTY_EXTRACTION" or
+                (isinstance(q, dict) and q.get("rule_violated") == "USEFUL_INPUT_WITH_EMPTY_EXTRACTION")
             )
             for q in q_issues
         )
@@ -406,8 +450,12 @@ async def format_node(state: PipelineState) -> dict:
         req_id_map[r.id] = req_str_id
         
         # Determine requirement type
+        disp = getattr(r, "disposition", "accepted")
         labels = getattr(r, "labels", []) or []
-        req_type = v1_type_from_labels(labels) if labels else "Unknown"
+        if disp in ("rejected", "deferred") or "Out-of-Scope" in labels or "Open Question" in labels:
+            req_type = "Unknown"
+        else:
+            req_type = v1_type_from_labels(labels) if labels else "Unknown"
             
         # Determine priority
         priority = getattr(r, "priority", "Medium") or "Medium"
@@ -814,7 +862,7 @@ async def format_node(state: PipelineState) -> dict:
         exports=exports,
         artifacts=artifacts,
         quality_issues=public_quality_issues,
-        warnings=warnings,
+        warnings=_reconcile_public_warnings(warnings, req_id_map),
         quality_report=quality_report,
         error=structured_error,
         processing_time_ms=processing_time_ms,
