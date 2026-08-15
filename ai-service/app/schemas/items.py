@@ -4,6 +4,7 @@ from typing import Optional, List, Literal
 # --- Production Constants & Types ---
 
 RequirementType = Literal["FR", "NFR", "BR", "Constraint", "Assumption", "Open Question", "Out-of-Scope"]
+RequirementDisposition = Literal["accepted", "rejected", "deferred", "proposed", "uncertain"]
 
 # --- Core Production Models ---
 
@@ -65,6 +66,7 @@ class ExtractedRequirement(BaseModel):
     text: str
     actor: Optional[str] = None
     goal: Optional[str] = None
+    disposition: RequirementDisposition = "accepted"
     candidate_labels: List[RequirementType] = Field(default_factory=list)
     confidence: float
     evidence: List[EvidenceSpan] = Field(
@@ -327,4 +329,5 @@ class FunctionalRequirement(BaseModel):
     text: str
     actor: Optional[str] = None
     goal: Optional[str] = None
+    disposition: RequirementDisposition = "accepted"
     source_hint: str = ""

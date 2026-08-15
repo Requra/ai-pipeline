@@ -5,6 +5,7 @@ from app.schemas.items import (
     EvidenceSpan,
     FunctionalRequirement,
     RequirementType,
+    RequirementDisposition,
     QualityIssue,
     PipelineWarning,
 )
@@ -82,6 +83,47 @@ LABEL_MAP = {
     "Out-of-scope": "Out-of-Scope",
 }
 
+DISPOSITION_MAP = {
+    "accepted": "accepted",
+    "active": "accepted",
+    "approved": "accepted",
+    "confirmed": "accepted",
+    "rejected": "rejected",
+    "dropped": "rejected",
+    "cancelled": "rejected",
+    "canceled": "rejected",
+    "declined": "rejected",
+    "deferred": "deferred",
+    "postponed": "deferred",
+    "delayed": "deferred",
+    "future": "deferred",
+    "proposed": "proposed",
+    "tentative": "proposed",
+    "suggestion": "proposed",
+    "uncertain": "uncertain",
+    "ambiguous": "uncertain",
+}
+
+REJECTION_PATTERN = re.compile(
+    r"\b(decided not to build|decided against|we decided against|we rejected|agreed not to include|"
+    r"won't be supporting|won't be building|ruled out|not building|dropped the idea of|"
+    r"decided to drop|decided to skip|we are not doing|not doing this|discarded)\b",
+    re.IGNORECASE,
+)
+
+DEFERRAL_PATTERN = re.compile(
+    r"\b(postponed to phase|deferred to phase|revisit in phase|deferred to v2|postpone until next|"
+    r"defer to next year|out of scope for (now|phase 1)|pushed to phase|later phase|future sprint)\b",
+    re.IGNORECASE,
+)
+
+ACTIVE_PROHIBITION_PATTERN = re.compile(
+    r"\b(must not|shall not|cannot be deleted|is prohibited|prevent|never allow|disallow|"
+    r"ensure .* does not|remain closed|remains closed|stay closed|stays closed|do not allow|"
+    r"restricted from|forbidden)\b",
+    re.IGNORECASE,
+)
+
 def normalize_label(l: str) -> str:
     if not l:
         return "FR"
@@ -100,6 +142,12 @@ def normalize_label(l: str) -> str:
     if "constraint" in up.lower(): return "Constraint"
     if "assumption" in up.lower(): return "Assumption"
     return "FR"
+
+def normalize_disposition(d: Optional[str]) -> RequirementDisposition:
+    if not d:
+        return "accepted"
+    val = str(d).strip().lower()
+    return DISPOSITION_MAP.get(val, "accepted")
 
 def normalize_extraction_payload(parsed: Any, chunk: SourceChunk) -> dict:
     """
@@ -126,6 +174,7 @@ def normalize_extraction_payload(parsed: Any, chunk: SourceChunk) -> dict:
                     "id": i + 1,
                     "text": val,
                     "candidate_labels": [normalize_label(key)],
+                    "disposition": "accepted",
                     "confidence": 0.85,
                     "priority": "Medium",
                     "evidence": []
@@ -167,7 +216,29 @@ def normalize_extraction_payload(parsed: Any, chunk: SourceChunk) -> dict:
                 if not ev.get("chunk_id"):
                     ev["chunk_id"] = chunk.chunk_id
 
-        # 5. Build full object
+        # 5. Disposition normalization & heuristic source intent validation
+        raw_disp = item.get("disposition")
+        norm_disp = normalize_disposition(raw_disp)
+
+        combined_context = (
+            text + " " + " ".join(
+                ev.get("quote", "") if isinstance(ev, dict) else getattr(ev, "quote", "")
+                for ev in evidence
+            )
+        )
+
+        if ACTIVE_PROHIBITION_PATTERN.search(combined_context) and not REJECTION_PATTERN.search(combined_context):
+            norm_disp = "accepted"
+        elif REJECTION_PATTERN.search(combined_context):
+            norm_disp = "rejected"
+            if "Out-of-Scope" not in norm_labels:
+                norm_labels.append("Out-of-Scope")
+        elif DEFERRAL_PATTERN.search(combined_context):
+            norm_disp = "deferred"
+            if "Out-of-Scope" not in norm_labels:
+                norm_labels.append("Out-of-Scope")
+
+        # 6. Build full object
         extraction_type = item.get("extraction_type")
         if extraction_type not in ("explicit", "implied"):
             extraction_type = None
@@ -188,6 +259,7 @@ def normalize_extraction_payload(parsed: Any, chunk: SourceChunk) -> dict:
             "text": text,
             "actor": item.get("actor"),
             "goal": item.get("goal"),
+            "disposition": norm_disp,
             "candidate_labels": norm_labels,
             "confidence": item.get("confidence") or 0.85,
             "evidence": evidence,
@@ -402,6 +474,7 @@ def project_legacy_requirements(reqs: List[ExtractedRequirement]) -> List[Functi
                 text=r.text,
                 actor=r.actor or "System",
                 goal=r.goal or "",
+                disposition=r.disposition,
                 source_hint=r.evidence[0].quote[:100] if r.evidence else ""
             ))
     return legacy_reqs
