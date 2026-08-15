@@ -10,6 +10,17 @@ from app.store.factory import get_stores
 from app.store.models import JobStatus
 
 
+@pytest.fixture(autouse=True)
+def _mock_background_dispatch(monkeypatch):
+    from app.worker import dispatch
+    async def fake_dispatch(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(dispatch, "dispatch_job", fake_dispatch)
+    from app.api import service
+    monkeypatch.setattr(service, "dispatch_job", fake_dispatch)
+
+
 def _create_test_pdf() -> bytes:
     return b"%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\nxref\n0 2\n0000000000 65535 f \n0000000009 00000 n \ntrailer << /Size 2 /Root 1 0 R >>\nstartxref\n50\n%%EOF"
 

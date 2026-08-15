@@ -10,6 +10,17 @@ from app.services.file_inspection import detect_mime_and_type, is_valid_pdf, is_
 AUTH_HEADERS = {"Authorization": f"Bearer {settings.AI_INTERNAL_SERVICE_TOKEN}"}
 
 
+@pytest.fixture(autouse=True)
+def _mock_background_dispatch(monkeypatch):
+    from app.worker import dispatch
+    async def fake_dispatch(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(dispatch, "dispatch_job", fake_dispatch)
+    from app.api import service
+    monkeypatch.setattr(service, "dispatch_job", fake_dispatch)
+
+
 def create_arbitrary_zip() -> bytes:
     """Create a valid ZIP archive that does NOT contain DOCX OOXML structure."""
     buf = io.BytesIO()

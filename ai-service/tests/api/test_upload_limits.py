@@ -5,6 +5,17 @@ from app.main import app
 from app.config import settings
 
 
+@pytest.fixture(autouse=True)
+def _mock_background_dispatch(monkeypatch):
+    from app.worker import dispatch
+    async def fake_dispatch(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(dispatch, "dispatch_job", fake_dispatch)
+    from app.api import service
+    monkeypatch.setattr(service, "dispatch_job", fake_dispatch)
+
+
 @pytest.mark.asyncio
 async def test_upload_valid_files_within_limits():
     transport = ASGITransport(app=app)

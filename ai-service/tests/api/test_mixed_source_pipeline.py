@@ -34,6 +34,77 @@ def mock_relevance(monkeypatch):
     monkeypatch.setattr(audio, "_run_relevance_check", fake_relevance)
 
 
+@pytest.fixture(autouse=True)
+def mock_llm_pipeline(monkeypatch):
+    monkeypatch.setattr(audio, "_validate_ffmpeg", lambda: None)
+    monkeypatch.setattr(audio, "get_audio_duration_seconds", lambda *args, **kwargs: 10.0)
+
+    from unittest.mock import MagicMock
+    from app import llm
+    from app.nodes import extract, classify, generate, summarize, ingest
+    from app.services.source_processing import extractors
+
+    async def fake_llm_ainvoke(messages, **kwargs):
+        system = messages[0][1] if isinstance(messages, list) and len(messages) > 0 else ""
+        if "Extract atomic software requirements" in system or "Extract requirements" in system:
+            return MagicMock(content=json.dumps({
+                "requirements": [
+                    {
+                        "id": 1,
+                        "text": "The backend API shall rate limit callers to 50 requests per second.",
+                        "actor": "System",
+                        "goal": "rate limiting",
+                        "candidate_labels": ["NFR"],
+                        "confidence": 0.95,
+                        "evidence": [{"chunk_id": "c1", "quote": "rate limit callers to 50 requests per second"}]
+                    },
+                    {
+                        "id": 2,
+                        "text": "The mobile app must support biometric authentication using FaceID and Fingerprint.",
+                        "actor": "User",
+                        "goal": "biometric authentication",
+                        "candidate_labels": ["FR"],
+                        "confidence": 0.95,
+                        "evidence": [{"chunk_id": "c2", "quote": "support biometric authentication using FaceID and Fingerprint"}]
+                    }
+                ]
+            }))
+        if "You classify each requirement" in system:
+            return MagicMock(content=json.dumps({
+                "classifications": [
+                    {"id": 1, "labels": ["NFR"], "confidence": 0.95},
+                    {"id": 2, "labels": ["FR"], "confidence": 0.95}
+                ]
+            }))
+        if "Convert requirements into USER STORIES" in system or "user stories" in system.lower():
+            return MagicMock(content=json.dumps({
+                "stories": [
+                    {
+                        "source_requirement_ids": [2],
+                        "title": "Biometric Authentication",
+                        "description": "As a user, I want to log in using FaceID or Fingerprint, so that authentication is fast and secure.",
+                        "acceptance_criteria": [
+                            "Given the login screen, when the user selects FaceID, then the app authenticates the biometric profile.",
+                            "Given invalid biometric input, when authentication fails, then the app prompts for PIN entry."
+                        ],
+                        "labels": ["FR"],
+                        "story_points": 3
+                    }
+                ]
+            }))
+        return MagicMock(content=json.dumps({"executive_summary": "Summary of mixed sources", "scope": ["biometrics", "rate limit"]}))
+
+    mock_llm_client = MagicMock()
+    mock_llm_client.ainvoke = fake_llm_ainvoke
+    monkeypatch.setattr(llm, "get_llm", lambda: mock_llm_client)
+    monkeypatch.setattr(extract, "get_llm", lambda: mock_llm_client)
+    monkeypatch.setattr(classify, "get_llm", lambda: mock_llm_client)
+    monkeypatch.setattr(generate, "get_llm", lambda: mock_llm_client)
+    monkeypatch.setattr(summarize, "get_llm", lambda: mock_llm_client)
+    monkeypatch.setattr(ingest, "get_llm", lambda: mock_llm_client)
+    monkeypatch.setattr(extractors, "get_llm", lambda: mock_llm_client)
+
+
 @pytest.mark.asyncio
 async def test_full_pipeline_mixed_sources_e2e(mock_relevance, monkeypatch):
     """
