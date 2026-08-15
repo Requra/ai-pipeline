@@ -69,7 +69,7 @@ async def run_job_entry(job_id: str) -> str:
         return "FAILED"
 
     return await execute_job(
-        stores, job_id, initial_state, _get_pipeline(), use_stream=True
+        stores, job_id, initial_state, _get_pipeline(), use_stream=False
     )
 
 
