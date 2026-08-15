@@ -174,9 +174,9 @@ async def prepare_sources_node(state: PipelineState) -> dict:
 
     # 5. Determine overall pipeline outcome & relevance
     if len(ready_sources) == 0:
-        if len(failed_sources) > 0 and len(rejected_sources) == 0:
-            # All sources failed technically
-            err_msg = f"ALL_SOURCES_FAILED: All {len(failed_sources)} source(s) failed during preparation."
+        if len(failed_sources) > 0:
+            # No usable sources and at least one technical processing failure -> FAILED
+            err_msg = f"ALL_SOURCES_FAILED: No usable sources available ({len(failed_sources)} failed, {len(rejected_sources)} rejected)."
             logger.error("Job %s failed: %s", job_id, err_msg)
             return {
                 "status": "failed",
@@ -188,8 +188,8 @@ async def prepare_sources_node(state: PipelineState) -> dict:
                 "processed_sources": processed_sources_payload,
             }
         else:
-            # All sources rejected as irrelevant (or mix of rejected/failed with no ready)
-            err_msg = f"DOCUMENT_REJECTED: All source(s) rejected as irrelevant to software delivery."
+            # All sources were evaluated and explicitly rejected as irrelevant -> REJECTED
+            err_msg = "DOCUMENT_REJECTED: All source(s) rejected as irrelevant to software delivery."
             logger.info("Job %s rejected: %s", job_id, err_msg)
             return {
                 "status": "rejected",
