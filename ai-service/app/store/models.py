@@ -79,6 +79,7 @@ class InputType(str, Enum):
     BACKEND_DOCUMENT = "backend_document"
     BACKEND_TRANSCRIPT = "backend_transcript"
     BACKEND_AUDIO = "backend_audio"
+    BACKEND_SOURCES = "backend_sources"
 
 
 class SourceDocumentRef(BaseModel):
