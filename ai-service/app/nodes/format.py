@@ -275,47 +275,47 @@ async def format_node(state: PipelineState) -> dict:
             data.setdefault("classification_confidence", 0.0)
             coerced_reqs.append(ClassifiedRequirement(**data))
 
-    # Map status. Rejection (input judged not useful) takes precedence over
-    # "failed": ingest sets a DOCUMENT_REJECTED reason in `error` when it rejects,
-    # which must not be misreported as a system failure.
-    status = "partial"
+    # Map status according to authoritative pipeline semantics:
+    # 1. Fatal Technical Failures -> "failed"
+    # 2. Input Rejection (all sources not useful / irrelevant) -> "rejected"
+    # 3. Partial Source Loss or missing outputs -> "partial"
+    # 4. Clean Execution with all usable sources -> "completed"
+    error_str = str(error or "")
     if state.get("is_useful") is False:
-        status = "rejected"
+        if any(marker in error_str for marker in ("ALL_SOURCES_FAILED", "INGEST_FAILED", "EXTRACT_FAILED", "PARSE_FAILURE", "NO_SOURCES")):
+            status = "failed"
+        else:
+            status = "rejected"
     elif error and not coerced_stories and not coerced_reqs:
         status = "failed"
+    elif not coerced_reqs or not coerced_stories:
+        status = "partial"
     else:
-        if state.get("is_useful") and (not coerced_reqs or not coerced_stories):
+        # Check for material source processing loss
+        has_partial_source_loss = bool(state.get("partial_source_failure"))
+        
+        # Check for material source failure in warnings
+        material_source_failure_in_warnings = any(
+            (warning.get("code") if isinstance(warning, dict) else getattr(warning, "code", None)) in ("PARTIAL_SOURCE_FAILURE", "SOURCE_PROCESSING_FAILED")
+            for warning in warnings
+        )
+        
+        # Check for fatal ungrounded requirement issues or high severity defects
+        has_fatal_quality_issue = any(
+            (getattr(q, "severity", None) == "high" or (isinstance(q, dict) and q.get("severity") == "high"))
+            and (
+                getattr(q, "item_type", None) in ("requirement", "pipeline") or
+                (isinstance(q, dict) and q.get("item_type") in ("requirement", "pipeline")) or
+                getattr(q, "rule_violated", "") in ("missing_evidence", "missing_verified_evidence", "USEFUL_INPUT_WITH_EMPTY_EXTRACTION") or
+                (isinstance(q, dict) and q.get("rule_violated") in ("missing_evidence", "missing_verified_evidence", "USEFUL_INPUT_WITH_EMPTY_EXTRACTION"))
+            )
+            for q in q_issues
+        )
+        
+        if has_partial_source_loss or material_source_failure_in_warnings or has_fatal_quality_issue:
             status = "partial"
         else:
-            has_high = any(
-                getattr(q, "severity", None) == "high" 
-                or (isinstance(q, dict) and q.get("severity") == "high") 
-                for q in q_issues
-            )
-            # Successful canonicalization is informational; it should not turn
-            # an otherwise clean result into a partial response.
-            informational_warning_codes = {
-                "DUPLICATE_REQUIREMENT_MERGED",
-                "SEMANTIC_COMPLEMENTARY",
-                # Grounding owns the final status through a High evidence
-                # defect. The warning itself is diagnostic and may be stale in
-                # backward-compatible callers that invoke format directly.
-                "EXTRACT_WEAK_EVIDENCE",
-                "WEAK_EVIDENCE_SUPPORT",
-                "NO_RETRIEVED_EVIDENCE",
-                "EVIDENCE_LIMIT_APPLIED",
-            }
-            actionable_warnings = [
-                warning for warning in warnings
-                if (
-                    warning.get("code") if isinstance(warning, dict)
-                    else getattr(warning, "code", None)
-                ) not in informational_warning_codes
-            ]
-            if error or has_high or actionable_warnings:
-                status = "partial"
-            else:
-                status = "completed"
+            status = "completed"
 
     # Compute processing time if possible
     started_at = state.get("started_at")

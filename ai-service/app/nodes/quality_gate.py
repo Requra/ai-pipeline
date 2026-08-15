@@ -516,8 +516,12 @@ async def quality_gate_node(state: PipelineState) -> dict:
                 details=f"Story {s.id} acceptance criteria cover only {coverage_score:.0%} of linked source clauses.",
             ))
 
-    # --- Combine, dedupe, score ----------------------------------------------
-    all_issues = _dedupe_issues(existing_q + new_issues)
+    # Retain non-story issues from upstream nodes (conflicts, grounding, pipeline); story issues are re-evaluated from current story state.
+    non_story_issues = [
+        q for q in existing_q
+        if (getattr(q, "item_type", None) or (q.get("item_type") if isinstance(q, dict) else None)) != "story"
+    ]
+    all_issues = _dedupe_issues(non_story_issues + new_issues)
 
     has_high = any(q.severity == "high" for q in all_issues)
     status = "needs_review" if has_high else state.get("status", "partial")
