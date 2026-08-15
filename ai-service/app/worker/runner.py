@@ -111,25 +111,17 @@ async def _iter_pipeline_updates(pipeline: Any, initial_state: Dict[str, Any]):
     same shape — only if the failure occurred before any chunk was produced, so
     no node ever runs twice.
     """
-    yielded_any = False
     try:
-        async for update in pipeline.astream(initial_state, stream_mode="updates"):
-            yielded_any = True
+        async for update in pipeline.astream(initial_state):
+            if isinstance(update, dict) and set(update.keys()) == {"__end__"}:
+                continue
             yield update
         return
     except TypeError as exc:
-        if yielded_any or "stream_mode" not in str(exc):
-            raise
-        logger.info(
-            "pipeline.astream() has no stream_mode support (legacy langgraph); "
-            "falling back to its default streaming behavior"
-        )
-
-    async for update in pipeline.astream(initial_state):
-        if isinstance(update, dict) and set(update.keys()) == {"__end__"}:
-            # Legacy-only terminal marker carrying the full final state, which
-            # is already covered by the last real node's update.
-            continue
+        if "unexpected keyword argument" not in str(exc):
+            pass
+    
+    async for update in pipeline.astream(initial_state, stream_mode="updates"):
         yield update
 
 
