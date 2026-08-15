@@ -48,6 +48,7 @@ logger = logging.getLogger("app.worker.runner")
 # durable store and the legacy /status progress stay consistent.
 PROGRESS_BY_NODE = {
     "detect_file_type": 5,
+    "prepare_sources": 25,
     "ingest": 12,
     "transcribe": 20,
     "parse_to_chunks": 30,
@@ -162,7 +163,7 @@ async def _persist_incremental(
 ) -> None:
     """Persist major artifacts as their producing node completes."""
     try:
-        if node_name in ("parse_to_chunks", "transcribe"):
+        if node_name in ("parse_to_chunks", "transcribe", "prepare_sources"):
             await persist_source_documents_and_chunks(stores, job, state)
     except Exception as exc:  # pragma: no cover
         logger.warning(

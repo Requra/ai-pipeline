@@ -61,6 +61,9 @@ def make_initial_state(
         "enable_hybrid_retrieval": enable_hybrid_retrieval,
         "source_metadata": None,
         "source_documents": source_documents or [],
+        "processed_sources": None,
+        "source_processing_stats": None,
+        "partial_source_failure": False,
         "chunks": [],
         "source_index_id": None,
         "retrieval_stats": None,
@@ -242,6 +245,7 @@ async def build_worker_initial_state(
         if job.input_type in (
             InputType.BACKEND_DOCUMENT.value,
             InputType.BACKEND_AUDIO.value,
+            InputType.BACKEND_SOURCES.value,
         ):
             downloaded_inputs: List[Dict[str, Any]] = []
             for ref in source_documents:
@@ -249,6 +253,10 @@ async def build_worker_initial_state(
                 b = await backend_client.fetch_document_bytes(ref)
                 if b:
                     det_type, det_mime, det_subtype = detect_mime_and_type(b, ref.get("filename"))
+                    if det_type == "unknown":
+                        raise SourceSecurityError(
+                            f"Downloaded content type is unknown or signature invalid for '{ref.get('filename')}'"
+                        )
                     downloaded_inputs.append({
                         **ref,
                         "raw_bytes": b,
@@ -259,29 +267,48 @@ async def build_worker_initial_state(
             if downloaded_inputs:
                 # Re-run file inspection on every downloaded byte stream.
                 detected_types = {item["file_type"] for item in downloaded_inputs}
-                # Confirm type is valid for the job input type
-                expected_type = (
-                    "audio"
-                    if job.input_type == InputType.BACKEND_AUDIO.value
-                    else "document"
-                )
+                if job.input_type == InputType.BACKEND_AUDIO.value:
+                    if detected_types != {"audio"}:
+                        raise SourceSecurityError(
+                            "Downloaded content type is invalid for backend_audio"
+                        )
+                elif job.input_type == InputType.BACKEND_DOCUMENT.value:
+                    if not detected_types.issubset({"pdf", "docx", "text"}):
+                        raise SourceSecurityError(
+                            "Downloaded content type is invalid for backend_document"
+                        )
+                elif job.input_type == InputType.BACKEND_SOURCES.value:
+                    valid_kinds = {"pdf", "docx", "text", "audio"}
+                    if not detected_types.issubset(valid_kinds):
+                        raise SourceSecurityError(
+                            "Downloaded content type is invalid for backend_sources"
+                        )
+                    audio_count = sum(1 for item in downloaded_inputs if item["file_type"] == "audio")
+                    from app.config import settings
+                    max_audio = getattr(settings, "MAX_AUDIO_SOURCES_PER_JOB", 1)
+                    if audio_count > max_audio:
+                        raise SourceSecurityError(
+                            "Multiple audio sources exceeded for backend_sources job"
+                        )
 
-                is_type_match = (
-                    detected_types == {"audio"}
-                    if expected_type == "audio"
-                    else detected_types.issubset({"pdf", "docx", "text"})
-                )
-                if not is_type_match:
-                    raise SourceSecurityError(
-                        f"Downloaded content type is invalid for job input type"
-                    )
-                if len(downloaded_inputs) == 1:
+                if len(downloaded_inputs) == 1 and job.input_type != InputType.BACKEND_SOURCES.value:
                     raw_bytes = downloaded_inputs[0]["raw_bytes"]
                     file_type = downloaded_inputs[0]["file_type"]
                     audio_format = downloaded_inputs[0].get("audio_format") or audio_format
+                    raw_inputs = downloaded_inputs
                 else:
                     raw_inputs = downloaded_inputs
-                    file_type = "audio" if expected_type == "audio" else "document"
+                    has_audio = any(item["file_type"] == "audio" for item in downloaded_inputs)
+                    has_doc = any(item["file_type"] != "audio" for item in downloaded_inputs)
+                    if has_audio and has_doc:
+                        file_type = "sources"
+                    elif has_audio:
+                        file_type = "audio"
+                    else:
+                        file_type = "document"
+                    found_audio_fmt = next((item["audio_format"] for item in downloaded_inputs if item.get("audio_format")), None)
+                    if found_audio_fmt:
+                        audio_format = found_audio_fmt
         else:
             # backend_transcript or text
             texts = []
