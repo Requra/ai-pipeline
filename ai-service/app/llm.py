@@ -16,9 +16,7 @@ logger = logging.getLogger(__name__)
 _gate_lock = threading.Lock()
 _sync_gates: Dict[int, threading.BoundedSemaphore] = {}
 _quota_blocked_until: Dict[tuple[str, str], float] = {}
-_async_gates: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, Dict[int, asyncio.Semaphore]]" = (
-    weakref.WeakKeyDictionary()
-)
+_async_gates: Dict[int, Dict[int, asyncio.Semaphore]] = {}
 
 
 def _configured_concurrency() -> int:
@@ -38,9 +36,10 @@ def _sync_gate() -> threading.BoundedSemaphore:
 def _async_gate() -> asyncio.Semaphore:
     """Return one shared gate per event loop and configured limit."""
     loop = asyncio.get_running_loop()
+    loop_id = id(loop)
     limit = _configured_concurrency()
     with _gate_lock:
-        gates_for_loop = _async_gates.setdefault(loop, {})
+        gates_for_loop = _async_gates.setdefault(loop_id, {})
         gate = gates_for_loop.get(limit)
         if gate is None:
             gate = asyncio.Semaphore(limit)
@@ -101,6 +100,8 @@ _PERMANENT_QUOTA_MARKERS = (
     "monthly quota",
     "usage limit reached",
     "free-models-per-day",
+    "tokens per day",
+    "tpd",
     "payment required",
 )
 
