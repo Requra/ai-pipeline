@@ -1,0 +1,63 @@
+name: Real Provider E2E Evaluation Gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      full_benchmark:
+        description: 'Run full expensive benchmark'
+        required: false
+        default: 'false'
+        type: boolean
+  schedule:
+    # Run weekly on Sunday midnight
+    - cron: '0 0 * * 0'
+
+jobs:
+  evaluate:
+    name: Real Provider E2E & Release Verdict
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: ai-service
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg libmagic1
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio httpx
+
+      - name: Run Production Readiness Evaluation Suite
+        run: |
+          python scripts/run_production_readiness_suite.py
+        env:
+          ENV: development
+          AI_INTERNAL_SERVICE_TOKEN: ${{ secrets.AI_INTERNAL_SERVICE_TOKEN }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          DEEPGRAM_API_KEY: ${{ secrets.DEEPGRAM_API_KEY }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          REDIS_URL: ${{ secrets.REDIS_URL }}
+
+      - name: Upload Release Readiness Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-readiness-report
+          path: docs/reports/AI_PIPELINE_FINAL_RELEASE_READINESS.md
+          if-no-files-found: warn
