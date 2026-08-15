@@ -30,8 +30,8 @@ def get_redis_connection(url: Optional[str] = None):
 
     return redis.Redis.from_url(
         url or settings.REDIS_URL,
-        socket_connect_timeout=3,
-        socket_timeout=3,
+        socket_connect_timeout=5,
+        health_check_interval=30,
     )
 
 
