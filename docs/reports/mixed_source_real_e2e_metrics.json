@@ -1,11 +1,13 @@
 {
   "metadata": {
-    "timestamp": "2026-08-15T03:02:16.688520+00:00",
+    "timestamp": "2026-08-15T04:47:13.481874+00:00",
     "branch": "feat/doc-audio-processing",
-    "commit": "e50b215",
+    "commit": "3cbd646",
     "python_version": "3.14.2",
+    "fastapi_version": "0.135.2",
+    "langgraph_version": "0.2.60",
     "llm_provider": "groq",
-    "llm_model": "llama-3.3-70b-versatile",
+    "llm_model": "llama-3.1-8b-instant",
     "stt_provider": "groq",
     "stt_model": "whisper-large-v3",
     "database": "PostgreSQL 16 + pgvector (Neon)",
@@ -16,17 +18,17 @@
       "id": "GOLDEN_E2E (EC2)",
       "scenario": "PDF + DOCX + TXT + MP3 through POST /internal/process",
       "expected": "COMPLETED / PARTIAL, unified corpus, cross-source grounding",
-      "actual": "Status=PARTIAL, 10 reqs, 10 stories",
+      "actual": "Status=PARTIAL, 12 reqs, 12 stories",
       "status": "PASS",
-      "duration": "201.06s"
+      "duration": "220.80s"
     },
     {
       "id": "EC1",
       "scenario": "PDF + Audio only",
       "expected": "completed / partial",
-      "actual": "PARTIAL",
+      "actual": "COMPLETED",
       "status": "PASS",
-      "duration": "135.10s"
+      "duration": "130.71s"
     },
     {
       "id": "EC3",
@@ -34,15 +36,15 @@
       "expected": "completed / partial",
       "actual": "COMPLETED",
       "status": "PASS",
-      "duration": "124.22s"
+      "duration": "131.05s"
     },
     {
       "id": "EC4",
       "scenario": "Audio only (MP3)",
       "expected": "completed / partial",
-      "actual": "PARTIAL",
+      "actual": "COMPLETED",
       "status": "PASS",
-      "duration": "65.83s"
+      "duration": "57.81s"
     },
     {
       "id": "EC5",
@@ -50,7 +52,7 @@
       "expected": "idempotent 200/202, no duplicate jobs",
       "actual": "first=202, second=200",
       "status": "PASS",
-      "duration": "138.45s"
+      "duration": "142.84s"
     },
     {
       "id": "EC6",
@@ -58,7 +60,7 @@
       "expected": "409 Conflict",
       "actual": "409",
       "status": "PASS",
-      "duration": "67.46s"
+      "duration": "54.75s"
     },
     {
       "id": "EC7",
@@ -66,7 +68,7 @@
       "expected": "409 Conflict",
       "actual": "409",
       "status": "PASS",
-      "duration": "69.44s"
+      "duration": "66.16s"
     },
     {
       "id": "EC8",
@@ -82,7 +84,7 @@
       "expected": "completed / partial with valid audio continuing",
       "actual": "PARTIAL",
       "status": "PASS",
-      "duration": "67.79s"
+      "duration": "67.31s"
     },
     {
       "id": "EC10",
@@ -90,23 +92,23 @@
       "expected": "completed / partial with valid doc continuing",
       "actual": "PARTIAL",
       "status": "PASS",
-      "duration": "68.74s"
+      "duration": "78.52s"
     },
     {
       "id": "EC11",
       "scenario": "Irrelevant document + useful audio",
       "expected": "completed / partial with useful audio continuing",
-      "actual": "PARTIAL",
+      "actual": "COMPLETED",
       "status": "PASS",
-      "duration": "73.72s"
+      "duration": "72.52s"
     },
     {
       "id": "EC12",
       "scenario": "Useful document + irrelevant audio",
       "expected": "completed / partial with useful doc continuing",
-      "actual": "PARTIAL",
+      "actual": "COMPLETED",
       "status": "PASS",
-      "duration": "72.05s"
+      "duration": "68.93s"
     },
     {
       "id": "EC13",
@@ -114,15 +116,15 @@
       "expected": "rejected",
       "actual": "REJECTED",
       "status": "PASS",
-      "duration": "26.85s"
+      "duration": "27.78s"
     },
     {
       "id": "EC14",
       "scenario": "All sources fail processing",
       "expected": "failed / rejected",
-      "actual": "REJECTED",
+      "actual": "FAILED",
       "status": "PASS",
-      "duration": "27.50s"
+      "duration": "28.60s"
     },
     {
       "id": "EC15",
@@ -130,15 +132,15 @@
       "expected": "415 Unsupported Media Type",
       "actual": "415",
       "status": "PASS",
-      "duration": "0.00s"
+      "duration": "0.01s"
     },
     {
       "id": "EC16",
       "scenario": "MIME spoofing (binary payload disguised as .pdf)",
       "expected": "415 Unsupported Media Type",
-      "actual": "202",
-      "status": "FAIL",
-      "duration": "22.85s"
+      "actual": "415",
+      "status": "PASS",
+      "duration": "0.01s"
     },
     {
       "id": "EC17",
@@ -146,7 +148,7 @@
       "expected": "400 Bad Request",
       "actual": "400",
       "status": "PASS",
-      "duration": "0.00s"
+      "duration": "0.01s"
     },
     {
       "id": "EC18",
@@ -154,7 +156,7 @@
       "expected": "413 Payload Too Large",
       "actual": "413",
       "status": "PASS",
-      "duration": "0.26s"
+      "duration": "0.25s"
     },
     {
       "id": "EC19",
@@ -170,27 +172,27 @@
       "expected": "200 OK, job marked CANCELLED",
       "actual": "200",
       "status": "PASS",
-      "duration": "103.39s"
+      "duration": "110.87s"
     }
   ],
   "golden_e2e": {
-    "job_id": "e2e-prod-golden-1786762936",
+    "job_id": "e2e-prod-golden-1786769233",
     "status": "PARTIAL",
-    "total_time_seconds": 201.06,
-    "requirements_count": 10,
-    "stories_count": 10,
+    "total_time_seconds": 220.8,
+    "requirements_count": 12,
+    "stories_count": 12,
     "source_documents_count": 4,
     "persisted_chunks_count": 4,
     "quality_report": {
-      "story_count": 10,
-      "overall_score": 0.9369,
+      "story_count": 12,
+      "overall_score": 0.9331,
       "duplicate_risk": 0.0,
-      "requirement_count": 10,
-      "groundedness_score": 0.8729,
+      "requirement_count": 12,
+      "groundedness_score": 0.8941,
       "story_completeness": 1.0,
-      "traceability_coverage": 0.9,
-      "high_severity_issue_count": 1,
-      "acceptance_criteria_quality": 1.0
+      "traceability_coverage": 0.9167,
+      "high_severity_issue_count": 2,
+      "acceptance_criteria_quality": 0.9286
     },
     "source_documents": [
       {
@@ -240,7 +242,7 @@
           {
             "page": 1,
             "quote": "REQ-AUTH-102: Reset links sent to users remain valid for 30 minutes.",
-            "chunk_id": "chk_e2e-prod-golden-1786762936_doc_pdf_1_p1_c0",
+            "chunk_id": "chk_e2e-prod-golden-1786769233_doc_pdf_1_p1_c0",
             "source_id": "doc_pdf_1",
             "source_type": "document",
             "document_name": "requirements.pdf",
@@ -267,7 +269,7 @@
           {
             "page": 1,
             "quote": "REQ-AUTH-103: Users must confirm their new password with at least 8 characters, containing uppercase, lower\n3.",
-            "chunk_id": "chk_e2e-prod-golden-1786762936_doc_pdf_1_p1_c0",
+            "chunk_id": "chk_e2e-prod-golden-1786769233_doc_pdf_1_p1_c0",
             "source_id": "doc_pdf_1",
             "source_type": "document",
             "document_name": "requirements.pdf",
@@ -294,7 +296,7 @@
           {
             "page": 1,
             "quote": "Account Lockout\nREQ-AUTH-104: The system shall lock the account after 5 consecutive failed login attempts.",
-            "chunk_id": "chk_e2e-prod-golden-1786762936_doc_pdf_1_p1_c0",
+            "chunk_id": "chk_e2e-prod-golden-1786769233_doc_pdf_1_p1_c0",
             "source_id": "doc_pdf_1",
             "source_type": "document",
             "document_name": "requirements.pdf",
@@ -321,7 +323,7 @@
           {
             "page": null,
             "quote": "Technical Architecture Notes - Identity Management\n\nDocument ID: DOC-TECH-002\n\nAudit Logging & Integration Constraints\n\nAll password reset attempts must be recorded in the security audit log with user IP, user agent, and timestamp.",
-            "chunk_id": "chk_e2e-prod-golden-1786762936_doc_docx_2_pNone_c0",
+            "chunk_id": "chk_e2e-prod-golden-1786769233_doc_docx_2_pNone_c0",
             "source_id": "doc_docx_2",
             "source_type": "document",
             "document_name": "technical-notes.docx",
@@ -348,7 +350,7 @@
           {
             "page": null,
             "quote": "Database Audit Trail\n\nAudit records must be retained in PostgreSQL for a minimum of 90 days for compliance verification.",
-            "chunk_id": "chk_e2e-prod-golden-1786762936_doc_docx_2_pNone_c0",
+            "chunk_id": "chk_e2e-prod-golden-1786769233_doc_docx_2_pNone_c0",
             "source_id": "doc_docx_2",
             "source_type": "document",
             "document_name": "technical-notes.docx",
@@ -370,7 +372,7 @@
           "warnings": []
         },
         "priority": "Medium",
-        "user_story": "As a system operator, I want reset links to remain valid for 30 minutes, so that users can reset their passwords within the allowed time.",
+        "user_story": "As a system operator, I want reset links to remain valid for 30 minutes, so that users can reset their passwords within the time frame.",
         "jira_fields": {
           "labels": [
             "FR"
@@ -380,7 +382,7 @@
           "epic_name": "",
           "components": [],
           "issue_type": "Story",
-          "description": "As a system operator, I want reset links to remain valid for 30 minutes, so that users can reset their passwords within the allowed time.",
+          "description": "As a system operator, I want reset links to remain valid for 30 minutes, so that users can reset their passwords within the time frame.",
           "story_points": 2,
           "acceptance_criteria": [
             "Given the required preconditions are satisfied, when the system attempts to reset link validity, then rEQ-AUTH-102: Reset links sent to users remain valid for 30 minutes."
@@ -390,7 +392,7 @@
           {
             "page": 1,
             "quote": "REQ-AUTH-102: Reset links sent to users remain valid for 30 minutes.",
-            "chunk_id": "chk_e2e-prod-golden-1786762936_doc_pdf_1_p1_c0",
+            "chunk_id": "chk_e2e-prod-golden-1786769233_doc_pdf_1_p1_c0",
             "source_id": "doc_pdf_1",
             "source_type": "document",
             "document_name": "requirements.pdf",
@@ -401,7 +403,7 @@
         "deduplication_key": "reset-links-remain-valid-for-30-minutes",
         "acceptance_criteria": [
           {
-            "id": "e2e-prod-golden-1786762936_story_1_ac_1",
+            "id": "e2e-prod-golden-1786769233_story_1_ac_1",
             "text": "Given the required preconditions are satisfied, when the system attempts to reset link validity, then rEQ-AUTH-102: Reset links sent to users remain valid for 30 minutes.",
             "criterion_type": "Given-When-Then"
           }
@@ -437,7 +439,7 @@
           {
             "page": 1,
             "quote": "REQ-AUTH-103: Users must confirm their new password with at least 8 characters, containing uppercase, lower\n3.",
-            "chunk_id": "chk_e2e-prod-golden-1786762936_doc_pdf_1_p1_c0",
+            "chunk_id": "chk_e2e-prod-golden-1786769233_doc_pdf_1_p1_c0",
             "source_id": "doc_pdf_1",
             "source_type": "document",
             "document_name": "requirements.pdf",
@@ -448,7 +450,7 @@
         "deduplication_key": "confirm-new-password-with-at-least-8-characters",
         "acceptance_criteria": [
           {
-            "id": "e2e-prod-golden-1786762936_story_2_ac_1",
+            "id": "e2e-prod-golden-1786769233_story_2_ac_1",
             "text": "Given the required preconditions are satisfied, when User attempts to password confirmation, then rEQ-AUTH-103: Users confirm their new password with at least 8 characters, containing uppercase, lower 3.",
             "criterion_type": "Given-When-Then"
           }
@@ -484,7 +486,7 @@
           {
             "page": 1,
             "quote": "Account Lockout\nREQ-AUTH-104: The system shall lock the account after 5 consecutive failed login attempts.",
-            "chunk_id": "chk_e2e-prod-golden-1786762936_doc_pdf_1_p1_c0",
+            "chunk_id": "chk_e2e-prod-golden-1786769233_doc_pdf_1_p1_c0",
             "source_id": "doc_pdf_1",
             "source_type": "document",
             "document_name": "requirements.pdf",
@@ -495,7 +497,7 @@
         "deduplication_key": "account-lockout-after-5-failed-login-attempts",
         "acceptance_criteria": [
           {
-            "id": "e2e-prod-golden-1786762936_story_3_ac_1",
+            "id": "e2e-prod-golden-1786769233_story_3_ac_1",
             "text": "Given the required preconditions are satisfied, when the system attempts to account lockout, then account Lockout REQ-AUTH-104: The system locks the account after 5 consecutive failed login attempts.",
             "criterion_type": "Given-When-Then"
           }
@@ -522,7 +524,7 @@
           "components": [],
           "issue_type": "Story",
           "description": "As a system operator, I want to record password reset attempts in the security audit log with user IP, user agent, and timestamp, so that security can be monitored.",
-          "story_points": 3,
+          "story_points": 8,
           "acceptance_criteria": [
             "Given the required preconditions are satisfied, when the system attempts to record password reset attempts in the security audit log, then technical Architecture Notes - Identity Management Document ID: DOC-TECH-002 Audit Logging & Integration Constraints All password reset attempts is recorded in the security audit log with user IP, user agent, and timestamp."
           ]
@@ -531,7 +533,7 @@
           {
             "page": null,
             "quote": "Technical Architecture Notes - Identity Management\n\nDocument ID: DOC-TECH-002\n\nAudit Logging & Integration Constraints\n\nAll password reset attempts must be recorded in the security audit log with user IP, user agent, and timestamp.",
-            "chunk_id": "chk_e2e-prod-golden-1786762936_doc_docx_2_pNone_c0",
+            "chunk_id": "chk_e2e-prod-golden-1786769233_doc_docx_2_pNone_c0",
             "source_id": "doc_docx_2",
             "source_type": "document",
             "document_name": "technical-notes.docx",
@@ -542,7 +544,7 @@
         "deduplication_key": "record-password-reset-attempts-in-the-security-audit-log",
         "acceptance_criteria": [
           {
-            "id": "e2e-prod-golden-1786762936_story_4_ac_1",
+            "id": "e2e-prod-golden-1786769233_story_4_ac_1",
             "text": "Given the required preconditions are satisfied, when the system attempts to record password reset attempts in the security audit log, then technical Architecture Notes - Identity Management Document ID: DOC-TECH-002 Audit Logging & Integration Constraints All password reset attempts is recorded in the security audit log with user IP, user agent, and timestamp.",
             "criterion_type": "Given-When-Then"
           }
@@ -551,7 +553,7 @@
     ]
   },
   "performance_timings": {
-    "total_e2e_seconds": 201.06,
+    "total_e2e_seconds": 220.8,
     "source_prep_seconds": 2.15,
     "stt_seconds": 1.84,
     "index_build_seconds": 0.42,
@@ -605,7 +607,7 @@
     "provider": "groq",
     "model": "whisper-large-v3",
     "audio_duration_seconds": 36.96,
-    "stt_latency_seconds": 1.83,
+    "stt_latency_seconds": 1.88,
     "transcript_chars": 507,
     "chunks_count": 1,
     "wer": 0.0633,
@@ -624,24 +626,45 @@
       "concurrency": 1,
       "total_jobs": 1,
       "succeeded": 1,
-      "total_wall_seconds": 141.36,
-      "mean_e2e_seconds": 141.36,
+      "total_wall_seconds": 142.77,
+      "mean_e2e_seconds": 142.77,
+      "p50_latency_seconds": 142.77,
+      "p95_latency_seconds": 142.77,
+      "max_latency_seconds": 142.77,
+      "latencies_seconds": [
+        142.77
+      ],
       "errors_or_429s": 0
     },
     {
       "concurrency": 2,
       "total_jobs": 2,
       "succeeded": 2,
-      "total_wall_seconds": 128.64,
-      "mean_e2e_seconds": 64.32,
+      "total_wall_seconds": 133.96,
+      "mean_e2e_seconds": 128.1,
+      "p50_latency_seconds": 133.96,
+      "p95_latency_seconds": 133.96,
+      "max_latency_seconds": 133.96,
+      "latencies_seconds": [
+        122.25,
+        133.96
+      ],
       "errors_or_429s": 0
     },
     {
       "concurrency": 3,
       "total_jobs": 3,
       "succeeded": 3,
-      "total_wall_seconds": 153.44,
-      "mean_e2e_seconds": 51.15,
+      "total_wall_seconds": 141.81,
+      "mean_e2e_seconds": 122.39,
+      "p50_latency_seconds": 125.71,
+      "p95_latency_seconds": 141.81,
+      "max_latency_seconds": 141.81,
+      "latencies_seconds": [
+        99.66,
+        125.71,
+        141.81
+      ],
       "errors_or_429s": 0
     }
   ],
@@ -649,5 +672,7 @@
   "conflict_analysis": {},
   "bugs_found": [],
   "blockers": [],
-  "verdict": "PRODUCTION READY WITH CONDITIONS"
+  "verdict": "PRODUCTION READY WITH CONDITIONS",
+  "recommendation": "SHIP WITH CONDITIONS",
+  "final_recommendation": "SHIP WITH CONDITIONS"
 }
