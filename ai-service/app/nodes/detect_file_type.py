@@ -43,7 +43,8 @@ async def detect_file_type_node(state: PipelineState) -> dict:
                     "status": "rejected",
                     "error": f"FILE_TYPE_REJECTED: unsupported file format for '{filename}' (signature not recognized)",
                 }
-            max_size = MAX_AUDIO_SIZE if file_type == "audio" else MAX_DOC_SIZE
+            from app.config import settings
+            max_size = settings.MAX_AUDIO_BYTES if file_type == "audio" else settings.MAX_DOCUMENT_BYTES
             if len(file_bytes) > max_size:
                 return {
                     "status": "rejected",
@@ -67,17 +68,21 @@ async def detect_file_type_node(state: PipelineState) -> dict:
                 })
 
         audio_count = sum(1 for item in normalized_inputs if item["file_type"] == "audio")
-        from app.config import settings
         max_audio = getattr(settings, "MAX_AUDIO_SOURCES_PER_JOB", 1)
         if audio_count > max_audio:
             return {
                 "status": "rejected",
-                "error": "FILE_TYPE_REJECTED: multiple audio inputs are not supported",
+                "error": f"FILE_TYPE_REJECTED: multiple audio inputs exceed limit of {max_audio}",
             }
 
         has_audio = "audio" in detected_kinds
         has_doc = "document" in detected_kinds
         if has_audio and has_doc:
+            if not getattr(settings, "ENABLE_MIXED_SOURCE_JOBS", True):
+                return {
+                    "status": "rejected",
+                    "error": "FILE_TYPE_REJECTED: mixed document and audio sources are disabled by ENABLE_MIXED_SOURCE_JOBS",
+                }
             overall_file_type = "sources"
         elif has_audio:
             overall_file_type = "audio"

@@ -327,6 +327,11 @@ async def process_compatibility(
         )
 
     if audio_count > 0 and doc_count > 0:
+        if not getattr(settings, "ENABLE_MIXED_SOURCE_JOBS", True):
+            raise HTTPException(
+                status_code=400,
+                detail="Mixed document and audio source jobs are disabled by ENABLE_MIXED_SOURCE_JOBS",
+            )
         mapped_input_type = "backend_sources"
     elif audio_count > 0:
         mapped_input_type = "backend_audio"
