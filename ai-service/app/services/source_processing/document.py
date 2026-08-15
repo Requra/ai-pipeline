@@ -4,7 +4,7 @@ import logging
 from typing import Optional
 
 from app.services.source_processing.models import SourceInput, ProcessedSource
-from app.nodes.ingest import (
+from app.services.source_processing.extractors import (
     _normalize_text,
     _mask_pii,
     _extract_pdf,

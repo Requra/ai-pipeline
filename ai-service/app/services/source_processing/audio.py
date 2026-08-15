@@ -6,7 +6,7 @@ from typing import Any, Dict, Optional
 
 from app.config import settings
 from app.services.source_processing.models import SourceInput, ProcessedSource
-from app.nodes.ingest import _mask_pii, _run_relevance_check
+from app.services.source_processing.extractors import _mask_pii, _run_relevance_check
 from app.nodes.transcribe import (
     _validate_ffmpeg,
     _transcribe_groq,

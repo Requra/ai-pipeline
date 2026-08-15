@@ -72,7 +72,7 @@ async def detect_file_type_node(state: PipelineState) -> dict:
         if audio_count > max_audio:
             return {
                 "status": "rejected",
-                "error": f"FILE_TYPE_REJECTED: multiple audio inputs exceed limit of {max_audio}",
+                "error": "FILE_TYPE_REJECTED: multiple audio inputs are not supported",
             }
 
         has_audio = "audio" in detected_kinds
