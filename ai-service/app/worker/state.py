@@ -22,9 +22,13 @@ from typing import Any, Dict, List, Optional
 from app.store.base import StoreBundle
 from app.store.models import AiJobRecord, InputType
 
+from app.config import settings
+
 logger = logging.getLogger("app.worker.state")
 
-_INPUT_TTL_SECONDS = 6 * 60 * 60  # transient input cache lifetime
+
+def _input_ttl_seconds() -> int:
+    return getattr(settings, "INPUT_CACHE_TTL_SECONDS", 86400)
 
 
 def make_initial_state(
@@ -146,7 +150,7 @@ def stash_input(
     }
     try:
         conn = get_redis_connection()
-        ok = conn.set(_input_key(job_id), json.dumps(payload), ex=_INPUT_TTL_SECONDS)
+        ok = conn.set(_input_key(job_id), json.dumps(payload), ex=_input_ttl_seconds())
     except Exception as exc:  # pragma: no cover - infra dependent
         logger.warning("stash_input failed for %s: %s", job_id, type(exc).__name__)
         raise

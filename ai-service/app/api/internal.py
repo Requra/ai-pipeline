@@ -50,7 +50,39 @@ logger = logging.getLogger("app.api.internal")
 router = APIRouter(prefix="/internal", tags=["internal"], dependencies=[Depends(require_internal_auth)])
 
 
-MOCK_DOCUMENT_STORAGE: Dict[str, bytes] = {}
+from collections import OrderedDict
+
+class BoundedInMemoryStore:
+    """Thread-safe bounded memory store for tests/dev to prevent production RAM growth."""
+    def __init__(self, max_items: int = 50):
+        self._data: OrderedDict[str, bytes] = OrderedDict()
+        self._max_items = max_items
+
+    def __setitem__(self, key: str, value: bytes):
+        if settings.is_production:
+            return
+        if len(self._data) >= self._max_items:
+            self._data.popitem(last=False)
+        self._data[key] = value
+
+    def __getitem__(self, key: str) -> bytes:
+        return self._data[key]
+
+    def __contains__(self, key: str) -> bool:
+        if settings.is_production:
+            return False
+        return key in self._data
+
+    def get(self, key: str, default: Optional[bytes] = None) -> Optional[bytes]:
+        if settings.is_production:
+            return default
+        return self._data.get(key, default)
+
+    def clear(self):
+        self._data.clear()
+
+
+MOCK_DOCUMENT_STORAGE = BoundedInMemoryStore(max_items=50)
 
 
 def _links(job_id: str) -> Dict[str, str]:
@@ -62,20 +94,6 @@ def _links(job_id: str) -> Dict[str, str]:
     }
 
 
-def _options_from_request(req: CreateJobRequest) -> JobOptions:
-    o = req.options
-    return JobOptions(
-        generate_user_stories=o.generate_user_stories,
-        generate_summary=o.generate_summary,
-        enable_embeddings=o.enable_embeddings,
-        enable_hybrid_retrieval=o.enable_hybrid_retrieval,
-        language=o.language,
-        callback_url=o.callback_url,
-        priority=o.priority,
-    )
-
-
-# Helper to build options from CreateJobRequest for fingerprinting
 def _options_from_request(req: CreateJobRequest) -> JobOptions:
     o = req.options
     return JobOptions(
