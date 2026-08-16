@@ -9,6 +9,7 @@ from email.utils import parsedate_to_datetime
 import httpx
 import openai
 from typing import Optional, List, Dict, Any
+from langchain_openai import ChatOpenAI
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -189,8 +190,6 @@ class ResilientLLMClient:
             return override_model or settings.OPENAI_MODEL or "gpt-4o-mini"
 
     def _instantiate_client(self, provider: str, model: str):
-        from langchain_openai import ChatOpenAI
-
         if provider == "openrouter":
             extra_headers = {}
             if settings.OPENROUTER_APP_NAME:
