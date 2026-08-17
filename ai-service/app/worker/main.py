@@ -75,6 +75,8 @@ async def run_job_entry(job_id: str) -> str:
 
 def run_job_entry_sync(job_id: str) -> str:
     """Synchronous entrypoint used by the RQ worker."""
+    from app.store.factory import reset_stores
+    reset_stores()
     return asyncio.run(run_job_entry(job_id))
 
 
