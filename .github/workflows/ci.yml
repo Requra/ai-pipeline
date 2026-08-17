@@ -38,12 +38,12 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pytest pytest-asyncio pytest-mock httpx
+          pip install poetry
+          poetry install
 
       - name: Run unit & integration tests
         run: |
-          pytest -v tests/
+          poetry run pytest -v tests/
         env:
           ENV: test
           AI_INTERNAL_SERVICE_TOKEN: ci-test-token-value
