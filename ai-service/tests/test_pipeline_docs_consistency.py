@@ -16,7 +16,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 def test_pipeline_active_node_count_parity():
     """Verify that build_pipeline() registers exactly 13 active business logic nodes."""
     compiled = build_pipeline()
-    graph_nodes = set(compiled.get_graph().nodes.keys()) - {"__start__", "__end__"}
+    graph_nodes = {
+        k for k in compiled.get_graph().nodes.keys()
+        if not k.startswith("__") and "_route_" not in k
+    }
 
     expected_nodes = {
         "detect_file_type",

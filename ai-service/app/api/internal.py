@@ -177,7 +177,7 @@ async def create_job(
         "job dispatched job_id=%s tenant=%s project=%s input_type=%s attempt=%s request_id=%s",
         job_id, req.tenant_id, req.project_id, req.input_type, rec.attempt_number, request_id,
     )
-    return JSONResponse(status_code=outcome.http_status, content=outcome.body)
+    return JSONResponse(status_code=outcome.http_status, content=outcome.body, background=background_tasks)
 
 
 @router.post("/process", status_code=status.HTTP_202_ACCEPTED)
@@ -400,7 +400,7 @@ async def process_compatibility(
         transcribe_options={},
     )
 
-    return JSONResponse(status_code=outcome.http_status, content=outcome.body)
+    return JSONResponse(status_code=outcome.http_status, content=outcome.body, background=background_tasks)
 
 
 @router.post("/process-json", status_code=status.HTTP_202_ACCEPTED)
@@ -461,7 +461,7 @@ async def process_json_compatibility(
         transcribe_options={},
     )
 
-    return JSONResponse(status_code=outcome.http_status, content=outcome.body)
+    return JSONResponse(status_code=outcome.http_status, content=outcome.body, background=background_tasks)
 
 
 @router.get("/jobs/{job_id}")

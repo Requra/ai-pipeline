@@ -8,7 +8,8 @@ plain ``postgresql://`` DSN or an explicit ``postgresql+asyncpg://`` one.
 
 from __future__ import annotations
 
-from typing import Optional
+import asyncio
+from typing import Dict, Optional
 
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -30,22 +31,29 @@ def normalize_async_url(url: str) -> str:
 
 
 class Database:
-    """Owns the async engine + session factory for one DSN."""
+    """Owns the async engine + session factory for one DSN, scoped per event loop."""
 
     def __init__(self, url: str) -> None:
         self.url = normalize_async_url(url)
-        self._engine: Optional[AsyncEngine] = None
-        self._sessionmaker: Optional[async_sessionmaker[AsyncSession]] = None
+        self._engines: Dict[Optional[asyncio.AbstractEventLoop], AsyncEngine] = {}
+        self._sessionmakers: Dict[Optional[asyncio.AbstractEventLoop], async_sessionmaker[AsyncSession]] = {}
+
+    def _get_current_loop(self) -> Optional[asyncio.AbstractEventLoop]:
+        try:
+            return asyncio.get_running_loop()
+        except RuntimeError:
+            return None
 
     @property
     def engine(self) -> AsyncEngine:
-        if self._engine is None:
+        loop = self._get_current_loop()
+        if loop not in self._engines:
             from app.config import settings
 
             connect_args = {}
             if "ssl=require" in self.url or "sslmode=require" in self.url or "neon.tech" in self.url:
                 connect_args["ssl"] = "require"
-            self._engine = create_async_engine(
+            self._engines[loop] = create_async_engine(
                 self.url,
                 pool_pre_ping=True,
                 pool_size=getattr(settings, "DB_POOL_SIZE", 5),
@@ -55,15 +63,16 @@ class Database:
                 future=True,
                 connect_args=connect_args,
             )
-        return self._engine
+        return self._engines[loop]
 
     @property
     def sessionmaker(self) -> async_sessionmaker[AsyncSession]:
-        if self._sessionmaker is None:
-            self._sessionmaker = async_sessionmaker(
+        loop = self._get_current_loop()
+        if loop not in self._sessionmakers:
+            self._sessionmakers[loop] = async_sessionmaker(
                 bind=self.engine, expire_on_commit=False, class_=AsyncSession
             )
-        return self._sessionmaker
+        return self._sessionmakers[loop]
 
     def session(self) -> AsyncSession:
         return self.sessionmaker()
@@ -86,5 +95,10 @@ class Database:
         return True
 
     async def dispose(self) -> None:
-        if self._engine is not None:
-            await self._engine.dispose()
+        for engine in list(self._engines.values()):
+            try:
+                await engine.dispose()
+            except Exception:
+                pass
+        self._engines.clear()
+        self._sessionmakers.clear()

@@ -62,9 +62,9 @@ async def quality_gate_node(state: PipelineState) -> dict:
     print("--- QUALITY GATE NODE ---")
     update_progress(state.get("job_id"), "quality_gate", 90, "PROCESSING")
 
-    reqs: List[ClassifiedRequirement] = state.get("classified_requirements", [])
-    stories: List[UserStory] = state.get("user_stories", [])
-    coverages: List[RequirementCoverage] = state.get("requirement_coverages", [])
+    reqs: List[ClassifiedRequirement] = state.get("classified_requirements") or []
+    stories: List[UserStory] = state.get("user_stories") or []
+    coverages: List[RequirementCoverage] = state.get("requirement_coverages") or []
 
     existing_q = state.get("quality_issues", []) or []
 

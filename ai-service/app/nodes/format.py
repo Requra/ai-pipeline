@@ -364,9 +364,12 @@ async def format_node(state: PipelineState) -> dict:
     # Compute processing time if possible
     started_at = state.get("started_at")
     if started_at:
-        processing_time_ms = int(max(0, (time.time() - started_at) * 1000))
+        try:
+            processing_time_ms = int(max(0, (time.time() - float(started_at)) * 1000))
+        except (ValueError, TypeError):
+            processing_time_ms = int(state.get("processing_time_ms") or 0)
     else:
-        processing_time_ms = state.get("processing_time_ms", 0)
+        processing_time_ms = int(state.get("processing_time_ms") or 0)
 
     # 1. Source documents mapping
     source_docs = []
@@ -865,7 +868,7 @@ async def format_node(state: PipelineState) -> dict:
         warnings=_reconcile_public_warnings(warnings, req_id_map),
         quality_report=quality_report,
         error=structured_error,
-        processing_time_ms=processing_time_ms,
+        processing_time_ms=int(processing_time_ms or 0),
         
         # Legacy compat
         error_message=error,

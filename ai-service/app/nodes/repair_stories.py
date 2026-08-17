@@ -75,10 +75,10 @@ def _build_repair_prompt_context(
 
 
 async def repair_stories_node(state: PipelineState) -> dict:
-    print("--- QUALITY REPAIR NODE ---")
-    update_progress(state.get("job_id"), "quality_repair", 91, "PROCESSING")
+    print("--- REPAIR STORIES NODE ---")
+    update_progress(state.get("job_id"), "repair_stories", 92, "PROCESSING")
 
-    attempts = state.get("repair_attempts", 0)
+    attempts = int(state.get("repair_attempts") or 0)
     stories = state.get("user_stories", []) or []
     issues = state.get("quality_issues", []) or []
     reqs = state.get("classified_requirements", []) or state.get("extracted_requirements", []) or []

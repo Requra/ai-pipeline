@@ -29,6 +29,13 @@ _REDIS_CONNECT_DELAY_SECONDS = 1.0
 
 
 def _get_pipeline():
+    try:
+        import app.main as main_mod
+        if getattr(main_mod, "pipeline", None) is not None:
+            return main_mod.pipeline
+    except Exception:
+        pass
+
     global _pipeline
     if _pipeline is None:
         from app.graph.pipeline import build_pipeline
@@ -40,6 +47,7 @@ def _get_pipeline():
 async def run_job_entry(job_id: str) -> str:
     """Reconstruct state from the durable store + input cache and run the job."""
     import time
+    from app.store.factory import get_stores, close_stores
     from app.store.models import JobStatus
     from app.worker.runner import _fail
 
@@ -69,7 +77,7 @@ async def run_job_entry(job_id: str) -> str:
         return "FAILED"
 
     return await execute_job(
-        stores, job_id, initial_state, _get_pipeline(), use_stream=False
+        stores, job_id, initial_state, _get_pipeline(), use_stream=True
     )
 
 

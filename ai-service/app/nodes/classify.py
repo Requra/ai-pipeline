@@ -112,7 +112,7 @@ async def _classify_batch(llm, batch):
 
 async def classify_node(state: PipelineState) -> dict:
     print("--- CLASSIFY NODE (MULTI-LABEL) ---")
-    update_progress(state.get("job_id"), "classify", 65, "PROCESSING")
+    update_progress(state.get("job_id"), "classify", 70, "PROCESSING")
 
     # Prefer new extracted_requirements; fall back to legacy functional_requirements
     frs = state.get("extracted_requirements") or state.get("functional_requirements", [])

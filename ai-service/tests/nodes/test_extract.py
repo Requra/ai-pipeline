@@ -197,6 +197,7 @@ async def test_extract_node_llm_failure(base_state):
     with patch("app.nodes.extract.get_llm", return_value=mock_llm):
         result = await extract_node(state)
 
-    assert result["status"] == "partial"
+    assert result["status"] == "error"
     assert result["extracted_requirements"] == []
     assert result["functional_requirements"] == []
+    assert result.get("error_code") == "EXTRACT_PROVIDER_FAILURE"

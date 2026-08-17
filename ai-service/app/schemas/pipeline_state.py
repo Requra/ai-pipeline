@@ -79,6 +79,8 @@ class PipelineState(TypedDict):
     relevance_score: float
     status: str                     # "success", "partial", "rejected", "error", "needs_review"
     error: Optional[str]
+    error_code: Optional[str]
+    extraction_telemetry: Optional[Dict[str, Any]]
     started_at: float
     processing_time_ms: int
 

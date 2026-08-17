@@ -40,6 +40,23 @@ progress_store: Dict[str, Dict[str, Any]] = {}
 # Statuses we consider terminal — completed_at gets set on transition.
 TERMINAL_STATUSES = frozenset({"COMPLETED", "FAILED"})
 
+# Canonical node-to-progress percentage mapping for the active LangGraph pipeline
+PROGRESS_BY_NODE: Dict[str, int] = {
+    "detect_file_type": 5,
+    "prepare_sources": 20,
+    "build_source_index": 35,
+    "extract": 45,
+    "dedupe_requirements": 55,
+    "retrieve_evidence": 62,
+    "classify": 70,
+    "evidence_grounding": 76,
+    "generate": 85,
+    "quality_gate": 90,
+    "repair_stories": 92,
+    "summarize": 95,
+    "format": 100,
+}
+
 
 def update_progress(
     job_id: str,

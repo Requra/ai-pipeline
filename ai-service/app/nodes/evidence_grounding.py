@@ -241,7 +241,7 @@ async def evidence_grounding_node(state: PipelineState) -> dict:
     the authority that decides which candidates may reach public source_refs.
     """
     print("--- EVIDENCE GROUNDING NODE ---")
-    update_progress(state.get("job_id"), "evidence_grounding", 75, "PROCESSING")
+    update_progress(state.get("job_id"), "evidence_grounding", 76, "PROCESSING")
 
     classified: List[ClassifiedRequirement] = state.get("classified_requirements", [])
     chunks: List[SourceChunk] = state.get("chunks", [])

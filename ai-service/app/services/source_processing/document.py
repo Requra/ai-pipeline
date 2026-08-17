@@ -33,6 +33,29 @@ async def process_document_source(
     document_id = source.document_id
     filename = source.filename
     file_type = (source.file_type or "text").lower()
+    raw_bytes = source.raw_bytes or b""
+    filename_lower = (filename or "").lower()
+    subtype = (getattr(source, "audio_format", None) or getattr(source, "file_subtype", None) or "").lower()
+    mime_type = (source.mime_type or "").lower()
+
+    # Accurate modality detection across file_type, subtype, filename, MIME, and magic signatures
+    is_pdf = (
+        file_type == "pdf"
+        or subtype == "pdf"
+        or filename_lower.endswith(".pdf")
+        or "pdf" in mime_type
+        or raw_bytes.startswith(b"%PDF")
+    )
+    is_docx = (
+        file_type == "docx"
+        or subtype == "docx"
+        or filename_lower.endswith(".docx")
+        or "wordprocessingml" in mime_type
+        or "officedocument" in mime_type
+        or (raw_bytes.startswith(b"PK\x03\x04") and (filename_lower.endswith(".docx") or "word" in mime_type or not is_pdf))
+    )
+
+    detected_source_type = "docx" if is_docx else ("pdf" if is_pdf else "text")
 
     # 1. Extraction
     extracted_text: str = ""
@@ -41,25 +64,25 @@ async def process_document_source(
 
     if source.raw_text:
         extracted_text = source.raw_text
-    elif file_type == "pdf":
-        extracted_text, extract_error = _extract_pdf(source.raw_bytes)
-    elif file_type == "docx":
-        extracted_text, extract_error, paragraphs_data = _extract_docx(source.raw_bytes)
-    elif file_type in ("text", "document", "txt"):
-        if not source.raw_bytes:
+    elif is_pdf:
+        extracted_text, extract_error = _extract_pdf(raw_bytes)
+    elif is_docx:
+        extracted_text, extract_error, paragraphs_data = _extract_docx(raw_bytes)
+    elif file_type in ("text", "document", "txt", "markdown", "md") or subtype in ("txt", "text", "md", "markdown"):
+        if not raw_bytes:
             extracted_text = ""
         else:
             try:
-                extracted_text = source.raw_bytes.decode("utf-8")
+                extracted_text = raw_bytes.decode("utf-8")
             except UnicodeDecodeError:
-                extracted_text = source.raw_bytes.decode("latin-1", errors="replace")
+                extracted_text = raw_bytes.decode("latin-1", errors="replace")
     else:
-        # Fallback decode
-        if source.raw_bytes:
+        # Fallback decode for unrecognized types
+        if raw_bytes:
             try:
-                extracted_text = source.raw_bytes.decode("utf-8")
+                extracted_text = raw_bytes.decode("utf-8")
             except UnicodeDecodeError:
-                extracted_text = source.raw_bytes.decode("latin-1", errors="replace")
+                extracted_text = raw_bytes.decode("latin-1", errors="replace")
         else:
             extract_error = f"DOCUMENT_EXTRACTION_FAILED: unsupported file_type '{file_type}'"
 
@@ -69,7 +92,7 @@ async def process_document_source(
         return ProcessedSource(
             document_id=document_id,
             filename=filename,
-            source_type=file_type,
+            source_type=detected_source_type,
             status="failed",
             error_code="DOCUMENT_EXTRACTION_FAILED",
             error_message=err_msg,
@@ -92,7 +115,7 @@ async def process_document_source(
         return ProcessedSource(
             document_id=document_id,
             filename=filename,
-            source_type=file_type,
+            source_type=detected_source_type,
             status="rejected",
             raw_text=masked_text,
             is_useful=False,
@@ -105,9 +128,9 @@ async def process_document_source(
 
     # 5. Coordinate-aware Chunking
     chunks = []
-    if file_type == "pdf" or "\f" in masked_text:
+    if is_pdf or "\f" in masked_text:
         chunks = _chunk_pdf_pages(job_id, masked_text, document_id=document_id)
-    elif file_type == "docx" and paragraphs_data:
+    elif is_docx and paragraphs_data:
         # Mask paragraphs text if PII enabled
         if enable_pii:
             masked_paragraphs = []
@@ -133,20 +156,19 @@ async def process_document_source(
     warning_message = None
     if getattr(relevance_res, "decision", "relevant") == "uncertain":
         warning_code = "RELEVANCE_UNCERTAIN_PROCEEDED"
-        reason_str = getattr(relevance_res, "reason", "uncertain relevance")
-        warning_message = f"Document '{filename}' relevance was uncertain ({reason_str}); proceeding with extraction."
+        warning_message = relevance_res.reason
 
     return ProcessedSource(
         document_id=document_id,
         filename=filename,
-        source_type=file_type,
+        source_type=detected_source_type,
         status="ready",
-        chunks=chunks,
         raw_text=masked_text,
         is_useful=True,
         relevance_score=relevance_res.relevance_score,
         pii_stats=pii_stats,
         docx_paragraphs=paragraphs_data,
+        chunks=chunks,
         warning_code=warning_code,
         warning_message=warning_message,
     )

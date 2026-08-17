@@ -215,9 +215,11 @@ def compute_quality_scores(requirements: Sequence, stories: Sequence, quality_is
     req_count, story_count = len(requirements), len(stories)
     requirements_by_id = {getattr(req, "id", None): req for req in requirements}
 
-    groundedness = (
-        sum(_req_groundedness(req) for req in requirements) / req_count if req_count else 1.0
-    )
+    if req_count:
+        groundedness = sum(_req_groundedness(req) for req in requirements) / req_count
+    else:
+        groundedness = 0.0
+
     if stories:
         traceable_stories = [story for story in stories if _story_traceable(story, requirements_by_id)]
         mapping_precision = len(traceable_stories) / story_count
@@ -254,16 +256,14 @@ def compute_quality_scores(requirements: Sequence, stories: Sequence, quality_is
             requirement_coverage,
             verified_evidence_coverage,
         )
+        completeness = sum(1 for story in stories if _story_is_complete(story)) / story_count
     else:
-        traceability = 1.0 if not requirements else 0.0
-    completeness = (
-        sum(1 for story in stories if _story_is_complete(story)) / story_count
-        if story_count else 1.0
-    )
+        traceability = 0.0
+        completeness = 0.0
 
     criteria = [ac for story in stories for ac in (getattr(story, "acceptance_criteria", []) or [])]
     if not story_count:
-        ac_quality = 1.0
+        ac_quality = 0.0
     elif not criteria:
         ac_quality = 0.0
     else:
@@ -367,19 +367,22 @@ def compute_quality_scores(requirements: Sequence, stories: Sequence, quality_is
         and info["root_cause"] not in _DIAGNOSTIC_ROOT_CAUSES
     )
 
-    overall = (
-        groundedness * 0.30
-        + traceability * 0.25
-        + completeness * 0.15
-        + ac_quality * 0.20
-        + (1.0 - duplicate_risk) * 0.10
-    )
-    penalty = min(0.70, penalizable_high_count * 0.15 + penalizable_medium_count * 0.05 + penalizable_low_count * 0.01)
-    overall = max(0.0, overall - penalty)
-    if penalizable_high_count:
-        overall = min(overall, 0.59)
-    elif penalizable_medium_count:
-        overall = min(overall, 0.79)
+    if req_count == 0 and story_count == 0:
+        overall = 0.0
+    else:
+        overall = (
+            groundedness * 0.30
+            + traceability * 0.25
+            + completeness * 0.15
+            + ac_quality * 0.20
+            + (1.0 - duplicate_risk) * 0.10
+        )
+        penalty = min(0.70, penalizable_high_count * 0.15 + penalizable_medium_count * 0.05 + penalizable_low_count * 0.01)
+        overall = max(0.0, overall - penalty)
+        if penalizable_high_count:
+            overall = min(overall, 0.59)
+        elif penalizable_medium_count:
+            overall = min(overall, 0.79)
 
     return QualityScores(
         overall_score=round(overall, 4),
