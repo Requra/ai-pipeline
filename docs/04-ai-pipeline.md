@@ -101,23 +101,27 @@ flowchart TD
 ### Source Processing Capabilities
 
 1. **Document Track (`app/services/source_processing/document.py`):**
-   - PDF: Page-aware text extraction (pypdf/pdfplumber), retaining page numbers.
+   - PDF: Page-aware text extraction (PyMuPDF/fitz), retaining page numbers.
    - DOCX: Paragraph and table XML parsing, retaining structural block references.
    - Text/Transcripts: UTF-8 normalization, preserving speaker labels if present.
-   - PII Masking: Optional regex and Luhn-valid credit card masking before LLM exposure.
-   - Relevance: Fast LLM snippet check (`ingest_relevance_v1`) or heuristic fallback.
-   - Chunking: 3,000-character windows with 500-character overlap (or native PDF pages).
+   - PII Masking: Pattern-based credit card, secret key, email, and phone redaction before LLM exposure.
+   - Relevance: Tri-state structured evaluation (`relevant` | `uncertain` | `irrelevant`) using domain-agnostic prompt (`ingest_relevance_v1`) or conservative deterministic analysis with fail-open guarantees.
+   - Multi-Span Sampling: Representative head, middle, and tail text windows (bounded to 3,000 characters) to ensure requirements buried after greetings/introductions are captured.
+   - Chunking: Structural paragraph chunking for DOCX, page-aware chunking for PDF, or coordinate sliding windows.
 
 2. **Audio Track (`app/services/source_processing/audio.py`):**
-   - Validation: Magic byte inspection, ffmpeg audio integrity, and duration limits (`MAX_AUDIO_DURATION_MINUTES`).
-   - STT Engine: Primary Groq Whisper (`whisper-large-v3`) with configurable fallback to Deepgram (`nova-2`).
-   - Concurrency: Limited by `STT_MAX_CONCURRENCY` to protect provider rate limits.
-   - Chunking: Bounded semantic windows preserving utterance timestamps (`start_time_sec`, `end_time_sec`), speaker labels, and audio format.
+   - Validation: Magic byte inspection, ffmpeg audio integrity, and duration limits (`MAX_AUDIO_DURATION_SECONDS`).
+   - STT Engine: Primary Groq Whisper (`whisper-large-v3`) with automatic failover to Deepgram (`nova-2`).
+   - Concurrency: Bounded by `STT_CONCURRENCY` to protect provider rate limits.
+   - Quality Separation: Distinguishes transcription errors (e.g. `TRANSCRIBE_EMPTY_TRANSCRIPT`) from semantic irrelevance.
+   - Relevance: Evaluates transcribed speech against requirements intent across all industry domains.
+   - Chunking: Bounded semantic windows preserving utterance timestamps (`start_time_sec`, `end_time_sec`), speaker labels, and ASR confidence.
 
-3. **Error Isolation & Partial Failure:**
-   - If one source fails (e.g. corrupt PDF or unparseable audio) while other sources succeed, the job completes as `PARTIAL` with specific warnings rather than failing the entire run.
-   - If all sources are irrelevant, the job transitions to `REJECTED`.
-   - If all sources fail technical extraction, the job fails with structured error codes.
+3. **Error Isolation & Relevance Semantics:**
+   - **Domain-Agnostic Intent**: Requirements are evaluated for functional/operational intent across all domains (agriculture, healthcare, logistics, retail, IoT, sports, etc.) without requiring software jargon (API, sprint, backend).
+   - **Tri-State Decision Model**: Rejection requires high-confidence evidence of complete irrelevance (recipes, song lyrics, lorem ipsum, noise). Ambiguous or domain-specific sources evaluate to `uncertain` and fail open to continue extraction.
+   - **Provider Failure Resilience**: LLM timeouts, rate limits, or JSON errors trigger conservative deterministic analysis and fail open (`method: fail_open_fallback`) with observability warnings.
+   - **Multi-Source Resilience**: In mixed uploads, an irrelevant source is isolated (`SOURCE_REJECTED_IRRELEVANT` warning) while usable sources continue. The job only terminates as `REJECTED` if all submitted sources are definitively irrelevant.
 
 ## Detailed 13-Node Execution Trace
 

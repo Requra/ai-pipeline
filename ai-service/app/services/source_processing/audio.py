@@ -189,7 +189,20 @@ async def process_audio_source(
         document_id=document_id,
         default_language=language,
     )
-    full_transcript = "\n\n".join(chunk.text for chunk in chunks)
+    full_transcript = "\n\n".join(chunk.text for chunk in chunks).strip()
+
+    if not full_transcript or len(full_transcript) < 10:
+        logger.warning("Audio transcription produced no text for %s (%s)", document_id, filename)
+        return ProcessedSource(
+            document_id=document_id,
+            filename=filename,
+            source_type="audio",
+            status="failed",
+            error_code="TRANSCRIBE_EMPTY_TRANSCRIPT",
+            error_message=f"Transcription produced no text for audio source '{filename}'",
+            warning_code=warning_code,
+            warning_message=warning_message,
+        )
 
     # 5. PII Masking on transcript and chunks
     pii_stats = None
@@ -220,6 +233,14 @@ async def process_audio_source(
             warning_message=warning_message,
         )
 
+    # If relevance was uncertain or used fallback, record warning if no primary warning exists
+    final_warning_code = warning_code
+    final_warning_message = warning_message
+    if not final_warning_code and getattr(relevance_res, "decision", "relevant") == "uncertain":
+        final_warning_code = "RELEVANCE_UNCERTAIN_PROCEEDED"
+        reason_str = getattr(relevance_res, "reason", "uncertain relevance")
+        final_warning_message = f"Audio source '{filename}' relevance was uncertain ({reason_str}); proceeding with extraction."
+
     return ProcessedSource(
         document_id=document_id,
         filename=filename,
@@ -230,6 +251,6 @@ async def process_audio_source(
         is_useful=True,
         relevance_score=relevance_res.relevance_score,
         pii_stats=pii_stats,
-        warning_code=warning_code,
-        warning_message=warning_message,
+        warning_code=final_warning_code,
+        warning_message=final_warning_message,
     )

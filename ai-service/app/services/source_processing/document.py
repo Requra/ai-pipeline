@@ -129,6 +129,13 @@ async def process_document_source(
     for ch in chunks:
         ch.document_id = document_id
 
+    warning_code = None
+    warning_message = None
+    if getattr(relevance_res, "decision", "relevant") == "uncertain":
+        warning_code = "RELEVANCE_UNCERTAIN_PROCEEDED"
+        reason_str = getattr(relevance_res, "reason", "uncertain relevance")
+        warning_message = f"Document '{filename}' relevance was uncertain ({reason_str}); proceeding with extraction."
+
     return ProcessedSource(
         document_id=document_id,
         filename=filename,
@@ -140,4 +147,6 @@ async def process_document_source(
         relevance_score=relevance_res.relevance_score,
         pii_stats=pii_stats,
         docx_paragraphs=paragraphs_data,
+        warning_code=warning_code,
+        warning_message=warning_message,
     )

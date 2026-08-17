@@ -39,11 +39,38 @@ CREDIT_CARD_CANDIDATE_PATTERN = re.compile(r"\b(?:\d[ -]*?){13,16}\b")
 
 
 class RelevanceCheckResult(BaseModel):
-    is_useful: bool = Field(
-        description="True only if the document contains software requirements, technical specifications, or meeting notes."
+    decision: str = Field(
+        default="relevant",
+        description="Tri-state relevance decision: 'relevant', 'uncertain', or 'irrelevant'."
     )
-    relevance_score: float = Field(description="Confidence score between 0 and 1.")
-    reason: str = Field(description="Short reason explaining acceptance or rejection.")
+    is_useful: bool = Field(
+        default=True,
+        description="True if the source contains potential requirements or if relevance is uncertain; False only when high-confidence irrelevant."
+    )
+    confidence: float = Field(
+        default=0.5,
+        description="Confidence in this classification between 0.0 and 1.0."
+    )
+    relevance_score: float = Field(
+        default=0.5,
+        description="Relevance score between 0.0 and 1.0."
+    )
+    reason: str = Field(
+        default="",
+        description="Short reason explaining acceptance, uncertainty, or rejection."
+    )
+    evidence: list[str] = Field(
+        default_factory=list,
+        description="Excerpts from source supporting the decision."
+    )
+    signals: Optional[dict[str, bool]] = Field(
+        default=None,
+        description="Detected requirements signals (requirements, business_rules, constraints, workflows, decisions, stakeholders)."
+    )
+    method: str = Field(
+        default="llm",
+        description="Classification method used: 'llm', 'deterministic_heuristic', or 'fail_open_fallback'."
+    )
 
 
 def _normalize_text(text: str) -> str:
@@ -155,46 +182,169 @@ def _extract_docx(raw_bytes: bytes) -> tuple[str, Optional[str], Optional[list[d
         return "", f"INGEST_FAILED: DOCX extraction error ({e})", None
 
 
-def _heuristic_relevance(snippet: str) -> RelevanceCheckResult:
-    keywords = [
-        "requirement",
-        "user story",
-        "acceptance criteria",
-        "api",
-        "backend",
-        "frontend",
-        "system",
-        "functional",
-        "meeting",
-        "architecture",
-        "sprint",
-        "task",
-    ]
-    lowered = snippet.lower()
-    hits = sum(1 for term in keywords if term in lowered)
-    score = min(1.0, hits / 6.0)
-    is_useful = hits >= 2
-    reason = (
-        "Heuristic fallback accepted the document as software-related."
-        if is_useful
-        else "Heuristic fallback rejected the document as not software-related."
+RELEVANCE_MAX_TOTAL_CHARS = 3000
+
+
+def _sample_representative_text(text: str, max_chars: int = RELEVANCE_MAX_TOTAL_CHARS) -> str:
+    """Sample head, middle, and tail spans of text so requirements situated after
+
+    introductions, greetings, or agenda setup are not missed.
+    """
+    clean_text = text.replace("\f", " ").strip()
+    if len(clean_text) <= max_chars:
+        return clean_text
+
+    window = max_chars // 3
+    head = clean_text[:window].strip()
+    mid_start = max(0, (len(clean_text) // 2) - (window // 2))
+    mid = clean_text[mid_start : mid_start + window].strip()
+    tail = clean_text[-window:].strip()
+
+    return f"{head}\n\n[... middle section ...]\n\n{mid}\n\n[... ending section ...]\n\n{tail}"
+
+
+def _conservative_deterministic_relevance(
+    snippet: str,
+    *,
+    reason_prefix: str = "Deterministic analysis"
+) -> RelevanceCheckResult:
+    """Conservative, domain-agnostic deterministic relevance check.
+
+    Analyzes behavioral patterns, conditions, business rules, operational constraints,
+    and stakeholder needs across all domains (agriculture, healthcare, retail, IoT, etc.).
+    Fails open to 'uncertain' whenever ambiguous or weak rather than falsely rejecting.
+    """
+    lowered = snippet.lower().strip()
+
+    if not lowered or len(lowered) < MIN_TEXT_LENGTH:
+        return RelevanceCheckResult(
+            decision="uncertain" if len(lowered) >= 20 else "irrelevant",
+            is_useful=len(lowered) >= 20,
+            confidence=0.5 if len(lowered) >= 20 else 0.85,
+            relevance_score=0.3 if len(lowered) >= 20 else 0.0,
+            reason=f"{reason_prefix}: source content is empty or near-empty ({len(lowered)} chars).",
+            evidence=[],
+            signals={
+                "requirements": False,
+                "business_rules": False,
+                "constraints": False,
+                "workflows": False,
+                "decisions": False,
+                "stakeholders": False,
+            },
+            method="deterministic_heuristic",
+        )
+
+    # 1. Structural / Behavioral signals
+    # Requirement modal / obligation verbs
+    modal_matches = len(re.findall(r"\b(must|shall|should|need to|needs to|required to|has to|have to|cannot|can not|will be able to|able to|must not|should not)\b", lowered))
+
+    # Conditional / trigger patterns
+    condition_matches = len(re.findall(r"\b(when|if|whenever|unless|before|after|upon|in case|once|as soon as|where)\b", lowered))
+
+    # Action & operation verbs
+    action_matches = len(re.findall(r"\b(open|close|start|stop|begin|allow|prevent|trigger|notify|alert|send|receive|verify|calculate|display|show|track|record|override|approve|reject|confirm|generate|log|update|create|delete|manage|monitor|control|disable|enable|restrict)\b", lowered))
+
+    # Quantitative / threshold / constraint patterns
+    constraint_matches = len(re.findall(r"\b(below|above|exceed|exceeds|at least|at most|maximum|minimum|limit|within|seconds|minutes|hours|days|percent|%|threshold|range|tolerance|meters|liters|gallons|degrees)\b", lowered))
+
+    # Domain roles / actors
+    actor_matches = len(re.findall(r"\b(user|users|admin|manager|operator|customer|client|patient|nurse|doctor|driver|dispatcher|farmer|technician|worker|agent|officer|coach|athlete|system|device|sensor|valve|service|portal|app)\b", lowered))
+
+    # Explicit artifact indicators (supporting signal)
+    artifact_matches = len(re.findall(r"\b(requirement|spec|specification|workflow|process|rule|policy|criteria|feature|story|task|backlog|epic|module|database|api|integration|interface)\b", lowered))
+
+    # Obvious non-project garbage indicators (recipes, songs/chords, lorem ipsum)
+    recipe_matches = len(re.findall(r"\b(tablespoon|tablespoons|teaspoon|teaspoons|cups of|flour|sugar|baking powder|preheat|oven to|simmer|stir well|bake for|degrees fahrenheit|recipe)\b", lowered))
+    lyrics_matches = len(re.findall(r"\b(chorus|verse 1|verse 2|intro:|outro:|la la la|oh yeah|repeat chorus)\b", lowered))
+    lorem_matches = len(re.findall(r"\b(lorem ipsum|dolor sit amet|consectetur adipiscing|vestibulum|pellentesque)\b", lowered))
+
+    has_requirements = (modal_matches >= 1 and (action_matches >= 1 or actor_matches >= 1)) or artifact_matches >= 1
+    has_business_rules = (condition_matches >= 1 and (modal_matches >= 1 or action_matches >= 1)) or (constraint_matches >= 1 and (modal_matches >= 1 or actor_matches >= 1))
+    has_constraints = constraint_matches >= 1 and (modal_matches >= 1 or actor_matches >= 1 or condition_matches >= 1)
+    has_workflows = (condition_matches >= 1 and action_matches >= 1) or (action_matches >= 2 and actor_matches >= 1)
+    has_decisions = bool(re.search(r"\b(decided|agreed|chosen|selected|decision|approved|rejected)\b", lowered))
+    has_stakeholders = actor_matches >= 1
+
+    signals = {
+        "requirements": bool(has_requirements),
+        "business_rules": bool(has_business_rules),
+        "constraints": bool(has_constraints),
+        "workflows": bool(has_workflows),
+        "decisions": bool(has_decisions),
+        "stakeholders": bool(has_stakeholders),
+    }
+
+    positive_score = (
+        (1.5 if has_requirements else 0) +
+        (1.0 if has_business_rules else 0) +
+        (0.8 if has_workflows else 0) +
+        (0.7 if has_constraints else 0) +
+        (0.5 if has_stakeholders else 0) +
+        (0.5 if artifact_matches >= 1 else 0)
     )
+
+    # Definite garbage detection: strong non-project markers with zero requirements
+    is_definite_garbage = (
+        (recipe_matches >= 2 and not has_requirements and modal_matches == 0) or
+        (lyrics_matches >= 2 and not has_requirements and modal_matches == 0) or
+        (lorem_matches >= 2 and not has_requirements)
+    )
+
+    if is_definite_garbage:
+        return RelevanceCheckResult(
+            decision="irrelevant",
+            is_useful=False,
+            confidence=0.9,
+            relevance_score=0.1,
+            reason=f"{reason_prefix}: content identified as non-project material (recipe/lyrics/lorem).",
+            evidence=[],
+            signals=signals,
+            method="deterministic_heuristic",
+        )
+
+    if positive_score >= 1.5:
+        return RelevanceCheckResult(
+            decision="relevant",
+            is_useful=True,
+            confidence=min(0.95, 0.65 + (positive_score * 0.08)),
+            relevance_score=min(1.0, 0.75 + (positive_score * 0.05)),
+            reason=f"{reason_prefix}: identified requirements and domain operational rules.",
+            evidence=[],
+            signals=signals,
+            method="deterministic_heuristic",
+        )
+
+    # Fallback to uncertain (fail-open: never reject on weak confidence)
     return RelevanceCheckResult(
-        is_useful=is_useful,
-        relevance_score=score,
-        reason=reason,
+        decision="uncertain",
+        is_useful=True,
+        confidence=0.5,
+        relevance_score=0.5,
+        reason=f"{reason_prefix}: ambiguous or weak domain signals; proceeding with extraction to avoid false rejection.",
+        evidence=[],
+        signals=signals,
+        method="deterministic_heuristic",
     )
+
+
+def _heuristic_relevance(snippet: str) -> RelevanceCheckResult:
+    """Backward-compatible alias for deterministic relevance analysis."""
+    return _conservative_deterministic_relevance(snippet, reason_prefix="Heuristic evaluation")
 
 
 async def _run_relevance_check(text: str) -> RelevanceCheckResult:
-    clean_snippet = text.replace("\f", " ")[:RELEVANCE_SNIPPET_CHARS]
+    sample = _sample_representative_text(text, max_chars=RELEVANCE_MAX_TOTAL_CHARS)
     llm = get_llm()
     if llm is None:
-        return _heuristic_relevance(clean_snippet)
+        return _conservative_deterministic_relevance(
+            sample,
+            reason_prefix="LLM unavailable; conservative deterministic analysis",
+        )
 
     try:
         system_prompt = load_prompt(PromptId.INGEST_RELEVANCE_V1)
-        user_prompt = f"Classify this snippet and return structured output.\nSnippet:\n{clean_snippet}"
+        user_prompt = f"Classify this document/transcript sample and return structured output.\n\nSample:\n{sample}"
         raw = await llm.ainvoke([
             ("system", system_prompt),
             ("user", user_prompt),
@@ -210,11 +360,56 @@ async def _run_relevance_check(text: str) -> RelevanceCheckResult:
             content = "\n".join(lines).strip()
 
         parsed = json.loads(content)
+        raw_decision = str(parsed.get("decision", "")).strip().lower()
+        if raw_decision not in ("relevant", "uncertain", "irrelevant"):
+            # Infer decision from is_useful / relevance_score if omitted
+            if parsed.get("is_useful") is False or float(parsed.get("relevance_score", 1.0)) <= 0.2:
+                raw_decision = "irrelevant"
+            elif float(parsed.get("relevance_score", 0.7)) >= 0.6:
+                raw_decision = "relevant"
+            else:
+                raw_decision = "uncertain"
+
+        # Rejection requires high confidence and unambiguous irrelevance
+        if "confidence" in parsed:
+            confidence = max(0.0, min(1.0, float(parsed["confidence"])))
+        else:
+            confidence = 0.9 if raw_decision in ("relevant", "irrelevant") else 0.5
+        relevance_score = max(0.0, min(1.0, float(parsed.get("relevance_score", 0.85 if raw_decision == "relevant" else (0.5 if raw_decision == "uncertain" else 0.1)))))
+
+        if raw_decision == "irrelevant":
+            if confidence < 0.75:
+                # Asymmetric risk: if not high confidence irrelevant, treat as uncertain (fail-open)
+                raw_decision = "uncertain"
+                is_useful = True
+            else:
+                is_useful = False
+        else:
+            is_useful = True
+
+        evidence_list = parsed.get("evidence")
+        evidence = [str(e).strip() for e in evidence_list] if isinstance(evidence_list, list) else []
+        signals = parsed.get("signals") if isinstance(parsed.get("signals"), dict) else None
+
         return RelevanceCheckResult(
-            is_useful=bool(parsed.get("is_useful")),
-            relevance_score=max(0.0, min(1.0, float(parsed.get("relevance_score", 0.0)))),
-            reason=str(parsed.get("reason", "No reason provided.")).strip(),
+            decision=raw_decision,
+            is_useful=is_useful,
+            confidence=confidence,
+            relevance_score=relevance_score,
+            reason=str(parsed.get("reason", "Structured LLM evaluation.")).strip(),
+            evidence=evidence,
+            signals=signals,
+            method="llm",
         )
     except Exception as e:
-        logger.warning("LLM relevance check failed, falling back to heuristic: %s", e)
-        return _heuristic_relevance(clean_snippet)
+        logger.warning(
+            "LLM relevance check failed (%s: %s); failing open with conservative deterministic analysis",
+            type(e).__name__,
+            e,
+        )
+        res = _conservative_deterministic_relevance(
+            sample,
+            reason_prefix=f"LLM failure ({type(e).__name__}); fallback analysis",
+        )
+        res.method = "fail_open_fallback"
+        return res

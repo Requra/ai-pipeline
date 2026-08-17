@@ -162,7 +162,7 @@ async def prepare_sources_node(state: PipelineState) -> dict:
             warnings.append({
                 "node_name": "prepare_sources",
                 "code": "SOURCE_REJECTED_IRRELEVANT",
-                "message": f"Source '{res.filename}' ({res.document_id}) was rejected as not software-related: {res.error_message}",
+                "message": f"Source '{res.filename}' ({res.document_id}) was rejected as irrelevant: {res.error_message}",
             })
         else:  # failed
             failed_sources.append(res)
@@ -189,7 +189,7 @@ async def prepare_sources_node(state: PipelineState) -> dict:
             }
         else:
             # All sources were evaluated and explicitly rejected as irrelevant -> REJECTED
-            err_msg = "DOCUMENT_REJECTED: All source(s) rejected as irrelevant to software delivery."
+            err_msg = "DOCUMENT_REJECTED: All source(s) rejected as irrelevant."
             logger.info("Job %s rejected: %s", job_id, err_msg)
             return {
                 "status": "rejected",

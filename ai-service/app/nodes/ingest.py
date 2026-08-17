@@ -43,6 +43,15 @@ GENERIC_SECRET_PATTERN = re.compile(
 CREDIT_CARD_CANDIDATE_PATTERN = re.compile(r"\b(?:\d[ -]*?){13,16}\b")
 
 
+from app.services.source_processing.extractors import (
+    _sample_representative_text,
+    _conservative_deterministic_relevance,
+    _run_relevance_check as _shared_run_relevance_check,
+    RelevanceCheckResult,
+    RELEVANCE_MAX_TOTAL_CHARS,
+)
+
+
 class IngestOutput(TypedDict):
     raw_text: Optional[str]
     is_useful: bool
@@ -53,14 +62,16 @@ class IngestOutput(TypedDict):
 
 
 class RelevanceCheck(BaseModel):
+    decision: str = Field(default="relevant", description="Tri-state relevance decision.")
     is_useful: bool = Field(
-        description=(
-            "True only if the document contains software requirements, technical "
-            "specifications, or meeting notes relevant to software delivery."
-        )
+        default=True,
+        description="True if the source contains potential requirements or if relevance is uncertain; False only when high-confidence irrelevant."
     )
-    relevance_score: float = Field(description="Confidence score between 0 and 1.")
-    reason: str = Field(description="Short reason explaining acceptance or rejection.")
+    relevance_score: float = Field(default=0.5, description="Confidence score between 0 and 1.")
+    reason: str = Field(default="", description="Short reason explaining acceptance or rejection.")
+    evidence: list[str] = Field(default_factory=list, description="Excerpts supporting decision.")
+    signals: Optional[dict[str, bool]] = Field(default=None, description="Detected signals.")
+    method: str = Field(default="llm", description="Method used.")
 
 
 def _build_output(
@@ -351,76 +362,29 @@ def _extract_from_bytes(raw_bytes: bytes, file_type: str) -> tuple[str, Optional
 
 
 def _heuristic_relevance(snippet: str) -> RelevanceCheck:
-    keywords = [
-        "requirement",
-        "user story",
-        "acceptance criteria",
-        "api",
-        "backend",
-        "frontend",
-        "system",
-        "functional",
-        "meeting",
-        "architecture",
-        "sprint",
-        "task",
-    ]
-    lowered = snippet.lower()
-    hits = sum(1 for term in keywords if term in lowered)
-    score = min(1.0, hits / 6.0)
-    is_useful = hits >= 2
-    reason = (
-        "Heuristic fallback accepted the document as software-related."
-        if is_useful
-        else "Heuristic fallback rejected the document as not software-related."
+    res = _conservative_deterministic_relevance(snippet, reason_prefix="Heuristic evaluation")
+    return RelevanceCheck(
+        decision=res.decision,
+        is_useful=res.is_useful,
+        relevance_score=res.relevance_score,
+        reason=res.reason,
+        evidence=res.evidence,
+        signals=res.signals,
+        method=res.method,
     )
-    return RelevanceCheck(is_useful=is_useful, relevance_score=score, reason=reason)
 
 
 async def _run_relevance_check(masked_text: str) -> RelevanceCheck:
-    # Remove markers before checking relevance to avoid biasing the LLM
-    clean_snippet = masked_text.replace('\f', ' ')[:RELEVANCE_SNIPPET_CHARS]
-
-    system_prompt = load_prompt(PromptId.INGEST_RELEVANCE_V1)
-
-    user_prompt = f"Classify this snippet and return structured output.\nSnippet:\n{clean_snippet}"
-
-    try:
-        llm = get_llm()
-        raw = await llm.ainvoke([
-            ("system", system_prompt),
-            ("user", user_prompt)
-        ])
-        content = getattr(raw, "content", None) or str(raw)
-
-        # Strip code fences
-        content = content.strip()
-        if content.startswith("```"):
-            lines = content.splitlines()
-            if lines[0].startswith("```"): lines = lines[1:]
-            if lines and lines[-1].startswith("```"): lines = lines[:-1]
-            content = "\n".join(lines).strip()
-
-        try:
-            parsed = json.loads(content)
-            response = RelevanceCheck.model_validate(parsed)
-            return RelevanceCheck(
-                is_useful=bool(response.is_useful),
-                relevance_score=max(0.0, min(1.0, float(response.relevance_score))),
-                reason=(response.reason or "No reason provided.").strip(),
-            )
-        except Exception as pe:
-            print(f"Ingest relevance parse error: {pe}")
-            raise pe
-
-    except Exception as exc:
-        logger.warning("LLM relevance check failed, using heuristic fallback: %s", exc)
-        fallback = _heuristic_relevance(clean_snippet)
-        return RelevanceCheck(
-            is_useful=fallback.is_useful,
-            relevance_score=fallback.relevance_score,
-            reason=f"{fallback.reason} (LLM unavailable)",
-        )
+    res = await _shared_run_relevance_check(masked_text)
+    return RelevanceCheck(
+        decision=res.decision,
+        is_useful=res.is_useful,
+        relevance_score=res.relevance_score,
+        reason=res.reason,
+        evidence=res.evidence,
+        signals=res.signals,
+        method=res.method,
+    )
 
 
 from app.progress import update_progress
