@@ -124,12 +124,12 @@ async def process_audio_source(
         if stt_semaphore:
             async with stt_semaphore:
                 if is_dg:
-                    return await fn(raw_bytes, file_subtype, job_id, language, allow_dual_run)
-                return await fn(raw_bytes, file_subtype, job_id, language)
+                    return await fn(raw_bytes, file_subtype, job_id, language, allow_dual_run, document_id=document_id)
+                return await fn(raw_bytes, file_subtype, job_id, language, document_id=document_id)
         else:
             if is_dg:
-                return await fn(raw_bytes, file_subtype, job_id, language, allow_dual_run)
-            return await fn(raw_bytes, file_subtype, job_id, language)
+                return await fn(raw_bytes, file_subtype, job_id, language, allow_dual_run, document_id=document_id)
+            return await fn(raw_bytes, file_subtype, job_id, language, document_id=document_id)
 
     # 3. Call Primary STT with fallback
     raw_transcript: str = ""

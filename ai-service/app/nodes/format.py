@@ -974,7 +974,7 @@ async def format_node(state: PipelineState) -> dict:
         job_id=state.get("job_id", ""),
         status=status,
         is_useful=state.get("is_useful", True),
-        relevance_score=state.get("relevance_score", 0.0),
+        relevance_score=float(state.get("relevance_score") or 0.0),
         source_documents=source_docs,
         requirements=mapped_reqs,
         user_stories=mapped_stories,

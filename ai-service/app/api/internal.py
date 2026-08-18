@@ -179,8 +179,13 @@ async def create_job(
     if req.input_type in ("text", "backend_transcript"):
         raw_text = req.content or ""
         file_type = "text" if req.input_type == "text" else "transcript"
-    else:  # backend_document / backend_audio
-        file_type = "document" if req.input_type == "backend_document" else "audio"
+    else:  # backend_document / backend_audio / backend_sources
+        if req.input_type == "backend_sources":
+            file_type = "sources"
+        elif req.input_type == "backend_audio":
+            file_type = "audio"
+        else:
+            file_type = "document"
 
     await prepare_and_dispatch_job(
         req,
@@ -420,17 +425,32 @@ async def process_compatibility(
     if audio_count > settings.MAX_AUDIO_SOURCES_PER_JOB:
         raise HTTPException(
             status_code=400,
-            detail=f"multiple audio uploads are not supported; submit at most {settings.MAX_AUDIO_SOURCES_PER_JOB} audio file per job",
+            detail=f"Too many audio files ({audio_count} > maximum allowed {settings.MAX_AUDIO_SOURCES_PER_JOB})",
         )
 
-    if audio_count > 0 and doc_count > 0:
-        if not getattr(settings, "ENABLE_MIXED_SOURCE_JOBS", True):
+    from app.services.source_processing.audio import get_audio_duration_seconds
+    total_audio_duration = 0.0
+    max_total_audio = getattr(settings, "MAX_TOTAL_AUDIO_DURATION_SECONDS", 5400)
+    for item in validated_inputs:
+        if item["file_type"] == "audio":
+            dur = get_audio_duration_seconds(item.get("raw_bytes") or b"", item.get("audio_format") or "mp3")
+            if dur is not None:
+                total_audio_duration += dur
+
+    if total_audio_duration > max_total_audio:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Aggregate audio duration ({total_audio_duration:.1f}s) exceeds limit of {max_total_audio}s",
+        )
+
+    if (audio_count > 0 and doc_count > 0) or audio_count > 1:
+        if audio_count > 0 and doc_count > 0 and not getattr(settings, "ENABLE_MIXED_SOURCE_JOBS", True):
             raise HTTPException(
                 status_code=400,
                 detail="Mixed document and audio source jobs are disabled by ENABLE_MIXED_SOURCE_JOBS",
             )
         mapped_input_type = "backend_sources"
-    elif audio_count > 0:
+    elif audio_count == 1:
         mapped_input_type = "backend_audio"
     else:
         mapped_input_type = "backend_document"

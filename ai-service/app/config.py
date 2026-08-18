@@ -180,12 +180,13 @@ class Settings:
     # ------------------------------------------------------------------
     SOURCE_PROCESS_CONCURRENCY: int = _env_int("SOURCE_PROCESS_CONCURRENCY", 3)
     STT_CONCURRENCY: int = _env_int("STT_CONCURRENCY", 2)
-    MAX_AUDIO_SOURCES_PER_JOB: int = _env_int("MAX_AUDIO_SOURCES_PER_JOB", 1)
+    MAX_AUDIO_SOURCES_PER_JOB: int = _env_int("MAX_AUDIO_SOURCES_PER_JOB", 3)
     MAX_SOURCES_PER_JOB: int = _env_int("MAX_SOURCES_PER_JOB", 10)
     MAX_DOCUMENT_BYTES: int = _env_int("MAX_DOCUMENT_BYTES", 20 * 1024 * 1024)       # 20 MB
     MAX_AUDIO_BYTES: int = _env_int("MAX_AUDIO_BYTES", 50 * 1024 * 1024)             # 50 MB
     MAX_TOTAL_UPLOAD_BYTES: int = _env_int("MAX_TOTAL_UPLOAD_BYTES", 100 * 1024 * 1024) # 100 MB
-    MAX_AUDIO_DURATION_SECONDS: int = _env_int("MAX_AUDIO_DURATION_SECONDS", 1800)   # 30 minutes
+    MAX_AUDIO_DURATION_SECONDS: int = _env_int("MAX_AUDIO_DURATION_SECONDS", 1800)   # 30 minutes per audio
+    MAX_TOTAL_AUDIO_DURATION_SECONDS: int = _env_int("MAX_TOTAL_AUDIO_DURATION_SECONDS", 5400) # 90 minutes aggregate
     INPUT_CACHE_TTL_SECONDS: int = _env_int("INPUT_CACHE_TTL_SECONDS", 86400)         # 24 hours
     ENABLE_MIXED_SOURCE_JOBS: bool = _env_flag("ENABLE_MIXED_SOURCE_JOBS", "true")
 

@@ -335,9 +335,11 @@ def test_duplicate_multi_upload_is_idempotent_and_changed_second_file_conflicts(
             [
                 ("audio1.mp3", b"ID3\x03\x00\x00\x00\x00\x00\x01", "audio/mpeg"),
                 ("audio2.mp3", b"ID3\x03\x00\x00\x00\x00\x00\x02", "audio/mpeg"),
+                ("audio3.mp3", b"ID3\x03\x00\x00\x00\x00\x00\x03", "audio/mpeg"),
+                ("audio4.mp3", b"ID3\x03\x00\x00\x00\x00\x00\x04", "audio/mpeg"),
             ],
             400,
-            "multiple audio",
+            "too many audio",
         ),
     ],
 )

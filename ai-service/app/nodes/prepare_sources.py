@@ -96,7 +96,33 @@ async def prepare_sources_node(state: PipelineState) -> dict:
             "chunks": [],
         }
 
-    # 2. Bounded concurrency setup
+    # 2. Enforce aggregate audio duration limit
+    from app.services.source_processing.audio import get_audio_duration_seconds
+    total_audio_duration = 0.0
+    max_total_audio = getattr(settings, "MAX_TOTAL_AUDIO_DURATION_SECONDS", 5400)
+    for src in source_inputs:
+        if (src.file_type or "").lower() == "audio" and src.raw_bytes:
+            dur = get_audio_duration_seconds(src.raw_bytes, src.audio_format or "mp3")
+            if dur is not None:
+                total_audio_duration += dur
+
+    if total_audio_duration > max_total_audio:
+        err_msg = f"AGGREGATE_AUDIO_DURATION_EXCEEDED: Aggregate audio duration ({total_audio_duration:.1f}s) exceeds maximum allowed limit of {max_total_audio}s."
+        logger.error("Job %s failed: %s", job_id, err_msg)
+        return {
+            "status": "failed",
+            "is_useful": False,
+            "error": err_msg,
+            "chunks": [],
+            "warnings": list(state.get("warnings", []) or []) + [{
+                "node_name": "prepare_sources",
+                "code": "AGGREGATE_AUDIO_DURATION_EXCEEDED",
+                "message": err_msg,
+            }],
+            "source_documents": list(source_documents_by_id.values()),
+        }
+
+    # 3. Bounded concurrency setup
     source_concurrency = max(1, int(getattr(settings, "SOURCE_PROCESS_CONCURRENCY", 3)))
     stt_concurrency = max(1, int(getattr(settings, "STT_CONCURRENCY", 2)))
     source_sem = asyncio.Semaphore(source_concurrency)

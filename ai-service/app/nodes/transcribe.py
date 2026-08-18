@@ -229,6 +229,7 @@ async def _transcribe_groq(
     file_subtype: str,
     job_id: str = "unknown",
     language: str | None = None,
+    document_id: str | None = None,
 ) -> Tuple[str, List[SourceChunk]]:
     from groq import AsyncGroq
     api_key = settings.GROQ_API_KEY
@@ -269,8 +270,14 @@ async def _transcribe_groq(
         for i, seg in enumerate(segments):
             text = clean_transcript(seg.get("text", ""))
             if not text: continue
+            cid = (
+                f"trans_{job_id}_{document_id}_groq_{chunk_name}_{i}"
+                if document_id
+                else f"trans_{job_id}_groq_{chunk_name}_{i}"
+            )
             chunks.append(SourceChunk(
-                chunk_id=f"trans_{job_id}_groq_{chunk_name}_{i}",
+                chunk_id=cid,
+                document_id=document_id,
                 text=text,
                 start_char=0, # Not applicable for audio
                 end_char=0,
@@ -296,15 +303,20 @@ async def _transcribe_groq(
 
 # ── Provider: Deepgram ─────────────────────────────────────────────────────────
 
-def _merge_bilingual_to_chunks(ar_data: dict, en_data: dict, job_id: str) -> List[SourceChunk]:
+def _merge_bilingual_to_chunks(
+    ar_data: dict,
+    en_data: dict,
+    job_id: str,
+    document_id: str | None = None,
+) -> List[SourceChunk]:
     ar_utts = ar_data.get("results", {}).get("utterances", [])
     en_utts = en_data.get("results", {}).get("utterances", [])
     
     if not ar_utts and not en_utts: return []
     if not ar_utts:
-        return _map_dg_utterances(en_utts, job_id, language="en")
+        return _map_dg_utterances(en_utts, job_id, language="en", document_id=document_id)
     if not en_utts:
-        return _map_dg_utterances(ar_utts, job_id, language="ar")
+        return _map_dg_utterances(ar_utts, job_id, language="ar", document_id=document_id)
 
     merged_segments = []
     _KEYWORD_SET = {"user story", "sprint", "backlog", "requirement", "acceptance criteria", "api", "database"} # simplified
@@ -351,7 +363,12 @@ def _merge_bilingual_to_chunks(ar_data: dict, en_data: dict, job_id: str) -> Lis
 
     merged_segments.sort(key=lambda x: x["start"])
     return [SourceChunk(
-        chunk_id=f"trans_{job_id}_dg_merged_{i}",
+        chunk_id=(
+            f"trans_{job_id}_{document_id}_dg_merged_{i}"
+            if document_id
+            else f"trans_{job_id}_dg_merged_{i}"
+        ),
+        document_id=document_id,
         text=s["text"],
         start_char=0, end_char=0,
         start_time_sec=s["start"],
@@ -365,13 +382,20 @@ def _map_dg_utterances(
     utterances: List[dict],
     job_id: str,
     language: str | None = None,
+    document_id: str | None = None,
 ) -> List[SourceChunk]:
     chunks = []
     for i, utt in enumerate(utterances):
         text = clean_transcript(utt.get("transcript", ""))
         if not text: continue
+        cid = (
+            f"trans_{job_id}_{document_id}_dg_{i}"
+            if document_id
+            else f"trans_{job_id}_dg_{i}"
+        )
         chunks.append(SourceChunk(
-            chunk_id=f"trans_{job_id}_dg_{i}",
+            chunk_id=cid,
+            document_id=document_id,
             text=text,
             start_char=0, end_char=0,
             start_time_sec=utt.get("start", 0),
@@ -388,6 +412,7 @@ async def _transcribe_deepgram(
     job_id: str = "unknown",
     language: str = "ar",
     allow_dual_run: bool = True,
+    document_id: str | None = None,
 ) -> Tuple[str, List[SourceChunk]]:
     import httpx
     api_key = settings.DEEPGRAM_API_KEY
@@ -419,7 +444,7 @@ async def _transcribe_deepgram(
 
     if language == "mixed" and allow_dual_run:
         ar_data, en_data = await asyncio.gather(_single_run("ar-EG"), _single_run("en-US"))
-        chunks = _merge_bilingual_to_chunks(ar_data, en_data, job_id)
+        chunks = _merge_bilingual_to_chunks(ar_data, en_data, job_id, document_id=document_id)
     else:
         target = "ar-EG" if language == "mixed" else ("en-US" if language == "en" else "ar-EG")
         data = await _single_run(target)
@@ -427,6 +452,7 @@ async def _transcribe_deepgram(
             data.get("results", {}).get("utterances", []),
             job_id,
             language=target.split("-")[0],
+            document_id=document_id,
         )
 
     full_text = "\n\n".join([f"**[Speaker {c.speaker}]**: {c.text}" if c.speaker else c.text for c in chunks])

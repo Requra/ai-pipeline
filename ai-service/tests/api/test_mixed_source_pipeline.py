@@ -391,12 +391,16 @@ async def test_detect_file_type_mixed_sources():
 
 
 @pytest.mark.asyncio
-async def test_detect_file_type_rejects_multiple_audio():
+async def test_detect_file_type_rejects_multiple_audio(monkeypatch):
     """Verify detect_file_type_node enforces MAX_AUDIO_SOURCES_PER_JOB limit."""
     from app.nodes.detect_file_type import detect_file_type_node
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "MAX_AUDIO_SOURCES_PER_JOB", 2)
 
     mp3_1 = b"ID3\x03audio1"
     mp3_2 = b"ID3\x03audio2"
+    mp3_3 = b"ID3\x03audio3"
 
     state = {
         "job_id": "detect-multi-audio",
@@ -404,13 +408,14 @@ async def test_detect_file_type_rejects_multiple_audio():
             {"document_id": "doc_1", "filename": "spec.txt", "raw_bytes": b"Some text content for software specs"},
             {"document_id": "audio_1", "filename": "meeting1.mp3", "raw_bytes": mp3_1},
             {"document_id": "audio_2", "filename": "meeting2.mp3", "raw_bytes": mp3_2},
+            {"document_id": "audio_3", "filename": "meeting3.mp3", "raw_bytes": mp3_3},
         ],
         "source_documents": [],
     }
 
     res = await detect_file_type_node(state)
     assert res["status"] == "rejected"
-    assert "multiple audio inputs are not supported" in res["error"]
+    assert "audio source count (3) exceeds maximum allowed" in res["error"]
 
 
 def test_mixed_sources_fingerprint_idempotency():

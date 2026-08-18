@@ -291,8 +291,9 @@ def reconstruct_audio_chunks(
         languages = {item.language for item in group if item.language}
         confidences = [item.asr_confidence for item in group if item.asr_confidence is not None]
         index = len(windows)
+        cid = f"trans_{job_id}_{document_id}_semantic_{index}" if document_id else f"trans_{job_id}_semantic_{index}"
         windows.append(SourceChunk(
-            chunk_id=f"trans_{job_id}_semantic_{index}",
+            chunk_id=cid,
             text=text,
             start_char=0,
             end_char=len(text),

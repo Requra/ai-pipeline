@@ -53,7 +53,78 @@ def _isolate():
     progress_store.clear()
 
 
-async def _mock_transcribe_groq(raw_bytes: bytes, file_subtype: str, job_id: str, language: str = "en"):
+@pytest.fixture(autouse=True)
+def mock_llm_pipeline(monkeypatch):
+    from unittest.mock import MagicMock
+    import json
+    from app import llm
+    from app.nodes import extract, classify, generate, summarize, ingest
+    from app.services.source_processing import extractors, audio, document
+    from app.services.source_processing.extractors import RelevanceCheckResult
+    
+    monkeypatch.setattr(audio, "_validate_ffmpeg", lambda: None)
+    monkeypatch.setattr(audio, "get_audio_duration_seconds", lambda *args, **kwargs: 10.0)
+
+    async def fake_relevance(text: str, *args, **kwargs):
+        if "croissant" in text.lower() or "recipe" in text.lower():
+            return RelevanceCheckResult(is_useful=False, relevance_score=0.1, reason="croissant recipe")
+        return RelevanceCheckResult(is_useful=True, relevance_score=0.96, reason="software delivery requirements")
+
+    monkeypatch.setattr(extractors, "_run_relevance_check", fake_relevance)
+    monkeypatch.setattr(document, "_run_relevance_check", fake_relevance)
+    monkeypatch.setattr(audio, "_run_relevance_check", fake_relevance)
+
+    async def fake_llm_ainvoke(messages, **kwargs):
+        system = messages[0][1] if isinstance(messages, list) and len(messages) > 0 else ""
+        if "Extract atomic software requirements" in system or "Extract requirements" in system:
+            return MagicMock(content=json.dumps({
+                "requirements": [
+                    {
+                        "id": 1,
+                        "text": "The warehouse temperature monitoring system shall alert supervisors if temp exceeds 8C.",
+                        "actor": "System",
+                        "goal": "temperature alert",
+                        "candidate_labels": ["FR"],
+                        "confidence": 0.95,
+                        "evidence": [{"chunk_id": "c1", "quote": "alert supervisors if temp exceeds 8C"}]
+                    }
+                ]
+            }))
+        if "You classify each requirement" in system:
+            return MagicMock(content=json.dumps({
+                "classifications": [
+                    {"id": 1, "labels": ["FR"], "confidence": 0.95}
+                ]
+            }))
+        if "Convert requirements into USER STORIES" in system or "user stories" in system.lower():
+            return MagicMock(content=json.dumps({
+                "stories": [
+                    {
+                        "source_requirement_ids": [1],
+                        "title": "Temperature Alerts",
+                        "description": "As a warehouse supervisor, I want temperature alerts so that refrigerated goods do not spoil.",
+                        "acceptance_criteria": [
+                            "Given temp > 8C for 5 minutes, when threshold breached, then alert supervisor."
+                        ],
+                        "labels": ["FR"],
+                        "story_points": 3
+                    }
+                ]
+            }))
+        return MagicMock(content=json.dumps({"executive_summary": "Summary of async multisource", "scope": ["temperature", "warehouse"]}))
+
+    mock_llm_client = MagicMock()
+    mock_llm_client.ainvoke = fake_llm_ainvoke
+    monkeypatch.setattr(llm, "get_llm", lambda: mock_llm_client)
+    monkeypatch.setattr(extract, "get_llm", lambda: mock_llm_client)
+    monkeypatch.setattr(classify, "get_llm", lambda: mock_llm_client)
+    monkeypatch.setattr(generate, "get_llm", lambda: mock_llm_client)
+    monkeypatch.setattr(summarize, "get_llm", lambda: mock_llm_client)
+    monkeypatch.setattr(ingest, "get_llm", lambda: mock_llm_client)
+    monkeypatch.setattr(extractors, "get_llm", lambda: mock_llm_client)
+
+
+async def _mock_transcribe_groq(raw_bytes: bytes, file_subtype: str, job_id: str, language: str = "en", *args, **kwargs):
     """Deterministic mock transcription for test audio fixtures."""
     return (
         DELTA_TRANSCRIPT,

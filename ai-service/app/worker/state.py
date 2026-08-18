@@ -289,10 +289,10 @@ async def build_worker_initial_state(
                         )
                     audio_count = sum(1 for item in downloaded_inputs if item["file_type"] == "audio")
                     from app.config import settings
-                    max_audio = getattr(settings, "MAX_AUDIO_SOURCES_PER_JOB", 1)
+                    max_audio = getattr(settings, "MAX_AUDIO_SOURCES_PER_JOB", 3)
                     if audio_count > max_audio:
                         raise SourceSecurityError(
-                            "Multiple audio sources exceeded for backend_sources job"
+                            f"Audio source count ({audio_count}) exceeds maximum allowed per job ({max_audio})"
                         )
 
                 if len(downloaded_inputs) == 1 and job.input_type != InputType.BACKEND_SOURCES.value:
@@ -304,7 +304,8 @@ async def build_worker_initial_state(
                     raw_inputs = downloaded_inputs
                     has_audio = any(item["file_type"] == "audio" for item in downloaded_inputs)
                     has_doc = any(item["file_type"] != "audio" for item in downloaded_inputs)
-                    if has_audio and has_doc:
+                    audio_count = sum(1 for item in downloaded_inputs if item["file_type"] == "audio")
+                    if (has_audio and has_doc) or audio_count > 1:
                         file_type = "sources"
                     elif has_audio:
                         file_type = "audio"
