@@ -99,6 +99,14 @@ class Settings:
     GPT_OSS_API_KEY: Optional[str] = os.getenv("GPT_OSS_API_KEY")
     BASE_URL_KEY: Optional[str] = os.getenv("BASE_URL_KEY")
 
+    # ITI Settings
+    ITI_API_KEY: Optional[str] = os.getenv("ITI_API_KEY")
+    ITI_BASE_URL: str = os.getenv("ITI_BASE_URL", "http://apiaccess.iti.net.eg/student").strip()
+    ITI_PRIMARY_MODEL: str = os.getenv("ITI_PRIMARY_MODEL", "nvidia.nemotron-super-3-120b")
+    ITI_FALLBACK_MODEL: str = os.getenv("ITI_FALLBACK_MODEL", "openai.gpt-oss-120b-1:0")
+    ITI_QUALITY_MODEL: str = os.getenv("ITI_QUALITY_MODEL", "mistral.mistral-large-3-675b-instruct")
+    ITI_EMBEDDING_MODEL: str = os.getenv("ITI_EMBEDDING_MODEL", "amazon.titan-embed-text-v1")
+
     # LLM Settings — default reasoning provider: 'openrouter', 'openai', or 'groq'.
     LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "openrouter").lower().strip()
     LLM_FALLBACK_CHAIN: Optional[str] = os.getenv("LLM_FALLBACK_CHAIN")
@@ -270,9 +278,9 @@ settings = Settings()
 
 # Providers supported for LLM reasoning — kept consistent across llm.py,
 # startup validation and the readiness probe.
-SUPPORTED_LLM_PROVIDERS = {"openrouter", "openai", "groq"}
+SUPPORTED_LLM_PROVIDERS = {"openrouter", "openai", "groq", "iti"}
 SUPPORTED_TRANSCRIBE_PROVIDERS = {"groq", "deepgram"}
-SUPPORTED_EMBEDDING_PROVIDERS = {"openai", "openrouter"}
+SUPPORTED_EMBEDDING_PROVIDERS = {"openai", "openrouter", "iti"}
 
 
 def llm_key_for(provider: str) -> Optional[str]:
@@ -280,6 +288,7 @@ def llm_key_for(provider: str) -> Optional[str]:
         "openrouter": settings.OPENROUTER_API_KEY,
         "openai": settings.OPENAI_API_KEY,
         "groq": settings.GROQ_API_KEY,
+        "iti": settings.ITI_API_KEY,
     }.get(provider)
 
 
@@ -294,6 +303,7 @@ def embedding_key_for(provider: str) -> Optional[str]:
     return {
         "openai": settings.OPENAI_API_KEY,
         "openrouter": settings.OPENROUTER_API_KEY,
+        "iti": settings.ITI_API_KEY,
     }.get(provider)
 
 

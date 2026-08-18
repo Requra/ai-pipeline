@@ -157,6 +157,118 @@ def _quota_cooldown_remaining(provider: str, model: str) -> float:
         return remaining
 
 
+class ITIChatResponse:
+    def __init__(self, data: dict):
+        self.content = data.get("output_text", "")
+        self.response_metadata = {
+            "model": data.get("model_id"),
+            "region": data.get("region"),
+            "status": data.get("status"),
+            "actual_cost_usd": data.get("actual_cost_usd"),
+        }
+        # Mock usage metadata to satisfy downstream expectation of prompt/completion/total tokens
+        self.usage_metadata = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0
+        }
+
+class ITIChatClient:
+    def __init__(self, model: str):
+        self.model = model
+        base = settings.ITI_BASE_URL.rstrip("/")
+        if base.endswith("/student"):
+            base = base[:-8]
+        if "/api/v1" not in base:
+            base = f"{base}/api/v1"
+        self.base_url = base
+        self.api_key = settings.ITI_API_KEY
+        self.timeout = settings.PROVIDER_TIMEOUT_SECONDS
+
+    def _convert_messages(self, messages):
+        system_prompt = None
+        converted_messages = []
+        for msg in messages:
+            role = None
+            content = ""
+            if hasattr(msg, "type"):
+                role = msg.type
+                content = msg.content
+            elif isinstance(msg, dict):
+                role = msg.get("role")
+                content = msg.get("content", "")
+            elif isinstance(msg, tuple) and len(msg) == 2:
+                role, content = msg
+                
+            if not role:
+                continue
+                
+            role_lower = role.lower()
+            if role_lower == "system":
+                system_prompt = content
+            elif role_lower in ("human", "user"):
+                converted_messages.append({"role": "user", "content": content})
+            elif role_lower in ("ai", "assistant"):
+                converted_messages.append({"role": "assistant", "content": content})
+                
+        return system_prompt, converted_messages
+
+    def invoke(self, messages, **kwargs):
+        import httpx
+        system_prompt, converted_messages = self._convert_messages(messages)
+        payload = {
+            "model_id": self.model,
+            "messages": converted_messages
+        }
+        if system_prompt:
+            payload["system_prompt"] = system_prompt
+            
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}"
+        }
+        url = f"{self.base_url}/student/chat"
+        
+        with httpx.Client(timeout=self.timeout) as client:
+            resp = client.post(url, json=payload, headers=headers)
+            if resp.status_code == 403:
+                raise openai.PermissionDeniedError(
+                    message=resp.text,
+                    response=resp,
+                    body=resp.json() if resp.headers.get("content-type") == "application/json" else None
+                )
+            resp.raise_for_status()
+            res = resp.json()
+            return ITIChatResponse(res)
+
+    async def ainvoke(self, messages, **kwargs):
+        import httpx
+        system_prompt, converted_messages = self._convert_messages(messages)
+        payload = {
+            "model_id": self.model,
+            "messages": converted_messages
+        }
+        if system_prompt:
+            payload["system_prompt"] = system_prompt
+            
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}"
+        }
+        url = f"{self.base_url}/student/chat"
+        
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            resp = await client.post(url, json=payload, headers=headers)
+            if resp.status_code == 403:
+                raise openai.PermissionDeniedError(
+                    message=resp.text,
+                    response=resp,
+                    body=resp.json() if resp.headers.get("content-type") == "application/json" else None
+                )
+            resp.raise_for_status()
+            res = resp.json()
+            return ITIChatResponse(res)
+
 class ResilientLLMClient:
     """A resilient LLM client that delegates invoke/ainvoke calls.
 
@@ -176,12 +288,17 @@ class ResilientLLMClient:
         primary_model = self._get_default_model(primary_provider, model_name)
         self.providers.append({"provider": primary_provider, "model": primary_model})
 
+        seen = {(primary_provider, primary_model)}
+
         # Add fallback providers from configuration
         for fb in self.fallback_chain:
             fb_provider = fb.get("provider")
             fb_model = fb.get("model")
-            if fb_provider and fb_provider != primary_provider:
-                self.providers.append({"provider": fb_provider, "model": fb_model})
+            if fb_provider and fb_model:
+                key = (fb_provider, fb_model)
+                if key not in seen:
+                    seen.add(key)
+                    self.providers.append({"provider": fb_provider, "model": fb_model})
 
     def _get_default_model(
         self, provider: str, override_model: Optional[str] = None
@@ -190,11 +307,15 @@ class ResilientLLMClient:
             return override_model or settings.OPENROUTER_MODEL or "openai/gpt-4o-mini"
         elif provider == "groq":
             return override_model or settings.GROQ_MODEL or "llama-3.3-70b-versatile"
+        elif provider == "iti":
+            return override_model or settings.ITI_PRIMARY_MODEL
         else:
             return override_model or settings.OPENAI_MODEL or "gpt-4o-mini"
 
     def _instantiate_client(self, provider: str, model: str):
-        if provider == "openrouter":
+        if provider == "iti":
+            return ITIChatClient(model=model)
+        elif provider == "openrouter":
             extra_headers = {}
             if settings.OPENROUTER_APP_NAME:
                 extra_headers["X-OpenRouter-Title"] = settings.OPENROUTER_APP_NAME
@@ -476,7 +597,7 @@ def get_llm(model_name: Optional[str] = None):
     fallback provider is configured.
     """
     provider = settings.LLM_PROVIDER.lower().strip()
-    if provider not in ("openrouter", "openai", "groq"):
+    if provider not in ("openrouter", "openai", "groq", "iti"):
         raise RuntimeError(f"Unsupported LLM_PROVIDER: {settings.LLM_PROVIDER}")
 
     return ResilientLLMClient(primary_provider=provider, model_name=model_name)
