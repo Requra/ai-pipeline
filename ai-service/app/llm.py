@@ -121,11 +121,19 @@ def _error_text(exc: Exception) -> str:
 
 
 def _is_permanent_quota_error(exc: Exception) -> bool:
-    """Identify exhausted credits or token quota, which backoff cannot fix."""
+    """Identify exhausted credits or daily/monthly token quota, which backoff cannot fix."""
     response = getattr(exc, "response", None)
     if getattr(response, "status_code", None) == 402:
         return True
     details = _error_text(exc)
+    # Transient per-minute (TPM/RPM) rate limits must backoff and retry, not trigger permanent lockout
+    if (
+        "tokens per minute" in details
+        or "tpm" in details
+        or "requests per minute" in details
+        or "rpm" in details
+    ):
+        return False
     return any(marker in details for marker in _PERMANENT_QUOTA_MARKERS)
 
 
@@ -166,22 +174,18 @@ class ResilientLLMClient:
 
         # Add primary provider
         primary_model = self._get_default_model(primary_provider, model_name)
-        self.providers.append({
-            "provider": primary_provider,
-            "model": primary_model
-        })
+        self.providers.append({"provider": primary_provider, "model": primary_model})
 
         # Add fallback providers from configuration
         for fb in self.fallback_chain:
             fb_provider = fb.get("provider")
             fb_model = fb.get("model")
             if fb_provider and fb_provider != primary_provider:
-                self.providers.append({
-                    "provider": fb_provider,
-                    "model": fb_model
-                })
+                self.providers.append({"provider": fb_provider, "model": fb_model})
 
-    def _get_default_model(self, provider: str, override_model: Optional[str] = None) -> str:
+    def _get_default_model(
+        self, provider: str, override_model: Optional[str] = None
+    ) -> str:
         if provider == "openrouter":
             return override_model or settings.OPENROUTER_MODEL or "openai/gpt-4o-mini"
         elif provider == "groq":
@@ -228,15 +232,18 @@ class ResilientLLMClient:
         # Catch rate limit, connection, timeout, and internal server errors
         if _is_permanent_quota_error(exc):
             return False
-        if isinstance(exc, (
-            openai.RateLimitError,
-            openai.APIConnectionError,
-            openai.APITimeoutError,
-            openai.InternalServerError,
-            httpx.HTTPError,
-            asyncio.TimeoutError,
-            TimeoutError
-        )):
+        if isinstance(
+            exc,
+            (
+                openai.RateLimitError,
+                openai.APIConnectionError,
+                openai.APITimeoutError,
+                openai.InternalServerError,
+                httpx.HTTPError,
+                asyncio.TimeoutError,
+                TimeoutError,
+            ),
+        ):
             return True
         # Support name-matching for cases where imports might differ dynamically
         cls_name = exc.__class__.__name__
@@ -246,7 +253,7 @@ class ResilientLLMClient:
             "APITimeoutError",
             "InternalServerError",
             "HTTPError",
-            "TimeoutError"
+            "TimeoutError",
         ):
             return True
         return False
@@ -260,17 +267,21 @@ class ResilientLLMClient:
             if cooldown > 0:
                 logger.warning(
                     "Skipping quota-exhausted provider %s:%s for another %.1fs",
-                    provider, model, cooldown,
+                    provider,
+                    model,
+                    cooldown,
                 )
                 last_error = RuntimeError(
                     f"Provider {provider}:{model} is temporarily unavailable after quota exhaustion"
                 )
                 continue
-            
+
             try:
                 client = self._instantiate_client(provider, model)
             except Exception as e:
-                logger.warning("Failed to instantiate client for %s:%s: %s", provider, model, e)
+                logger.warning(
+                    "Failed to instantiate client for %s:%s: %s", provider, model, e
+                )
                 last_error = e
                 continue
 
@@ -280,14 +291,24 @@ class ResilientLLMClient:
                 try:
                     logger.info(
                         "Invoking LLM (sync) using %s:%s (attempt %d/%d)",
-                        provider, model, attempt, max_attempts,
+                        provider,
+                        model,
+                        attempt,
+                        max_attempts,
                     )
                     with _sync_gate():
                         response = client.invoke(messages, **kwargs)
                     latency_ms = int((time.time() - start_time) * 1000)
 
-                    self._enrich_response_metadata(response, provider, model, latency_ms)
-                    logger.info("LLM Success (sync) via %s:%s in %dms", provider, model, latency_ms)
+                    self._enrich_response_metadata(
+                        response, provider, model, latency_ms
+                    )
+                    logger.info(
+                        "LLM Success (sync) via %s:%s in %dms",
+                        provider,
+                        model,
+                        latency_ms,
+                    )
                     return response
                 except Exception as exc:
                     latency_ms = int((time.time() - start_time) * 1000)
@@ -295,12 +316,19 @@ class ResilientLLMClient:
                         _mark_quota_exhausted(provider, model)
                         logger.warning(
                             "Permanent quota exhaustion on %s:%s; skipping retries and trying the next configured provider",
-                            provider, model,
+                            provider,
+                            model,
                         )
                         last_error = exc
                         break
                     if not self._is_retryable_error(exc) or attempt == max_attempts:
-                        logger.warning("Failed LLM attempt (sync) using %s:%s in %dms: %s", provider, model, latency_ms, exc)
+                        logger.warning(
+                            "Failed LLM attempt (sync) using %s:%s in %dms: %s",
+                            provider,
+                            model,
+                            latency_ms,
+                            exc,
+                        )
                         last_error = exc
                         if not self._is_retryable_error(exc):
                             raise exc
@@ -308,11 +336,17 @@ class ResilientLLMClient:
                     delay = _retry_delay_seconds(exc, attempt)
                     logger.warning(
                         "Retryable error on %s:%s (attempt %d): %s. Retrying in %.2fs...",
-                        provider, model, attempt, exc, delay,
+                        provider,
+                        model,
+                        attempt,
+                        exc,
+                        delay,
                     )
                     time.sleep(delay)
 
-        raise RuntimeError(f"All configured LLM providers failed. Last error: {last_error}") from last_error
+        raise RuntimeError(
+            f"All configured LLM providers failed. Last error: {last_error}"
+        ) from last_error
 
     async def ainvoke(self, messages, **kwargs):
         last_error = None
@@ -323,7 +357,9 @@ class ResilientLLMClient:
             if cooldown > 0:
                 logger.warning(
                     "Skipping quota-exhausted provider %s:%s for another %.1fs",
-                    provider, model, cooldown,
+                    provider,
+                    model,
+                    cooldown,
                 )
                 last_error = RuntimeError(
                     f"Provider {provider}:{model} is temporarily unavailable after quota exhaustion"
@@ -333,7 +369,9 @@ class ResilientLLMClient:
             try:
                 client = self._instantiate_client(provider, model)
             except Exception as e:
-                logger.warning("Failed to instantiate client for %s:%s: %s", provider, model, e)
+                logger.warning(
+                    "Failed to instantiate client for %s:%s: %s", provider, model, e
+                )
                 last_error = e
                 continue
 
@@ -343,14 +381,24 @@ class ResilientLLMClient:
                 try:
                     logger.info(
                         "Invoking LLM (async) using %s:%s (attempt %d/%d)",
-                        provider, model, attempt, max_attempts,
+                        provider,
+                        model,
+                        attempt,
+                        max_attempts,
                     )
                     async with _async_gate():
                         response = await client.ainvoke(messages, **kwargs)
                     latency_ms = int((time.time() - start_time) * 1000)
 
-                    self._enrich_response_metadata(response, provider, model, latency_ms)
-                    logger.info("LLM Success (async) via %s:%s in %dms", provider, model, latency_ms)
+                    self._enrich_response_metadata(
+                        response, provider, model, latency_ms
+                    )
+                    logger.info(
+                        "LLM Success (async) via %s:%s in %dms",
+                        provider,
+                        model,
+                        latency_ms,
+                    )
                     return response
                 except Exception as exc:
                     latency_ms = int((time.time() - start_time) * 1000)
@@ -358,12 +406,19 @@ class ResilientLLMClient:
                         _mark_quota_exhausted(provider, model)
                         logger.warning(
                             "Permanent quota exhaustion on %s:%s; skipping retries and trying the next configured provider",
-                            provider, model,
+                            provider,
+                            model,
                         )
                         last_error = exc
                         break
                     if not self._is_retryable_error(exc) or attempt == max_attempts:
-                        logger.warning("Failed LLM attempt (async) using %s:%s in %dms: %s", provider, model, latency_ms, exc)
+                        logger.warning(
+                            "Failed LLM attempt (async) using %s:%s in %dms: %s",
+                            provider,
+                            model,
+                            latency_ms,
+                            exc,
+                        )
                         last_error = exc
                         if not self._is_retryable_error(exc):
                             raise exc
@@ -371,14 +426,25 @@ class ResilientLLMClient:
                     delay = _retry_delay_seconds(exc, attempt)
                     logger.warning(
                         "Retryable error on %s:%s (attempt %d): %s. Retrying in %.2fs...",
-                        provider, model, attempt, exc, delay,
+                        provider,
+                        model,
+                        attempt,
+                        exc,
+                        delay,
                     )
                     await asyncio.sleep(delay)
 
-        raise RuntimeError(f"All configured LLM providers failed. Last error: {last_error}") from last_error
+        raise RuntimeError(
+            f"All configured LLM providers failed. Last error: {last_error}"
+        ) from last_error
 
-    def _enrich_response_metadata(self, response: Any, provider: str, model: str, latency_ms: int):
-        if not hasattr(response, "response_metadata") or response.response_metadata is None:
+    def _enrich_response_metadata(
+        self, response: Any, provider: str, model: str, latency_ms: int
+    ):
+        if (
+            not hasattr(response, "response_metadata")
+            or response.response_metadata is None
+        ):
             response.response_metadata = {}
 
         response.response_metadata["provider"] = provider
@@ -393,8 +459,12 @@ class ResilientLLMClient:
 
         if token_usage:
             response.response_metadata["token_usage"] = {
-                "prompt_tokens": token_usage.get("prompt_tokens") or token_usage.get("input_tokens") or 0,
-                "completion_tokens": token_usage.get("completion_tokens") or token_usage.get("output_tokens") or 0,
+                "prompt_tokens": token_usage.get("prompt_tokens")
+                or token_usage.get("input_tokens")
+                or 0,
+                "completion_tokens": token_usage.get("completion_tokens")
+                or token_usage.get("output_tokens")
+                or 0,
                 "total_tokens": token_usage.get("total_tokens") or 0,
             }
 

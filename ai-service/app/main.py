@@ -42,7 +42,7 @@ import os
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import (
     BackgroundTasks,
@@ -58,6 +58,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from app.config import settings
 from app.api.deps import REQUEST_ID_HEADER
 from app.api.internal import router as internal_router
 from app.api.service import get_or_create_job, public_status_view
@@ -75,6 +76,7 @@ logger = logging.getLogger("app.main")
 # ---------------------------------------------------------------------------
 # Lifespan
 # ---------------------------------------------------------------------------
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -97,6 +99,7 @@ app = FastAPI(
 # Request tracing — X-Request-Id in/out + safe access log (never logs bodies).
 # ---------------------------------------------------------------------------
 
+
 @app.middleware("http")
 async def request_tracing_middleware(request: Request, call_next):
     request_id = request.headers.get(REQUEST_ID_HEADER) or uuid.uuid4().hex
@@ -109,7 +112,11 @@ async def request_tracing_middleware(request: Request, call_next):
     # no query values, no headers, so raw content never leaks to logs.
     logger.info(
         "%s %s -> %s (%dms) request_id=%s",
-        request.method, request.url.path, response.status_code, duration_ms, request_id,
+        request.method,
+        request.url.path,
+        response.status_code,
+        duration_ms,
+        request_id,
     )
     return response
 
@@ -117,6 +124,7 @@ async def request_tracing_middleware(request: Request, call_next):
 # ---------------------------------------------------------------------------
 # CORS — env-driven, no wildcard+credentials in production.
 # ---------------------------------------------------------------------------
+
 
 def _resolve_cors_origins() -> list[str]:
     """
@@ -173,6 +181,7 @@ app.include_router(internal_router)
 # Health
 # ---------------------------------------------------------------------------
 
+
 @app.get("/health")
 async def health_check():
     """Liveness probe for Docker/monitoring — lightweight, no dependencies."""
@@ -182,6 +191,7 @@ async def health_check():
 # ---------------------------------------------------------------------------
 # Dev Mock Document Endpoints
 # ---------------------------------------------------------------------------
+
 
 @app.get("/mock-doc-a")
 def get_mock_doc_a():
@@ -245,6 +255,7 @@ MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024
 # Status
 # ---------------------------------------------------------------------------
 
+
 @app.get("/status/{job_id}")
 async def get_job_status(job_id: str):
     view = await public_status_view(job_id)
@@ -257,45 +268,230 @@ async def get_job_status(job_id: str):
 # /process — multipart file upload (demo/dev-compatible)
 # ---------------------------------------------------------------------------
 
+
 @app.post("/process", status_code=202)
 async def process_document(
     request: Request,
     background_tasks: BackgroundTasks,
-    file: UploadFile = File(...),
+    files: List[UploadFile] = File(default=[]),
+    file: Optional[UploadFile] = File(None),
+    document_ids: List[str] = Form(default=[]),
+    document_id: Optional[str] = Form(None),
     metadata: str = Form("{}"),
     file_type: str = Form("document"),
 ):
-    # ---- Size guard (header-reported) ----------------------------------
-    if file.size and file.size > MAX_FILE_SIZE_BYTES:
-        raise HTTPException(status_code=413, detail="File too large (max 50MB)")
+    from app.services.file_inspection import detect_mime_and_type
+    import hashlib
+    import io
 
-    # ---- Content-type guard --------------------------------------------
-    content_type = file.content_type.split(";")[0].strip() if file.content_type else ""
-    if content_type not in ALLOWED_CONTENT_TYPES:
+    # Parse form safely to extract all uploaded parts even if repeated under 'file' or 'files'
+    try:
+        form = await request.form()
+    except Exception as exc:
         raise HTTPException(
-            status_code=415,
-            detail=(
-                f"Unsupported media type: '{file.content_type}'. "
-                "Allowed types: PDF, DOCX, TXT, MP3, WAV, OGG, M4A, WEBM."
-            ),
+            status_code=400, detail=f"Invalid multipart form data: {exc}"
+        ) from None
+
+    form_file_items = [
+        v
+        for k, v in form.multi_items()
+        if k == "file" and (isinstance(v, UploadFile) or hasattr(v, "filename"))
+    ]
+    form_files_items = [
+        v
+        for k, v in form.multi_items()
+        if k == "files" and (isinstance(v, UploadFile) or hasattr(v, "filename"))
+    ]
+
+    if (file is not None and bool(files)) or (form_file_items and form_files_items):
+        raise HTTPException(
+            status_code=400,
+            detail="use either the legacy 'file' field or repeated 'files' fields, not both",
         )
+
+    if form_files_items:
+        uploads = form_files_items
+    elif form_file_items:
+        uploads = form_file_items
+    else:
+        uploads = list(files)
+        if file is not None:
+            uploads.append(file)
+
+    if not uploads:
+        raise HTTPException(
+            status_code=400, detail="at least one file upload is required"
+        )
+
+    max_sources = getattr(settings, "MAX_SOURCES_PER_JOB", 20)
+    if len(uploads) > max_sources:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many uploaded files ({len(uploads)} > maximum allowed {max_sources})",
+        )
+
+    form_doc_id_items = [
+        v
+        for k, v in form.multi_items()
+        if k == "document_id" and isinstance(v, str) and v.strip()
+    ]
+    form_doc_ids_items = [
+        v
+        for k, v in form.multi_items()
+        if k == "document_ids" and isinstance(v, str) and v.strip()
+    ]
+
+    if form_doc_id_items and form_doc_ids_items:
+        raise HTTPException(
+            status_code=400,
+            detail="use either legacy document_id or repeated document_ids, not both",
+        )
+
+    resolved_document_ids: List[str] = []
+    if form_doc_ids_items:
+        resolved_document_ids = form_doc_ids_items
+    elif len(form_doc_id_items) > 1:
+        resolved_document_ids = form_doc_id_items
+    elif document_ids:
+        resolved_document_ids = document_ids
+    elif form_doc_id_items:
+        resolved_document_ids = form_doc_id_items
+    elif document_id:
+        resolved_document_ids = [document_id]
+
+    if resolved_document_ids:
+        if len(resolved_document_ids) != len(uploads):
+            if len(uploads) == 1 and len(resolved_document_ids) == 1:
+                pass
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail="document_ids must be repeated once for each uploaded file, in files order",
+                )
 
     # ---- Metadata JSON guard (400, not 500) ----------------------------
     try:
         parsed_metadata = json.loads(metadata) if metadata else {}
     except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=400, detail=f"Invalid metadata JSON: {exc.msg}") from None
+        raise HTTPException(
+            status_code=400, detail=f"Invalid metadata JSON: {exc.msg}"
+        ) from None
     if not isinstance(parsed_metadata, dict):
         raise HTTPException(status_code=400, detail="metadata must be a JSON object")
 
-    # ---- Body size guard (real bytes) ----------------------------------
-    file_bytes = await file.read()
-    if len(file_bytes) > MAX_FILE_SIZE_BYTES:
-        raise HTTPException(status_code=413, detail="File too large (max 50MB)")
-    if len(file_bytes) == 0:
-        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+    max_total_bytes = getattr(settings, "MAX_TOTAL_UPLOAD_BYTES", 100 * 1024 * 1024)
+    total_aggregate_bytes = 0
+    validated_inputs: List[Dict[str, Any]] = []
 
-    parsed_metadata.setdefault("filename", file.filename)
+    for index, upload in enumerate(uploads):
+        hasher = hashlib.sha256()
+        buffer = io.BytesIO()
+        file_size = 0
+        filename = upload.filename or f"upload-{index + 1}"
+
+        while True:
+            chunk = await upload.read(65536)
+            if not chunk:
+                break
+            file_size += len(chunk)
+            total_aggregate_bytes += len(chunk)
+            if total_aggregate_bytes > max_total_bytes:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Aggregate upload size exceeds limit of {max_total_bytes} bytes",
+                )
+            buffer.write(chunk)
+            hasher.update(chunk)
+
+        file_bytes = buffer.getvalue()
+        if file_size == 0:
+            raise HTTPException(status_code=400, detail=f"file '{filename}' is empty")
+
+        det_file_type, det_mime_type, det_subtype = detect_mime_and_type(
+            file_bytes, filename
+        )
+        if det_file_type == "unknown":
+            raise HTTPException(
+                status_code=415,
+                detail=f"file '{filename}' has an unsupported media type or unrecognized signature",
+            )
+
+        limit = (
+            settings.MAX_AUDIO_BYTES
+            if det_file_type == "audio"
+            else settings.MAX_DOCUMENT_BYTES
+        )
+        if file_size > limit:
+            kind = "Audio" if det_file_type == "audio" else "Document"
+            raise HTTPException(
+                status_code=413,
+                detail=f"{kind} file '{filename}' is too large ({file_size} > {limit})",
+            )
+
+        file_hash = hasher.hexdigest()
+        supplied_id = (
+            resolved_document_ids[index] if index < len(resolved_document_ids) else None
+        )
+        resolved_doc_id = supplied_id or f"doc_{file_hash[:16]}"
+
+        validated_inputs.append(
+            {
+                "document_id": resolved_doc_id,
+                "filename": filename,
+                "file_type": det_file_type,
+                "mime_type": det_mime_type,
+                "sha256_hash": file_hash,
+                "audio_format": det_subtype if det_file_type == "audio" else None,
+                "raw_bytes": file_bytes,
+            }
+        )
+
+    resolved_ids = [item["document_id"] for item in validated_inputs]
+    if len(set(resolved_ids)) != len(resolved_ids):
+        raise HTTPException(
+            status_code=400,
+            detail="each uploaded file must have a unique document ID; supply distinct document_ids for duplicate content",
+        )
+
+    audio_count = sum(1 for item in validated_inputs if item["file_type"] == "audio")
+    doc_count = sum(1 for item in validated_inputs if item["file_type"] != "audio")
+
+    max_audio = getattr(settings, "MAX_AUDIO_SOURCES_PER_JOB", 1)
+    if audio_count > max_audio:
+        raise HTTPException(
+            status_code=400,
+            detail=f"multiple audio uploads are not supported; submit at most {max_audio} audio file per job",
+        )
+
+    if audio_count > 0 and doc_count > 0:
+        if not getattr(settings, "ENABLE_MIXED_SOURCE_JOBS", True):
+            raise HTTPException(
+                status_code=400,
+                detail="Mixed document and audio source jobs are disabled by ENABLE_MIXED_SOURCE_JOBS",
+            )
+        mapped_input_type = "backend_sources"
+        dispatched_file_type = "sources"
+    elif audio_count > 0:
+        mapped_input_type = "backend_audio"
+        dispatched_file_type = "audio"
+    else:
+        mapped_input_type = "backend_document"
+        dispatched_file_type = "document"
+
+    source_docs = [
+        {
+            "document_id": item["document_id"],
+            "filename": item["filename"],
+            "file_type": item["file_type"],
+            "mime_type": item["mime_type"],
+            "sha256_hash": item["sha256_hash"],
+        }
+        for item in validated_inputs
+    ]
+
+    parsed_metadata.setdefault("filename", validated_inputs[0]["filename"])
+    if len(validated_inputs) > 1:
+        parsed_metadata["source_count"] = len(validated_inputs)
 
     # ---- Stable job id: uuid4, or a validated caller-supplied one ------
     provided_job_id = parsed_metadata.get("job_id")
@@ -303,16 +499,33 @@ async def process_document(
         try:
             job_id = sanitize_job_id(str(provided_job_id))
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=f"Invalid job_id in metadata: {exc}") from None
+            raise HTTPException(
+                status_code=400, detail=f"Invalid job_id in metadata: {exc}"
+            ) from None
     else:
         job_id = f"upload_{uuid.uuid4().hex}"
 
+    is_single_source = len(validated_inputs) == 1
+    found_audio_fmt = next(
+        (item["audio_format"] for item in validated_inputs if item.get("audio_format")),
+        None,
+    )
+
     await _create_and_dispatch_demo_job(
         job_id=job_id,
-        input_type="backend_document",
-        raw_bytes=file_bytes,
+        input_type=mapped_input_type,
+        raw_bytes=validated_inputs[0]["raw_bytes"] if is_single_source else b"",
+        raw_inputs=validated_inputs,
+        source_documents=source_docs,
         raw_text="",
-        file_type=file_type,
+        file_type=(
+            validated_inputs[0]["file_type"]
+            if is_single_source
+            else dispatched_file_type
+        ),
+        audio_format=(
+            validated_inputs[0]["audio_format"] if is_single_source else found_audio_fmt
+        ),
         metadata=parsed_metadata,
         background_tasks=background_tasks,
         request=request,
@@ -324,8 +537,11 @@ async def process_document(
 # /process-json — direct text submission (demo/dev-compatible)
 # ---------------------------------------------------------------------------
 
+
 @app.post("/process-json", status_code=202)
-async def process_json(request: Request, body: ProcessRequest, background_tasks: BackgroundTasks):
+async def process_json(
+    request: Request, body: ProcessRequest, background_tasks: BackgroundTasks
+):
     """Direct JSON endpoint aligned with the backend API contract."""
     if not body.content or not body.content.strip():
         raise HTTPException(
@@ -339,7 +555,9 @@ async def process_json(request: Request, body: ProcessRequest, background_tasks:
         try:
             job_id = sanitize_job_id(body.job_id)
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=f"Invalid job_id: {exc}") from None
+            raise HTTPException(
+                status_code=400, detail=f"Invalid job_id: {exc}"
+            ) from None
     else:
         job_id = f"text_{uuid.uuid4().hex}"
 
@@ -347,6 +565,8 @@ async def process_json(request: Request, body: ProcessRequest, background_tasks:
         job_id=job_id,
         input_type="text",
         raw_bytes=b"",
+        raw_inputs=[],
+        source_documents=body.source_documents or [],
         raw_text=body.content,
         file_type="text",
         metadata=body.metadata or {},
@@ -360,10 +580,13 @@ async def _create_and_dispatch_demo_job(
     *,
     job_id: str,
     input_type: str,
-    raw_bytes: bytes,
-    raw_text: str,
-    file_type: str,
-    metadata: dict,
+    raw_bytes: bytes = b"",
+    raw_inputs: Optional[List[Dict[str, Any]]] = None,
+    source_documents: Optional[List[Dict[str, Any]]] = None,
+    raw_text: str = "",
+    file_type: str = "document",
+    audio_format: Optional[str] = None,
+    metadata: dict = {},
     background_tasks: BackgroundTasks,
     request: Request,
 ) -> None:
@@ -379,8 +602,11 @@ async def _create_and_dispatch_demo_job(
     initial_state = make_initial_state(
         job_id,
         raw_bytes=raw_bytes,
+        raw_inputs=raw_inputs or [],
+        source_documents=source_documents or [],
         raw_text=raw_text,
         file_type=file_type,
+        audio_format=audio_format,
         metadata=metadata,
     )
     # In the Redis path the worker reconstructs state; base64 bytes / text are
@@ -388,7 +614,10 @@ async def _create_and_dispatch_demo_job(
     cache_input = {
         "raw_text": raw_text,
         "raw_bytes": raw_bytes,
+        "raw_inputs": raw_inputs or [],
+        "source_documents": source_documents or [],
         "file_type": file_type,
+        "audio_format": audio_format,
         "metadata": metadata,
     }
     await dispatch_job(
