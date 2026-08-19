@@ -113,10 +113,13 @@ def is_valid_m4a(raw_bytes: bytes) -> bool:
 
 
 def is_valid_webm(raw_bytes: bytes) -> bool:
-    """Validate WebM using EBML ID and webm DocType header check."""
+    """Validate supported EBML audio containers used for WebM delivery."""
     if not raw_bytes.startswith(SUPPORTED_TYPES["webm"]):
         return False
-    return b"webm" in raw_bytes[:100]
+    # Cloudinary may deliver an audio-only .webm asset with the compatible
+    # Matroska DocType even though the URL and response MIME remain WebM.
+    header = raw_bytes[:128].lower()
+    return b"webm" in header or b"matroska" in header
 
 
 def is_valid_text(raw_bytes: bytes) -> bool:
