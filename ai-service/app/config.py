@@ -110,7 +110,7 @@ class Settings:
     # LLM Settings — default reasoning provider: 'openrouter', 'openai', or 'groq'.
     LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "openrouter").lower().strip()
     LLM_FALLBACK_CHAIN: Optional[str] = os.getenv("LLM_FALLBACK_CHAIN")
-    GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+    GROQ_MODEL: str = os.getenv("GROQ_MODEL", "groq/compound")
 
     # Transcribe Settings
     TRANSCRIBE_PROVIDER: str = os.getenv("TRANSCRIBE_PROVIDER", "groq").lower().strip()

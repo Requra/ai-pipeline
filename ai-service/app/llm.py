@@ -330,6 +330,7 @@ class ResilientLLMClient:
                 default_headers=extra_headers if extra_headers else None,
                 timeout=settings.PROVIDER_TIMEOUT_SECONDS,
                 max_retries=0,
+                max_tokens=2048,
             )
         elif provider == "groq":
             return ChatOpenAI(
