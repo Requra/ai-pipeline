@@ -41,7 +41,7 @@ from app.schemas.items import (
 def generate_dedup_key(title_or_text: str) -> str:
     if not title_or_text:
         return ""
-    slug = re.sub(r'[^a-z0-9]+', '-', title_or_text.lower()).strip('-')
+    slug = re.sub(r"[^a-z0-9]+", "-", title_or_text.lower()).strip("-")
     return slug[:100]
 
 
@@ -50,6 +50,8 @@ def v1_type_from_labels(labels) -> str:
     stories so a story's type reflects its source labels (not a hard-coded
     'Functional')."""
     labs = set(labels or [])
+    if "Out-of-Scope" in labs or "Open Question" in labs:
+        return "Unknown"
     # A measurable quality attribute remains non-functional even when an LLM
     # also emits FR. BR may coexist with either, but does not override them.
     if "NFR" in labs or "Constraint" in labs or "Assumption" in labs:
@@ -88,7 +90,11 @@ def _dedupe_source_refs(refs: list[SourceRefV1]) -> list[SourceRefV1]:
 
 
 def _issue_value(issue, field: str, default=None):
-    return issue.get(field, default) if isinstance(issue, dict) else getattr(issue, field, default)
+    return (
+        issue.get(field, default)
+        if isinstance(issue, dict)
+        else getattr(issue, field, default)
+    )
 
 
 def _reconcile_public_quality_issues(issues: list) -> list[QualityIssue]:
@@ -113,17 +119,21 @@ def _reconcile_public_quality_issues(issues: list) -> list[QualityIssue]:
     for (_item_type, _item_id, root_cause), entry in grouped.items():
         model = entry["model"]
         if root_cause == "EVIDENCE_NOT_GROUNDED" and model.severity == "high":
-            model = model.model_copy(update={
-                "rule_violated": "missing_verified_evidence",
-                "details": (
-                    "Requirement evidence could not be verified against the "
-                    "uploaded sources."
-                ),
-            })
+            model = model.model_copy(
+                update={
+                    "rule_violated": "missing_verified_evidence",
+                    "details": (
+                        "Requirement evidence could not be verified against the "
+                        "uploaded sources."
+                    ),
+                }
+            )
         else:
-            model = model.model_copy(update={
-                "details": " ".join(entry["details"]),
-            })
+            model = model.model_copy(
+                update={
+                    "details": " ".join(entry["details"]),
+                }
+            )
         reconciled.append(model)
     return reconciled
 
@@ -131,12 +141,17 @@ def _reconcile_public_quality_issues(issues: list) -> list[QualityIssue]:
 def _requirement_title(requirement: ClassifiedRequirement) -> str:
     goal = (getattr(requirement, "goal", None) or "").strip().rstrip(".")
     sources = source_fact_texts([requirement])
-    goal_is_supported = bool(goal) and bool(sources) and (
-        max((proposition_support(source, goal) for source in sources), default=0.0) >= 0.15
-        and not unsupported_numeric_claims(goal, sources)
-        and not unsupported_fact_terms(goal, sources)
-        and not unsupported_review_terms(goal, sources)
-        and not has_polarity_conflict(goal, sources)
+    goal_is_supported = (
+        bool(goal)
+        and bool(sources)
+        and (
+            max((proposition_support(source, goal) for source in sources), default=0.0)
+            >= 0.15
+            and not unsupported_numeric_claims(goal, sources)
+            and not unsupported_fact_terms(goal, sources)
+            and not unsupported_review_terms(goal, sources)
+            and not has_polarity_conflict(goal, sources)
+        )
     )
     if goal_is_supported:
         return goal[:1].upper() + goal[1:]
@@ -162,7 +177,9 @@ def _calibrated_requirement_confidence(
     prevents an unjustifiably high public value. The response shape is
     unchanged.
     """
-    extraction = min(1.0, max(0.0, float(getattr(requirement, "confidence", 0.0) or 0.0)))
+    extraction = min(
+        1.0, max(0.0, float(getattr(requirement, "confidence", 0.0) or 0.0))
+    )
     if not source_refs:
         return round(min(extraction, 0.49), 4)
     evidence = max(ref.confidence_score for ref in source_refs)
@@ -172,17 +189,51 @@ def _calibrated_requirement_confidence(
     return round(min(1.0, max(0.0, calibrated)), 4)
 
 
+def _reconcile_public_warnings(warnings: list, req_id_map: dict[int, str]) -> list:
+    """Reconcile internal requirement ID strings in warnings to canonical public IDs."""
+    reconciled = []
+    for w in warnings:
+        w_dict = (
+            w
+            if isinstance(w, dict)
+            else (w.model_dump() if hasattr(w, "model_dump") else dict(w))
+        )
+        message = w_dict.get("message", "")
+
+        # If the warning provides unresolved_requirement_ids, rebuild the message cleanly
+        unresolved_ids = w_dict.get("unresolved_requirement_ids")
+        if unresolved_ids:
+            mapped_public_ids = [
+                req_id_map[r_id] for r_id in unresolved_ids if r_id in req_id_map
+            ]
+            if mapped_public_ids:
+                message = (
+                    f"{len(mapped_public_ids)} requirement(s) still lack verified "
+                    f"source evidence after grounding: {', '.join(mapped_public_ids)}."
+                )
+                w_dict["message"] = message
+        elif "REQ-" in message:
+            for int_id, pub_id in req_id_map.items():
+                old_code = f"REQ-{int_id:03d}"
+                if old_code != pub_id and old_code in message:
+                    message = message.replace(old_code, pub_id)
+            w_dict["message"] = message
+
+        reconciled.append(w_dict)
+    return reconciled
+
+
 def parse_pipeline_error(err_str: str, status: str) -> Optional[PipelineError]:
     if not err_str:
         return None
-    
+
     node_name = "unknown"
     code = "PIPELINE_ERROR"
     message = err_str
-    
+
     if "Traceback" in message:
         message = message.split("Traceback")[0].strip()
-        
+
     err_upper = err_str.upper()
     if "EXTRACT" in err_upper:
         node_name = "extract"
@@ -205,7 +256,7 @@ def parse_pipeline_error(err_str: str, status: str) -> Optional[PipelineError]:
     elif "INGEST" in err_upper:
         node_name = "ingest"
         code = "INGEST_FAILURE"
-        
+
     if ":" in err_str:
         parts = err_str.split(":", 1)
         potential_code = parts[0].strip()
@@ -214,14 +265,11 @@ def parse_pipeline_error(err_str: str, status: str) -> Optional[PipelineError]:
             message = parts[1].strip()
             if "Traceback" in message:
                 message = message.split("Traceback")[0].strip()
-                
-    recoverable = (status == "partial")
-    
+
+    recoverable = status == "partial"
+
     return PipelineError(
-        node_name=node_name,
-        code=code,
-        message=message,
-        recoverable=recoverable
+        node_name=node_name, code=code, message=message, recoverable=recoverable
     )
 
 
@@ -235,14 +283,12 @@ async def format_node(state: PipelineState) -> dict:
     error = state.get("error")
     stories = state.get("user_stories", []) or []
     reqs = state.get("classified_requirements", []) or []
-    q_issues = _reconcile_public_quality_issues(
-        state.get("quality_issues", []) or []
-    )
+    q_issues = _reconcile_public_quality_issues(state.get("quality_issues", []) or [])
     warnings = state.get("warnings", []) or []
 
     # Coerce user stories and requirements into Pydantic models where needed first
     coerced_stories = []
-    for s in (stories or []):
+    for s in stories or []:
         if isinstance(s, UserStory):
             coerced_stories.append(s)
         else:
@@ -256,7 +302,7 @@ async def format_node(state: PipelineState) -> dict:
             coerced_stories.append(UserStory(**data))
 
     coerced_reqs = []
-    for r in (reqs or []):
+    for r in reqs or []:
         if isinstance(r, ClassifiedRequirement):
             coerced_reqs.append(r)
         else:
@@ -275,61 +321,127 @@ async def format_node(state: PipelineState) -> dict:
             data.setdefault("classification_confidence", 0.0)
             coerced_reqs.append(ClassifiedRequirement(**data))
 
-    # Map status. Rejection (input judged not useful) takes precedence over
-    # "failed": ingest sets a DOCUMENT_REJECTED reason in `error` when it rejects,
-    # which must not be misreported as a system failure.
-    status = "partial"
+    # Map status according to authoritative pipeline semantics:
+    # 1. Fatal Technical Failures -> "failed"
+    # 2. Input Rejection (all sources not useful / irrelevant) -> "rejected"
+    # 3. Partial Source Loss or missing outputs -> "partial"
+    # 4. Clean Execution with all usable sources -> "completed"
+    error_str = str(error or "")
     if state.get("is_useful") is False:
-        status = "rejected"
+        if any(
+            marker in error_str
+            for marker in (
+                "ALL_SOURCES_FAILED",
+                "INGEST_FAILED",
+                "EXTRACT_FAILED",
+                "PARSE_FAILURE",
+                "NO_SOURCES",
+            )
+        ):
+            status = "failed"
+        else:
+            status = "rejected"
     elif error and not coerced_stories and not coerced_reqs:
         status = "failed"
+    elif not coerced_reqs or not coerced_stories:
+        status = "partial"
     else:
-        if state.get("is_useful") and (not coerced_reqs or not coerced_stories):
+        # Check for material source processing loss
+        has_partial_source_loss = bool(state.get("partial_source_failure"))
+
+        # Check for material source failure in warnings
+        material_source_failure_in_warnings = any(
+            (
+                warning.get("code")
+                if isinstance(warning, dict)
+                else getattr(warning, "code", None)
+            )
+            in ("PARTIAL_SOURCE_FAILURE", "SOURCE_PROCESSING_FAILED")
+            for warning in warnings
+        )
+
+        # Check for fatal ungrounded requirement issues or high severity defects
+        actionable_req_ids = {
+            r.id
+            for r in coerced_reqs
+            if getattr(r, "disposition", "accepted") == "accepted"
+            and "Out-of-Scope" not in (getattr(r, "labels", []) or [])
+            and "Open Question" not in (getattr(r, "labels", []) or [])
+        }
+        has_fatal_quality_issue = any(
+            (
+                getattr(q, "severity", None) == "high"
+                or (isinstance(q, dict) and q.get("severity") == "high")
+            )
+            and (
+                (
+                    (
+                        getattr(q, "item_type", None) == "requirement"
+                        or (isinstance(q, dict) and q.get("item_type") == "requirement")
+                    )
+                    and (
+                        getattr(q, "item_id", None) in actionable_req_ids
+                        or (
+                            isinstance(q, dict)
+                            and q.get("item_id") in actionable_req_ids
+                        )
+                    )
+                )
+                or getattr(q, "item_type", None) == "pipeline"
+                or (isinstance(q, dict) and q.get("item_type") == "pipeline")
+                or (
+                    (
+                        getattr(q, "rule_violated", "")
+                        in ("missing_evidence", "missing_verified_evidence")
+                        or (
+                            isinstance(q, dict)
+                            and q.get("rule_violated")
+                            in ("missing_evidence", "missing_verified_evidence")
+                        )
+                    )
+                    and (
+                        getattr(q, "item_id", None) in actionable_req_ids
+                        or (
+                            isinstance(q, dict)
+                            and q.get("item_id") in actionable_req_ids
+                        )
+                    )
+                )
+                or getattr(q, "rule_violated", "")
+                == "USEFUL_INPUT_WITH_EMPTY_EXTRACTION"
+                or (
+                    isinstance(q, dict)
+                    and q.get("rule_violated") == "USEFUL_INPUT_WITH_EMPTY_EXTRACTION"
+                )
+            )
+            for q in q_issues
+        )
+
+        if (
+            has_partial_source_loss
+            or material_source_failure_in_warnings
+            or has_fatal_quality_issue
+        ):
             status = "partial"
         else:
-            has_high = any(
-                getattr(q, "severity", None) == "high" 
-                or (isinstance(q, dict) and q.get("severity") == "high") 
-                for q in q_issues
-            )
-            # Successful canonicalization is informational; it should not turn
-            # an otherwise clean result into a partial response.
-            informational_warning_codes = {
-                "DUPLICATE_REQUIREMENT_MERGED",
-                "SEMANTIC_COMPLEMENTARY",
-                # Grounding owns the final status through a High evidence
-                # defect. The warning itself is diagnostic and may be stale in
-                # backward-compatible callers that invoke format directly.
-                "EXTRACT_WEAK_EVIDENCE",
-                "WEAK_EVIDENCE_SUPPORT",
-                "NO_RETRIEVED_EVIDENCE",
-                "EVIDENCE_LIMIT_APPLIED",
-            }
-            actionable_warnings = [
-                warning for warning in warnings
-                if (
-                    warning.get("code") if isinstance(warning, dict)
-                    else getattr(warning, "code", None)
-                ) not in informational_warning_codes
-            ]
-            if error or has_high or actionable_warnings:
-                status = "partial"
-            else:
-                status = "completed"
+            status = "completed"
 
     # Compute processing time if possible
     started_at = state.get("started_at")
     if started_at:
-        processing_time_ms = int(max(0, (time.time() - started_at) * 1000))
+        try:
+            processing_time_ms = int(max(0, (time.time() - float(started_at)) * 1000))
+        except (ValueError, TypeError):
+            processing_time_ms = int(state.get("processing_time_ms") or 0)
     else:
-        processing_time_ms = state.get("processing_time_ms", 0)
+        processing_time_ms = int(state.get("processing_time_ms") or 0)
 
     # 1. Source documents mapping
     source_docs = []
     file_name = "unknown"
     mime_type = "application/octet-stream"
     file_type = state.get("file_type", "unknown")
-    
+
     source_type = "unknown"
     if file_type:
         ft_lower = file_type.lower()
@@ -348,7 +460,7 @@ async def format_node(state: PipelineState) -> dict:
         elif ft_lower == "transcript":
             source_type = "transcript"
             mime_type = "text/plain"
-            
+
     source_metadata = state.get("source_metadata")
     if source_metadata:
         file_name = source_metadata.filename
@@ -359,7 +471,7 @@ async def format_node(state: PipelineState) -> dict:
             file_name = meta.get("filename")
         elif meta.get("file_name"):
             file_name = meta.get("file_name")
-            
+
     state_source_docs = state.get("source_documents") or []
     if state_source_docs:
         for idx, doc in enumerate(state_source_docs, start=1):
@@ -382,21 +494,25 @@ async def format_node(state: PipelineState) -> dict:
                 elif dft_lower == "transcript":
                     s_type = "transcript"
 
-            source_docs.append(SourceDocumentV1(
-                source_id=doc_id,
-                source_type=s_type,
-                file_name=doc_name,
-                mime_type=doc_mime_type,
-                language=doc.get("language") or state.get("language") or "en"
-            ))
+            source_docs.append(
+                SourceDocumentV1(
+                    source_id=doc_id,
+                    source_type=s_type,
+                    file_name=doc_name,
+                    mime_type=doc_mime_type,
+                    language=doc.get("language") or state.get("language") or "en",
+                )
+            )
     elif file_name != "unknown" or file_type != "unknown" or source_metadata:
-        source_docs.append(SourceDocumentV1(
-            source_id="SRC-001",
-            source_type=source_type,
-            file_name=file_name,
-            mime_type=mime_type,
-            language=state.get("language") or "en"
-        ))
+        source_docs.append(
+            SourceDocumentV1(
+                source_id="SRC-001",
+                source_type=source_type,
+                file_name=file_name,
+                mime_type=mime_type,
+                language=state.get("language") or "en",
+            )
+        )
 
     # 2. Requirements mapping
     mapped_reqs = []
@@ -404,24 +520,32 @@ async def format_node(state: PipelineState) -> dict:
     for idx, r in enumerate(coerced_reqs, start=1):
         req_str_id = f"REQ-{str(idx).zfill(3)}"
         req_id_map[r.id] = req_str_id
-        
+
         # Determine requirement type
+        disp = getattr(r, "disposition", "accepted")
         labels = getattr(r, "labels", []) or []
-        req_type = v1_type_from_labels(labels) if labels else "Unknown"
-            
+        if (
+            disp in ("rejected", "deferred")
+            or "Out-of-Scope" in labels
+            or "Open Question" in labels
+        ):
+            req_type = "Unknown"
+        else:
+            req_type = v1_type_from_labels(labels) if labels else "Unknown"
+
         # Determine priority
         priority = getattr(r, "priority", "Medium") or "Medium"
         if priority not in ("Low", "Medium", "High", "Critical", "Unknown"):
             priority = "Medium"
-        
+
         # Source refs mapping
         source_refs = []
         for ev in getattr(r, "evidence", []) or []:
             support_score = float(getattr(ev, "support_score", 0.0) or 0.0)
-            if 0.0 < support_score < 0.60:
+            if 0.0 < support_score < 0.30:
                 continue
             ref_doc_id = getattr(ev, "document_id", None)
-            
+
             # Robust fallback: if ref_doc_id is not set, parse it from chunk_id
             if not ref_doc_id and getattr(ev, "chunk_id", None) and state_source_docs:
                 for doc in state_source_docs:
@@ -438,55 +562,68 @@ async def format_node(state: PipelineState) -> dict:
                 for doc in state_source_docs:
                     if doc.get("document_id") == ref_doc_id:
                         ref_source_id = ref_doc_id
-                        ref_doc_name = doc.get("filename") or doc.get("file_name") or ref_doc_id
+                        ref_doc_name = (
+                            doc.get("filename") or doc.get("file_name") or ref_doc_id
+                        )
                         dft_lower = (doc.get("file_type") or "text").lower()
-                        ref_source_type = "audio" if dft_lower in ("audio", "mp3", "wav", "m4a") else "document"
+                        ref_source_type = (
+                            "audio"
+                            if dft_lower in ("audio", "mp3", "wav", "m4a")
+                            else "document"
+                        )
                         break
 
-            source_refs.append(SourceRefV1(
-                source_id=ref_source_id,
-                source_type=ref_source_type,
-                document_name=ref_doc_name,
-                page=ev.page_number,
-                chunk_id=ev.chunk_id,
-                quote=ev.quote,
-                confidence_score=round(
-                    getattr(ev, "support_score", 0.0) or min(float(r.confidence), 0.5),
-                    4,
+            source_refs.append(
+                SourceRefV1(
+                    source_id=ref_source_id,
+                    source_type=ref_source_type,
+                    document_name=ref_doc_name,
+                    page=ev.page_number,
+                    chunk_id=ev.chunk_id,
+                    quote=ev.quote,
+                    confidence_score=round(
+                        getattr(ev, "support_score", 0.0)
+                        or min(float(r.confidence), 0.5),
+                        4,
+                    ),
                 )
-            ))
+            )
         source_refs = _dedupe_source_refs(source_refs)
-            
+
         # Quality mapping
         req_issues = [
-            qi.details if isinstance(qi, QualityIssue) else qi.get("details", "") 
-            for qi in q_issues 
-            if (getattr(qi, "item_id", None) == r.id or (isinstance(qi, dict) and qi.get("item_id") == r.id)) 
-            and (getattr(qi, "item_type", None) == "requirement" or (isinstance(qi, dict) and qi.get("item_type") == "requirement"))
+            qi.details if isinstance(qi, QualityIssue) else qi.get("details", "")
+            for qi in q_issues
+            if (
+                getattr(qi, "item_id", None) == r.id
+                or (isinstance(qi, dict) and qi.get("item_id") == r.id)
+            )
+            and (
+                getattr(qi, "item_type", None) == "requirement"
+                or (isinstance(qi, dict) and qi.get("item_type") == "requirement")
+            )
         ]
         score = max(0.0, 1.0 - (len(req_issues) * 0.15))
-        quality = QualityV1(
-            score=round(score, 2),
-            issues=req_issues,
-            warnings=[]
-        )
-        
+        quality = QualityV1(score=round(score, 2), issues=req_issues, warnings=[])
+
         # Requirement title generation
         title = _requirement_title(r)
-        
-        mapped_reqs.append(RequirementV1(
-            id=req_str_id,
-            title=title,
-            description=r.text,
-            type=req_type,
-            category=infer_requirement_category(r.text, labels),
-            priority=priority,
-            actor=r.actor or "System",
-            confidence_score=_calibrated_requirement_confidence(r, source_refs),
-            deduplication_key=generate_dedup_key(title),
-            source_refs=source_refs,
-            quality=quality
-        ))
+
+        mapped_reqs.append(
+            RequirementV1(
+                id=req_str_id,
+                title=title,
+                description=r.text,
+                type=req_type,
+                category=infer_requirement_category(r.text, labels),
+                priority=priority,
+                actor=r.actor or "System",
+                confidence_score=_calibrated_requirement_confidence(r, source_refs),
+                deduplication_key=generate_dedup_key(title),
+                source_refs=source_refs,
+                quality=quality,
+            )
+        )
 
     # 3. User Stories mapping
     mapped_stories = []
@@ -500,12 +637,12 @@ async def format_node(state: PipelineState) -> dict:
         # Duplicate internal IDs are already reported by the quality gate.  Use
         # the first emitted story as the deterministic relationship target.
         story_id_map.setdefault(s.id, story_str_id)
-        
+
         # Map Linked requirement ID
         linked_req_id = "REQ-001"
         if s.source_requirement_ids:
             linked_req_id = req_id_map.get(s.source_requirement_ids[0], "REQ-001")
-            
+
         # Source refs mapping
         source_refs = []
         for ev in getattr(s, "evidence_reference", []) or []:
@@ -513,7 +650,7 @@ async def format_node(state: PipelineState) -> dict:
             if 0.0 < support_score < 0.60:
                 continue
             ref_doc_id = getattr(ev, "document_id", None)
-            
+
             # Robust fallback: if ref_doc_id is not set, parse it from chunk_id
             if not ref_doc_id and getattr(ev, "chunk_id", None) and state_source_docs:
                 for doc in state_source_docs:
@@ -530,31 +667,45 @@ async def format_node(state: PipelineState) -> dict:
                 for doc in state_source_docs:
                     if doc.get("document_id") == ref_doc_id:
                         ref_source_id = ref_doc_id
-                        ref_doc_name = doc.get("filename") or doc.get("file_name") or ref_doc_id
+                        ref_doc_name = (
+                            doc.get("filename") or doc.get("file_name") or ref_doc_id
+                        )
                         dft_lower = (doc.get("file_type") or "text").lower()
-                        ref_source_type = "audio" if dft_lower in ("audio", "mp3", "wav", "m4a") else "document"
+                        ref_source_type = (
+                            "audio"
+                            if dft_lower in ("audio", "mp3", "wav", "m4a")
+                            else "document"
+                        )
                         break
 
-            source_refs.append(SourceRefV1(
-                source_id=ref_source_id,
-                source_type=ref_source_type,
-                document_name=ref_doc_name,
-                page=ev.page_number,
-                chunk_id=ev.chunk_id,
-                quote=ev.quote,
-                confidence_score=round(
-                    getattr(ev, "support_score", 0.0) or 0.5,
-                    4,
+            source_refs.append(
+                SourceRefV1(
+                    source_id=ref_source_id,
+                    source_type=ref_source_type,
+                    document_name=ref_doc_name,
+                    page=ev.page_number,
+                    chunk_id=ev.chunk_id,
+                    quote=ev.quote,
+                    confidence_score=round(
+                        getattr(ev, "support_score", 0.0) or 0.5,
+                        4,
+                    ),
                 )
-            ))
+            )
         source_refs = _dedupe_source_refs(source_refs)
-            
+
         # Quality mapping
         story_issues = [
-            qi.details if isinstance(qi, QualityIssue) else qi.get("details", "") 
-            for qi in q_issues 
-            if (getattr(qi, "item_id", None) == idx or (isinstance(qi, dict) and qi.get("item_id") == idx))
-            and (getattr(qi, "item_type", None) == "story" or (isinstance(qi, dict) and qi.get("item_type") == "story"))
+            qi.details if isinstance(qi, QualityIssue) else qi.get("details", "")
+            for qi in q_issues
+            if (
+                getattr(qi, "item_id", None) == idx
+                or (isinstance(qi, dict) and qi.get("item_id") == idx)
+            )
+            and (
+                getattr(qi, "item_type", None) == "story"
+                or (isinstance(qi, dict) and qi.get("item_type") == "story")
+            )
         ]
         linked_internal_requirements = [
             requirement
@@ -569,26 +720,22 @@ async def format_node(state: PipelineState) -> dict:
                 "A linked requirement does not have verified source evidence."
             )
         score = max(0.0, 1.0 - (len(story_issues) * 0.15))
-        quality = QualityV1(
-            score=round(score, 2),
-            issues=story_issues,
-            warnings=[]
-        )
-        
+        quality = QualityV1(score=round(score, 2), issues=story_issues, warnings=[])
+
         # Acceptance criteria mapping
         ac_v1_list = []
         for ac in getattr(s, "acceptance_criteria", []) or []:
             public_acceptance_criterion_ids.add(ac.id)
-            ac_v1_list.append(AcceptanceCriterionV1(
-                id=ac.id,
-                text=ac.text,
-                criterion_type=ac.criterion_type
-            ))
-            
+            ac_v1_list.append(
+                AcceptanceCriterionV1(
+                    id=ac.id, text=ac.text, criterion_type=ac.criterion_type
+                )
+            )
+
         priority = getattr(s, "priority", "Medium") or "Medium"
         if priority not in ("Low", "Medium", "High", "Critical", "Unknown"):
             priority = "Medium"
-            
+
         jira_fields = JiraFieldsV1(
             issue_type="Story",
             summary=s.title,
@@ -605,30 +752,34 @@ async def format_node(state: PipelineState) -> dict:
                     for req in coerced_reqs
                     if req.id in (getattr(s, "source_requirement_ids", []) or [])
                 ],
-            )
+            ),
         )
-        
+
         # Story type derived from its labels (falls back to the linked
         # requirement's type), not hard-coded Functional.
         story_type = v1_type_from_labels(getattr(s, "labels", []) or [])
         if not (getattr(s, "labels", []) or []):
             linked_req = next((r for r in mapped_reqs if r.id == linked_req_id), None)
             if linked_req is not None:
-                story_type = linked_req.type if linked_req.type != "Unknown" else "Functional"
+                story_type = (
+                    linked_req.type if linked_req.type != "Unknown" else "Functional"
+                )
 
-        mapped_stories.append(UserStoryV1(
-            id=story_str_id,
-            requirement_id=linked_req_id,
-            title=s.title,
-            user_story=s.description,
-            acceptance_criteria=ac_v1_list,
-            priority=priority,
-            type=story_type,
-            deduplication_key=generate_dedup_key(s.title),
-            source_refs=source_refs,
-            quality=quality,
-            jira_fields=jira_fields
-        ))
+        mapped_stories.append(
+            UserStoryV1(
+                id=story_str_id,
+                requirement_id=linked_req_id,
+                title=s.title,
+                user_story=s.description,
+                acceptance_criteria=ac_v1_list,
+                priority=priority,
+                type=story_type,
+                deduplication_key=generate_dedup_key(s.title),
+                source_refs=source_refs,
+                quality=quality,
+                jira_fields=jira_fields,
+            )
+        )
 
     # 4. Requirement Coverages mapping
     mapped_coverages = []
@@ -660,13 +811,15 @@ async def format_node(state: PipelineState) -> dict:
             ):
                 public_ac_ids.append(criterion_id)
 
-        mapped_coverages.append(RequirementCoverageV1(
-            requirement_id=str_req_id,
-            coverage_type=cov.coverage_type,
-            story_ids=public_story_ids,
-            acceptance_criteria_ids=public_ac_ids,
-            reason=cov.reason
-        ))
+        mapped_coverages.append(
+            RequirementCoverageV1(
+                requirement_id=str_req_id,
+                coverage_type=cov.coverage_type,
+                story_ids=public_story_ids,
+                acceptance_criteria_ids=public_ac_ids,
+                reason=cov.reason,
+            )
+        )
 
     # Normalize summary
     summary_val = state.get("summary")
@@ -682,7 +835,7 @@ async def format_node(state: PipelineState) -> dict:
             action_items=[],
             stakeholders=[],
             scope=[],
-            out_of_scope=[]
+            out_of_scope=[],
         )
     else:
         summary_obj = StructuredSummary(
@@ -694,7 +847,7 @@ async def format_node(state: PipelineState) -> dict:
             action_items=[],
             stakeholders=[],
             scope=[],
-            out_of_scope=[]
+            out_of_scope=[],
         )
 
     # 5. Exports mapping — flat, Excel/Jira-friendly rows enriched with
@@ -705,53 +858,68 @@ async def format_node(state: PipelineState) -> dict:
     for s in mapped_stories:
         linked = req_by_str_id.get(s.requirement_id)
         source_quotes = " | ".join(ref.quote for ref in s.source_refs if ref.quote)
-        excel_rows.append({
-            "id": s.id,
-            "requirement_id": s.requirement_id,
-            "title": s.title,
-            "user_story": s.user_story,
-            "acceptance_criteria": "; ".join([ac.text for ac in s.acceptance_criteria]),
-            "type": s.type,
-            "priority": s.priority,
-            "actor": linked.actor if linked else "System",
-            "confidence": linked.confidence_score if linked else 0.0,
-            "labels": ", ".join(s.jira_fields.labels),
-            "source_requirement_id": s.requirement_id,
-            "source_quotes": source_quotes,
-            "quality_score": s.quality.score,
-            "quality_issues": "; ".join(s.quality.issues),
-            "source_refs": [ref.model_dump() for ref in s.source_refs]
-        })
-        jira_rows.append({
-            "issue_type": s.jira_fields.issue_type,
-            "summary": s.jira_fields.summary,
-            "description": s.jira_fields.description,
-            "acceptance_criteria": s.jira_fields.acceptance_criteria,
-            "priority": s.jira_fields.priority,
-            "labels": s.jira_fields.labels,
-            "components": s.jira_fields.components,
-            "epic_name": s.jira_fields.epic_name,
-            "story_points": s.jira_fields.story_points,
-            "source_requirement_id": s.requirement_id,
-            "source_quotes": source_quotes,
-        })
+        excel_rows.append(
+            {
+                "id": s.id,
+                "requirement_id": s.requirement_id,
+                "title": s.title,
+                "user_story": s.user_story,
+                "acceptance_criteria": "; ".join(
+                    [ac.text for ac in s.acceptance_criteria]
+                ),
+                "type": s.type,
+                "priority": s.priority,
+                "actor": linked.actor if linked else "System",
+                "confidence": linked.confidence_score if linked else 0.0,
+                "labels": ", ".join(s.jira_fields.labels),
+                "source_requirement_id": s.requirement_id,
+                "source_quotes": source_quotes,
+                "quality_score": s.quality.score,
+                "quality_issues": "; ".join(s.quality.issues),
+                "source_refs": [ref.model_dump() for ref in s.source_refs],
+            }
+        )
+        jira_rows.append(
+            {
+                "issue_type": s.jira_fields.issue_type,
+                "summary": s.jira_fields.summary,
+                "description": s.jira_fields.description,
+                "acceptance_criteria": s.jira_fields.acceptance_criteria,
+                "priority": s.jira_fields.priority,
+                "labels": s.jira_fields.labels,
+                "components": s.jira_fields.components,
+                "epic_name": s.jira_fields.epic_name,
+                "story_points": s.jira_fields.story_points,
+                "source_requirement_id": s.requirement_id,
+                "source_quotes": source_quotes,
+            }
+        )
 
     exports = ExportsV1(
         excel=ExcelExportV1(
             available=len(excel_rows) > 0,
             columns=[
-                "id", "requirement_id", "title", "user_story", "acceptance_criteria",
-                "type", "priority", "actor", "confidence", "labels",
-                "source_requirement_id", "source_quotes", "quality_score",
-                "quality_issues", "source_refs",
+                "id",
+                "requirement_id",
+                "title",
+                "user_story",
+                "acceptance_criteria",
+                "type",
+                "priority",
+                "actor",
+                "confidence",
+                "labels",
+                "source_requirement_id",
+                "source_quotes",
+                "quality_score",
+                "quality_issues",
+                "source_refs",
             ],
-            rows=excel_rows
+            rows=excel_rows,
         ),
         jira=JiraExportV1(
-            available=len(jira_rows) > 0,
-            issue_type="Story",
-            rows=jira_rows
-        )
+            available=len(jira_rows) > 0, issue_type="Story", rows=jira_rows
+        ),
     )
 
     artifacts = ArtifactsV1(
@@ -759,7 +927,7 @@ async def format_node(state: PipelineState) -> dict:
             available=False,
             file_url="",
             file_name="",
-            mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
     )
 
@@ -781,12 +949,13 @@ async def format_node(state: PipelineState) -> dict:
     # Story issues are already created with their one-based public position by
     # quality_gate and therefore need no type or shape change.
     requirement_public_numbers = {
-        requirement.id: index
-        for index, requirement in enumerate(coerced_reqs, start=1)
+        requirement.id: index for index, requirement in enumerate(coerced_reqs, start=1)
     }
     public_quality_issues = []
     for issue in q_issues:
-        public_issue = issue if isinstance(issue, QualityIssue) else QualityIssue(**issue)
+        public_issue = (
+            issue if isinstance(issue, QualityIssue) else QualityIssue(**issue)
+        )
         public_item_id = public_issue.item_id
         if public_issue.item_type in ("requirement", "coverage"):
             public_item_id = requirement_public_numbers.get(
@@ -805,7 +974,7 @@ async def format_node(state: PipelineState) -> dict:
         job_id=state.get("job_id", ""),
         status=status,
         is_useful=state.get("is_useful", True),
-        relevance_score=state.get("relevance_score", 0.0),
+        relevance_score=float(state.get("relevance_score") or 0.0),
         source_documents=source_docs,
         requirements=mapped_reqs,
         user_stories=mapped_stories,
@@ -814,14 +983,18 @@ async def format_node(state: PipelineState) -> dict:
         exports=exports,
         artifacts=artifacts,
         quality_issues=public_quality_issues,
-        warnings=warnings,
+        warnings=_reconcile_public_warnings(warnings, req_id_map),
         quality_report=quality_report,
         error=structured_error,
-        processing_time_ms=processing_time_ms,
-        
+        processing_time_ms=int(processing_time_ms or 0),
         # Legacy compat
         error_message=error,
-        export_rows=legacy_export_rows
+        export_rows=legacy_export_rows,
     )
 
-    return {"status": status, "is_useful": job_result.is_useful, "error": error, "job_result": job_result}
+    return {
+        "status": status,
+        "is_useful": job_result.is_useful,
+        "error": error,
+        "job_result": job_result,
+    }

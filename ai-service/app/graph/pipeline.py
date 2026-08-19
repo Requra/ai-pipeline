@@ -1,9 +1,7 @@
 from langgraph.graph import StateGraph, END
 from app.schemas.pipeline_state import PipelineState
 from app.nodes.detect_file_type import detect_file_type_node
-from app.nodes.ingest import ingest_node
-from app.nodes.parse_to_chunks import parse_to_chunks_node
-from app.nodes.transcribe import transcribe_node
+from app.nodes.prepare_sources import prepare_sources_node
 from app.nodes.build_source_index import build_source_index_node
 from app.nodes.extract import extract_node
 from app.nodes.dedupe_requirements import dedupe_requirements_node
@@ -15,9 +13,9 @@ from app.nodes.format import format_node
 from app.nodes.evidence_grounding import evidence_grounding_node
 from app.nodes.quality_gate import quality_gate_node
 from app.nodes.repair_stories import repair_stories_node
-from app.graph.router import route_after_ingest, route_after_quality_gate
+from app.graph.router import route_after_prepare_sources, route_after_quality_gate
 
-# The pipeline is a long linear DAG (14 nodes). langgraph 0.0.26 advances one
+# The pipeline is a long linear DAG (13 active nodes). langgraph 0.0.26 advances one
 # BSP super-step per node plus extra channel-propagation steps, so the default
 # recursion_limit of 25 is exceeded as the graph grows. Bind a generous limit
 # onto the compiled graph so every caller (API + tests + Studio) inherits it
@@ -31,9 +29,7 @@ def build_pipeline():
 
     # Add Nodes
     workflow.add_node("detect_file_type", detect_file_type_node)
-    workflow.add_node("ingest", ingest_node)
-    workflow.add_node("parse_to_chunks", parse_to_chunks_node)
-    workflow.add_node("transcribe", transcribe_node)
+    workflow.add_node("prepare_sources", prepare_sources_node)
     workflow.add_node("build_source_index", build_source_index_node)
     workflow.add_node("extract", extract_node)
     workflow.add_node("dedupe_requirements", dedupe_requirements_node)
@@ -49,24 +45,19 @@ def build_pipeline():
     # Edges
     workflow.set_entry_point("detect_file_type")
     
-    workflow.add_edge("detect_file_type", "ingest")
+    workflow.add_edge("detect_file_type", "prepare_sources")
 
-    # Conditional router after ingestion
+    # Conditional router after source preparation
     workflow.add_conditional_edges(
-        "ingest",
-        route_after_ingest,
+        "prepare_sources",
+        route_after_prepare_sources,
         {
-            "transcribe": "transcribe",
-            "parse_to_chunks": "parse_to_chunks",
-            "format": "format"
+            "build_source_index": "build_source_index",
+            "format": "format",
         }
     )
-
-    # Transcription flows into parsing (sliding window for now)
-    workflow.add_edge("transcribe", "parse_to_chunks")
     
     # Chunks flow into the source index, then into extraction
-    workflow.add_edge("parse_to_chunks", "build_source_index")
     workflow.add_edge("build_source_index", "extract")
 
     # Dedupe, then retrieve supporting evidence, before classification

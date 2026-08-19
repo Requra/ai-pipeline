@@ -21,6 +21,12 @@ _ENGLISH_NUMBER_PHRASES = (
     ("one thousand", "1000"),
     ("two point zero", "2.0"),
     ("one point three", "1.3"),
+    ("twenty-four", "24"),
+    ("twenty four", "24"),
+    ("twelve", "12"),
+    ("eleven", "11"),
+    ("noon", "12"),
+    ("midday", "12"),
     ("zero", "0"), ("one", "1"), ("two", "2"), ("three", "3"),
     ("four", "4"), ("five", "5"), ("six", "6"), ("seven", "7"),
     ("eight", "8"), ("nine", "9"), ("ten", "10"),
@@ -202,7 +208,7 @@ def best_audio_evidence_clause(requirement: str, source_text: str) -> tuple[floa
         if start > 0 and _ASR_DEPENDENT_START.match(clauses[start]):
             continue
         combined = ""
-        for end in range(start, min(len(clauses), start + 3)):
+        for end in range(start, min(len(clauses), start + 4)):
             combined = f"{combined} {clauses[end]}".strip()
             # A fragmented prefix must not win solely for being short; the
             # adjacent compact span remains an exact, publishable quote.
@@ -210,7 +216,7 @@ def best_audio_evidence_clause(requirement: str, source_text: str) -> tuple[floa
                 end < len(clauses) - 1
                 and _break_continues(clauses[end], clauses[end + 1])
             )
-            if len(combined) <= 1200 and not ends_at_continuation:
+            if len(combined) <= 1500 and not ends_at_continuation:
                 candidates.append(combined)
     scored: list[tuple[float, float, str]] = []
     normalized_requirement = normalize_audio_matching_text(requirement)
@@ -285,8 +291,9 @@ def reconstruct_audio_chunks(
         languages = {item.language for item in group if item.language}
         confidences = [item.asr_confidence for item in group if item.asr_confidence is not None]
         index = len(windows)
+        cid = f"trans_{job_id}_{document_id}_semantic_{index}" if document_id else f"trans_{job_id}_semantic_{index}"
         windows.append(SourceChunk(
-            chunk_id=f"trans_{job_id}_semantic_{index}",
+            chunk_id=cid,
             text=text,
             start_char=0,
             end_char=len(text),

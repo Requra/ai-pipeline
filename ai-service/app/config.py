@@ -99,10 +99,18 @@ class Settings:
     GPT_OSS_API_KEY: Optional[str] = os.getenv("GPT_OSS_API_KEY")
     BASE_URL_KEY: Optional[str] = os.getenv("BASE_URL_KEY")
 
+    # ITI Settings
+    ITI_API_KEY: Optional[str] = os.getenv("ITI_API_KEY")
+    ITI_BASE_URL: str = os.getenv("ITI_BASE_URL", "http://apiaccess.iti.net.eg/student").strip()
+    ITI_PRIMARY_MODEL: str = os.getenv("ITI_PRIMARY_MODEL", "nvidia.nemotron-super-3-120b")
+    ITI_FALLBACK_MODEL: str = os.getenv("ITI_FALLBACK_MODEL", "openai.gpt-oss-120b-1:0")
+    ITI_QUALITY_MODEL: str = os.getenv("ITI_QUALITY_MODEL", "mistral.mistral-large-3-675b-instruct")
+    ITI_EMBEDDING_MODEL: str = os.getenv("ITI_EMBEDDING_MODEL", "amazon.titan-embed-text-v1")
+
     # LLM Settings — default reasoning provider: 'openrouter', 'openai', or 'groq'.
     LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "openrouter").lower().strip()
     LLM_FALLBACK_CHAIN: Optional[str] = os.getenv("LLM_FALLBACK_CHAIN")
-    GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+    GROQ_MODEL: str = os.getenv("GROQ_MODEL", "groq/compound")
 
     # Transcribe Settings
     TRANSCRIBE_PROVIDER: str = os.getenv("TRANSCRIBE_PROVIDER", "groq").lower().strip()
@@ -130,6 +138,7 @@ class Settings:
     # ------------------------------------------------------------------
     REDIS_URL: Optional[str] = os.getenv("REDIS_URL")
     QUEUE_NAME: str = os.getenv("QUEUE_NAME", "ai_jobs")
+    ALLOW_INPROCESS_QUEUE_IN_PRODUCTION: bool = _env_flag("ALLOW_INPROCESS_QUEUE_IN_PRODUCTION", "false")
 
     # ------------------------------------------------------------------
     # Retention
@@ -173,6 +182,29 @@ class Settings:
     LLM_RETRY_BASE_SECONDS: float = _env_float("LLM_RETRY_BASE_SECONDS", 1.0)
     LLM_RETRY_MAX_SECONDS: float = _env_float("LLM_RETRY_MAX_SECONDS", 30.0)
     LLM_QUOTA_COOLDOWN_SECONDS: float = _env_float("LLM_QUOTA_COOLDOWN_SECONDS", 300.0)
+
+    # ------------------------------------------------------------------
+    # Source processing & operational limits
+    # ------------------------------------------------------------------
+    SOURCE_PROCESS_CONCURRENCY: int = _env_int("SOURCE_PROCESS_CONCURRENCY", 3)
+    STT_CONCURRENCY: int = _env_int("STT_CONCURRENCY", 2)
+    MAX_AUDIO_SOURCES_PER_JOB: int = _env_int("MAX_AUDIO_SOURCES_PER_JOB", 3)
+    MAX_SOURCES_PER_JOB: int = _env_int("MAX_SOURCES_PER_JOB", 10)
+    MAX_DOCUMENT_BYTES: int = _env_int("MAX_DOCUMENT_BYTES", 20 * 1024 * 1024)       # 20 MB
+    MAX_AUDIO_BYTES: int = _env_int("MAX_AUDIO_BYTES", 50 * 1024 * 1024)             # 50 MB
+    MAX_TOTAL_UPLOAD_BYTES: int = _env_int("MAX_TOTAL_UPLOAD_BYTES", 100 * 1024 * 1024) # 100 MB
+    MAX_AUDIO_DURATION_SECONDS: int = _env_int("MAX_AUDIO_DURATION_SECONDS", 1800)   # 30 minutes per audio
+    MAX_TOTAL_AUDIO_DURATION_SECONDS: int = _env_int("MAX_TOTAL_AUDIO_DURATION_SECONDS", 5400) # 90 minutes aggregate
+    INPUT_CACHE_TTL_SECONDS: int = _env_int("INPUT_CACHE_TTL_SECONDS", 86400)         # 24 hours
+    ENABLE_MIXED_SOURCE_JOBS: bool = _env_flag("ENABLE_MIXED_SOURCE_JOBS", "true")
+
+    # ------------------------------------------------------------------
+    # Database Connection Pool
+    # ------------------------------------------------------------------
+    DB_POOL_SIZE: int = _env_int("DB_POOL_SIZE", 5)
+    DB_MAX_OVERFLOW: int = _env_int("DB_MAX_OVERFLOW", 10)
+    DB_POOL_TIMEOUT_SECONDS: int = _env_int("DB_POOL_TIMEOUT_SECONDS", 30)
+    DB_POOL_RECYCLE_SECONDS: int = _env_int("DB_POOL_RECYCLE_SECONDS", 1800)
 
     # ------------------------------------------------------------------
     # Conflict Detection
@@ -246,9 +278,9 @@ settings = Settings()
 
 # Providers supported for LLM reasoning — kept consistent across llm.py,
 # startup validation and the readiness probe.
-SUPPORTED_LLM_PROVIDERS = {"openrouter", "openai", "groq"}
+SUPPORTED_LLM_PROVIDERS = {"openrouter", "openai", "groq", "iti"}
 SUPPORTED_TRANSCRIBE_PROVIDERS = {"groq", "deepgram"}
-SUPPORTED_EMBEDDING_PROVIDERS = {"openai", "openrouter"}
+SUPPORTED_EMBEDDING_PROVIDERS = {"openai", "openrouter", "iti"}
 
 
 def llm_key_for(provider: str) -> Optional[str]:
@@ -256,6 +288,7 @@ def llm_key_for(provider: str) -> Optional[str]:
         "openrouter": settings.OPENROUTER_API_KEY,
         "openai": settings.OPENAI_API_KEY,
         "groq": settings.GROQ_API_KEY,
+        "iti": settings.ITI_API_KEY,
     }.get(provider)
 
 
@@ -270,6 +303,7 @@ def embedding_key_for(provider: str) -> Optional[str]:
     return {
         "openai": settings.OPENAI_API_KEY,
         "openrouter": settings.OPENROUTER_API_KEY,
+        "iti": settings.ITI_API_KEY,
     }.get(provider)
 
 
@@ -331,6 +365,10 @@ def collect_config_problems() -> List[str]:
         if not settings.DATABASE_URL:
             problems.append(
                 "DATABASE_URL is required in production for durable job/chunk/result storage."
+            )
+        if not settings.REDIS_URL and not getattr(settings, "ALLOW_INPROCESS_QUEUE_IN_PRODUCTION", False):
+            problems.append(
+                "REDIS_URL is required in production for durable queue infrastructure (or set ALLOW_INPROCESS_QUEUE_IN_PRODUCTION=true)."
             )
 
     return problems

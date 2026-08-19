@@ -20,7 +20,17 @@ import logging
 from typing import Any, Dict, List, Optional
 import uuid
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status, UploadFile, File, Form
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Request,
+    status,
+    UploadFile,
+    File,
+    Form,
+)
 from fastapi.responses import JSONResponse
 
 import json
@@ -41,16 +51,57 @@ from app.api.service import (
 from app.config import settings
 from app.services.job_store import sanitize_job_id
 from app.store.factory import get_stores
-from app.store.models import JobOptions, JobStatus, RETRYABLE_JOB_STATUSES, TERMINAL_JOB_STATUSES
+from app.store.models import (
+    JobOptions,
+    JobStatus,
+    RETRYABLE_JOB_STATUSES,
+    TERMINAL_JOB_STATUSES,
+)
 from app.worker.dispatch import dispatch_job
 from app.worker.state import build_worker_initial_state, make_initial_state
 
 logger = logging.getLogger("app.api.internal")
 
-router = APIRouter(prefix="/internal", tags=["internal"], dependencies=[Depends(require_internal_auth)])
+router = APIRouter(
+    prefix="/internal", tags=["internal"], dependencies=[Depends(require_internal_auth)]
+)
 
 
-MOCK_DOCUMENT_STORAGE: Dict[str, bytes] = {}
+from collections import OrderedDict
+
+
+class BoundedInMemoryStore:
+    """Thread-safe bounded memory store for tests/dev to prevent production RAM growth."""
+
+    def __init__(self, max_items: int = 50):
+        self._data: OrderedDict[str, bytes] = OrderedDict()
+        self._max_items = max_items
+
+    def __setitem__(self, key: str, value: bytes):
+        if settings.is_production:
+            return
+        if len(self._data) >= self._max_items:
+            self._data.popitem(last=False)
+        self._data[key] = value
+
+    def __getitem__(self, key: str) -> bytes:
+        return self._data[key]
+
+    def __contains__(self, key: str) -> bool:
+        if settings.is_production:
+            return False
+        return key in self._data
+
+    def get(self, key: str, default: Optional[bytes] = None) -> Optional[bytes]:
+        if settings.is_production:
+            return default
+        return self._data.get(key, default)
+
+    def clear(self):
+        self._data.clear()
+
+
+MOCK_DOCUMENT_STORAGE = BoundedInMemoryStore(max_items=50)
 
 
 def _links(job_id: str) -> Dict[str, str]:
@@ -62,20 +113,6 @@ def _links(job_id: str) -> Dict[str, str]:
     }
 
 
-def _options_from_request(req: CreateJobRequest) -> JobOptions:
-    o = req.options
-    return JobOptions(
-        generate_user_stories=o.generate_user_stories,
-        generate_summary=o.generate_summary,
-        enable_embeddings=o.enable_embeddings,
-        enable_hybrid_retrieval=o.enable_hybrid_retrieval,
-        language=o.language,
-        callback_url=o.callback_url,
-        priority=o.priority,
-    )
-
-
-# Helper to build options from CreateJobRequest for fingerprinting
 def _options_from_request(req: CreateJobRequest) -> JobOptions:
     o = req.options
     return JobOptions(
@@ -123,12 +160,15 @@ async def create_job(
     if not outcome.dispatch:
         logger.info(
             "job_id=%s duplicate/conflict handling -> http_status=%s idempotent=%s request_id=%s",
-            job_id, outcome.http_status, outcome.body.get("idempotent"), request_id,
+            job_id,
+            outcome.http_status,
+            outcome.body.get("idempotent"),
+            request_id,
         )
         return JSONResponse(status_code=outcome.http_status, content=outcome.body)
 
     rec = outcome.job
-    
+
     # Resolve inputs for prepare_and_dispatch_job
     raw_bytes = b""
     raw_text = ""
@@ -139,8 +179,13 @@ async def create_job(
     if req.input_type in ("text", "backend_transcript"):
         raw_text = req.content or ""
         file_type = "text" if req.input_type == "text" else "transcript"
-    else:  # backend_document / backend_audio
-        file_type = "document" if req.input_type == "backend_document" else "audio"
+    else:  # backend_document / backend_audio / backend_sources
+        if req.input_type == "backend_sources":
+            file_type = "sources"
+        elif req.input_type == "backend_audio":
+            file_type = "audio"
+        else:
+            file_type = "document"
 
     await prepare_and_dispatch_job(
         req,
@@ -154,12 +199,21 @@ async def create_job(
         audio_format=audio_format,
         transcribe_options=transcribe_options,
     )
-    
+
     logger.info(
         "job dispatched job_id=%s tenant=%s project=%s input_type=%s attempt=%s request_id=%s",
-        job_id, req.tenant_id, req.project_id, req.input_type, rec.attempt_number, request_id,
+        job_id,
+        req.tenant_id,
+        req.project_id,
+        req.input_type,
+        rec.attempt_number,
+        request_id,
     )
-    return JSONResponse(status_code=outcome.http_status, content=outcome.body)
+    return JSONResponse(
+        status_code=outcome.http_status,
+        content=outcome.body,
+        background=background_tasks,
+    )
 
 
 @router.post("/process", status_code=status.HTTP_202_ACCEPTED)
@@ -202,42 +256,123 @@ async def process_compatibility(
     if not project_id or not project_id.strip():
         raise HTTPException(status_code=400, detail="project_id is required")
 
-    uploads = list(files)
-    if file is not None:
-        uploads.append(file)
-    if not uploads:
-        raise HTTPException(status_code=400, detail="at least one file upload is required")
-    if file is not None and files:
+    try:
+        form = await request.form()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400, detail=f"Invalid multipart form data: {exc}"
+        ) from None
+
+    form_file_items = [
+        v
+        for k, v in form.multi_items()
+        if k == "file" and (isinstance(v, UploadFile) or hasattr(v, "filename"))
+    ]
+    form_files_items = [
+        v
+        for k, v in form.multi_items()
+        if k == "files" and (isinstance(v, UploadFile) or hasattr(v, "filename"))
+    ]
+
+    if (file is not None and bool(files)) or (form_file_items and form_files_items):
         raise HTTPException(
             status_code=400,
             detail="use either the legacy 'file' field or repeated 'files' fields, not both",
         )
 
-    if document_ids and document_id:
+    if form_files_items:
+        uploads = form_files_items
+    elif form_file_items:
+        uploads = form_file_items
+    else:
+        uploads = list(files)
+        if file is not None:
+            uploads.append(file)
+
+    if not uploads:
+        raise HTTPException(
+            status_code=400, detail="at least one file upload is required"
+        )
+
+    if len(uploads) > settings.MAX_SOURCES_PER_JOB:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many uploaded files ({len(uploads)} > maximum allowed {settings.MAX_SOURCES_PER_JOB})",
+        )
+
+    form_doc_id_items = [
+        v
+        for k, v in form.multi_items()
+        if k == "document_id" and isinstance(v, str) and v.strip()
+    ]
+    form_doc_ids_items = [
+        v
+        for k, v in form.multi_items()
+        if k == "document_ids" and isinstance(v, str) and v.strip()
+    ]
+
+    if form_doc_id_items and form_doc_ids_items:
         raise HTTPException(
             status_code=400,
             detail="use either legacy document_id or repeated document_ids, not both",
         )
-    if document_ids and len(document_ids) != len(uploads):
-        raise HTTPException(
-            status_code=400,
-            detail="document_ids must be repeated once for each uploaded file, in files order",
-        )
-    if document_id and len(uploads) != 1:
+
+    resolved_document_ids: List[str] = []
+    if form_doc_ids_items:
+        resolved_document_ids = form_doc_ids_items
+    elif len(form_doc_id_items) > 1:
+        resolved_document_ids = form_doc_id_items
+    elif document_ids:
+        resolved_document_ids = document_ids
+    elif form_doc_id_items:
+        resolved_document_ids = form_doc_id_items
+    elif document_id:
+        resolved_document_ids = [document_id]
+
+    if resolved_document_ids:
+        if len(resolved_document_ids) != len(uploads):
+            if len(uploads) == 1 and len(resolved_document_ids) == 1:
+                pass
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail="document_ids must be repeated once for each uploaded file, in files order",
+                )
+    elif document_id and len(uploads) != 1:
         raise HTTPException(
             status_code=400,
             detail="legacy document_id is only valid with a single uploaded file; use document_ids for multiple files",
         )
 
-    # 4. Validate each stream independently. Client filenames/content types are
-    # metadata only; signature detection decides the accepted type.
-    from app.services.file_inspection import detect_mime_and_type, MAX_DOC_SIZE, MAX_AUDIO_SIZE
+    # 4. Stream and validate each input safely without unbounded memory allocation.
+    from app.services.file_inspection import detect_mime_and_type
     import hashlib
+    import io
+
+    total_aggregate_bytes = 0
     validated_inputs: List[Dict[str, Any]] = []
     for index, upload in enumerate(uploads):
-        file_bytes = await upload.read()
+        hasher = hashlib.sha256()
+        buffer = io.BytesIO()
+        file_size = 0
         filename = upload.filename or f"upload-{index + 1}"
-        file_size = len(file_bytes)
+
+        # Stream incrementally in 64 KB blocks
+        while True:
+            chunk = await upload.read(65536)
+            if not chunk:
+                break
+            file_size += len(chunk)
+            total_aggregate_bytes += len(chunk)
+            if total_aggregate_bytes > settings.MAX_TOTAL_UPLOAD_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Aggregate upload size exceeds limit of {settings.MAX_TOTAL_UPLOAD_BYTES} bytes",
+                )
+            buffer.write(chunk)
+            hasher.update(chunk)
+
+        file_bytes = buffer.getvalue()
         if file_size == 0:
             raise HTTPException(status_code=400, detail=f"file '{filename}' is empty")
 
@@ -247,25 +382,36 @@ async def process_compatibility(
                 status_code=415,
                 detail=f"file '{filename}' has an unsupported media type or unrecognized signature",
             )
-        limit = MAX_AUDIO_SIZE if file_type == "audio" else MAX_DOC_SIZE
+        limit = (
+            settings.MAX_AUDIO_BYTES
+            if file_type == "audio"
+            else settings.MAX_DOCUMENT_BYTES
+        )
         if file_size > limit:
             kind = "Audio" if file_type == "audio" else "Document"
-            raise HTTPException(status_code=413, detail=f"{kind} file '{filename}' is too large ({file_size} > {limit})")
+            raise HTTPException(
+                status_code=413,
+                detail=f"{kind} file '{filename}' is too large ({file_size} > {limit})",
+            )
 
-        file_hash = hashlib.sha256(file_bytes).hexdigest()
+        file_hash = hasher.hexdigest()
         supplied_id = document_ids[index] if document_ids else document_id
         if supplied_id is not None and not supplied_id.strip():
-            raise HTTPException(status_code=400, detail="document IDs must be non-empty when supplied")
+            raise HTTPException(
+                status_code=400, detail="document IDs must be non-empty when supplied"
+            )
         resolved_doc_id = supplied_id or f"doc_{file_hash[:16]}"
-        validated_inputs.append({
-            "document_id": resolved_doc_id,
-            "filename": filename,
-            "file_type": file_type,
-            "mime_type": mime_type,
-            "sha256_hash": file_hash,
-            "audio_format": subtype if file_type == "audio" else None,
-            "raw_bytes": file_bytes,
-        })
+        validated_inputs.append(
+            {
+                "document_id": resolved_doc_id,
+                "filename": filename,
+                "file_type": file_type,
+                "mime_type": mime_type,
+                "sha256_hash": file_hash,
+                "audio_format": subtype if file_type == "audio" else None,
+                "raw_bytes": file_bytes,
+            }
+        )
 
     resolved_ids = [item["document_id"] for item in validated_inputs]
     if len(set(resolved_ids)) != len(resolved_ids):
@@ -274,21 +420,43 @@ async def process_compatibility(
             detail="each uploaded file must have a unique document ID; supply distinct document_ids for duplicate content",
         )
 
-    input_types = {item["file_type"] == "audio" for item in validated_inputs}
-    if len(input_types) > 1:
+    audio_count = sum(1 for item in validated_inputs if item["file_type"] == "audio")
+    doc_count = sum(1 for item in validated_inputs if item["file_type"] != "audio")
+    if audio_count > settings.MAX_AUDIO_SOURCES_PER_JOB:
         raise HTTPException(
             status_code=400,
-            detail="mixed document and audio uploads are not supported; submit them as separate jobs",
-        )
-    if validated_inputs[0]["file_type"] == "audio" and len(validated_inputs) > 1:
-        raise HTTPException(
-            status_code=400,
-            detail="multiple audio uploads are not supported; submit one audio file per job",
+            detail=f"Too many audio files ({audio_count} > maximum allowed {settings.MAX_AUDIO_SOURCES_PER_JOB})",
         )
 
-    mapped_input_type = "backend_audio" if validated_inputs[0]["file_type"] == "audio" else "backend_document"
+    from app.services.source_processing.audio import get_audio_duration_seconds
+    total_audio_duration = 0.0
+    max_total_audio = getattr(settings, "MAX_TOTAL_AUDIO_DURATION_SECONDS", 5400)
+    for item in validated_inputs:
+        if item["file_type"] == "audio":
+            dur = get_audio_duration_seconds(item.get("raw_bytes") or b"", item.get("audio_format") or "mp3")
+            if dur is not None:
+                total_audio_duration += dur
+
+    if total_audio_duration > max_total_audio:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Aggregate audio duration ({total_audio_duration:.1f}s) exceeds limit of {max_total_audio}s",
+        )
+
+    if (audio_count > 0 and doc_count > 0) or audio_count > 1:
+        if audio_count > 0 and doc_count > 0 and not getattr(settings, "ENABLE_MIXED_SOURCE_JOBS", True):
+            raise HTTPException(
+                status_code=400,
+                detail="Mixed document and audio source jobs are disabled by ENABLE_MIXED_SOURCE_JOBS",
+            )
+        mapped_input_type = "backend_sources"
+    elif audio_count == 1:
+        mapped_input_type = "backend_audio"
+    else:
+        mapped_input_type = "backend_document"
 
     from app.api.schemas import SourceDocumentIn, CreateJobRequest, JobOptionsIn
+
     source_docs = [
         SourceDocumentIn(
             document_id=item["document_id"],
@@ -323,7 +491,9 @@ async def process_compatibility(
         reprocess=reprocess,
     )
 
-    outcome = await handle_job_creation(req, job_id=sanitized_job_id, request_id=request_id)
+    outcome = await handle_job_creation(
+        req, job_id=sanitized_job_id, request_id=request_id
+    )
     if not outcome.dispatch:
         return JSONResponse(status_code=outcome.http_status, content=outcome.body)
 
@@ -333,27 +503,37 @@ async def process_compatibility(
         MOCK_DOCUMENT_STORAGE[item["document_id"]] = item["raw_bytes"]
 
     single_input = validated_inputs[0] if len(validated_inputs) == 1 else None
-    # Audio has one supported processing shape: a single byte stream routed to
-    # transcribe.  The multipart field name is only a compatibility detail and
-    # must not send one audio item through the multi-document ingest path.
-    is_single_source = file is not None or bool(
-        single_input and single_input["file_type"] == "audio"
+    is_single_source = len(validated_inputs) == 1
+    found_audio_fmt = next(
+        (item["audio_format"] for item in validated_inputs if item.get("audio_format")),
+        None,
     )
+
     await prepare_and_dispatch_job(
         req,
         rec,
         background_tasks=background_tasks,
         request_id=request_id,
-        raw_bytes=single_input["raw_bytes"] if is_single_source and single_input else b"",
-        raw_inputs=[] if is_single_source else validated_inputs,
+        raw_bytes=(
+            single_input["raw_bytes"] if is_single_source and single_input else b""
+        ),
+        raw_inputs=validated_inputs,
         raw_text="",
-        file_type=single_input["file_type"] if single_input else "document",
+        file_type=(
+            single_input["file_type"]
+            if single_input
+            else ("sources" if mapped_input_type == "backend_sources" else "document")
+        ),
         metadata=parsed_metadata,
-        audio_format=single_input["audio_format"] if single_input else None,
+        audio_format=single_input["audio_format"] if single_input else found_audio_fmt,
         transcribe_options={},
     )
 
-    return JSONResponse(status_code=outcome.http_status, content=outcome.body)
+    return JSONResponse(
+        status_code=outcome.http_status,
+        content=outcome.body,
+        background=background_tasks,
+    )
 
 
 @router.post("/process-json", status_code=status.HTTP_202_ACCEPTED)
@@ -384,6 +564,7 @@ async def process_json_compatibility(
     file_type = "text" if req.source_type == "text" else "transcript"
 
     from app.api.schemas import CreateJobRequest
+
     canonical_req = CreateJobRequest(
         job_id=sanitized_job_id,
         tenant_id=req.tenant_id,
@@ -396,7 +577,9 @@ async def process_json_compatibility(
         reprocess=req.reprocess,
     )
 
-    outcome = await handle_job_creation(canonical_req, job_id=sanitized_job_id, request_id=request_id)
+    outcome = await handle_job_creation(
+        canonical_req, job_id=sanitized_job_id, request_id=request_id
+    )
     if not outcome.dispatch:
         return JSONResponse(status_code=outcome.http_status, content=outcome.body)
 
@@ -414,7 +597,11 @@ async def process_json_compatibility(
         transcribe_options={},
     )
 
-    return JSONResponse(status_code=outcome.http_status, content=outcome.body)
+    return JSONResponse(
+        status_code=outcome.http_status,
+        content=outcome.body,
+        background=background_tasks,
+    )
 
 
 @router.get("/jobs/{job_id}")
@@ -454,17 +641,28 @@ async def cancel_job(job_id: str):
 
     if rec.status in TERMINAL_JOB_STATUSES:
         # Already finished — cannot cancel; report the terminal status.
-        return {"job_id": job_id, "status": rec.status.value, "cancelled": False,
-                "detail": "job already terminal"}
+        return {
+            "job_id": job_id,
+            "status": rec.status.value,
+            "cancelled": False,
+            "detail": "job already terminal",
+        }
 
     # Request cooperative cancellation; if still QUEUED, mark CANCELLED now.
     await stores.jobs.request_cancel(job_id)
     if rec.status == JobStatus.QUEUED:
-        await stores.jobs.set_status(job_id, JobStatus.CANCELLED, current_node="cancelled")
+        await stores.jobs.set_status(
+            job_id, JobStatus.CANCELLED, current_node="cancelled"
+        )
         from app.progress import update_progress
 
-        update_progress(job_id, "cancelled", rec.progress_pct, "FAILED",
-                        error="JOB_CANCELLED: cancelled while queued")
+        update_progress(
+            job_id,
+            "cancelled",
+            rec.progress_pct,
+            "FAILED",
+            error="JOB_CANCELLED: cancelled while queued",
+        )
     return {"job_id": job_id, "status": JobStatus.CANCELLED.value, "cancelled": True}
 
 
@@ -516,7 +714,9 @@ async def retry_job(job_id: str, background_tasks: BackgroundTasks, request: Req
 
     from app.progress import update_progress
 
-    update_progress(job_id, updated.current_node, updated.progress_pct, updated.status.value)
+    update_progress(
+        job_id, updated.current_node, updated.progress_pct, updated.status.value
+    )
 
     # Reconstruct input: the worker or in-process queue factory will build this state asynchronously.
     await dispatch_job(
@@ -526,10 +726,18 @@ async def retry_job(job_id: str, background_tasks: BackgroundTasks, request: Req
         background_tasks=background_tasks,
         request_id=request_id,
     )
-    logger.info("job retry dispatched job_id=%s attempt=%s request_id=%s",
-                job_id, updated.attempt_number, request_id)
-    return {"job_id": job_id, "status": JobStatus.QUEUED.value,
-            "attempt_number": updated.attempt_number, "links": _links(job_id)}
+    logger.info(
+        "job retry dispatched job_id=%s attempt=%s request_id=%s",
+        job_id,
+        updated.attempt_number,
+        request_id,
+    )
+    return {
+        "job_id": job_id,
+        "status": JobStatus.QUEUED.value,
+        "attempt_number": updated.attempt_number,
+        "links": _links(job_id),
+    }
 
 
 @router.post("/jobs/{job_id}/callback-test")
@@ -561,7 +769,7 @@ def _build_regeneration_prompt(req: RegenerateStoryRequest) -> str:
         f"Actor: {req.actor or 'None'}",
         f"Goal: {req.goal or 'None'}",
         f"Priority: {req.priority}",
-        f"Human Feedback/Instruction: {req.feedback}"
+        f"Human Feedback/Instruction: {req.feedback}",
     ]
     if req.original_story:
         parts.append(f"Original Story (to be refined/improved): {req.original_story}")
@@ -575,22 +783,22 @@ async def regenerate_story(req: RegenerateStoryRequest):
     """Stateless regeneration of a single user story with feedback."""
     llm = get_llm()
     if llm is None:
-        raise HTTPException(status_code=503, detail="LLM reasoning service not initialized or API keys missing.")
-    
+        raise HTTPException(
+            status_code=503,
+            detail="LLM reasoning service not initialized or API keys missing.",
+        )
+
     system_prompt = load_prompt(PromptId.REGENERATE_STORY_V1)
     user_prompt = _build_regeneration_prompt(req)
-    
+
     try:
         timeout = getattr(settings, "PROVIDER_TIMEOUT_SECONDS", 120)
         raw = await asyncio.wait_for(
-            llm.ainvoke([
-                ("system", system_prompt),
-                ("user", user_prompt)
-            ]),
-            timeout=float(timeout)
+            llm.ainvoke([("system", system_prompt), ("user", user_prompt)]),
+            timeout=float(timeout),
         )
         content = getattr(raw, "content", None) or str(raw)
-        
+
         content = content.strip()
         if content.startswith("```"):
             lines = content.splitlines()
@@ -599,19 +807,27 @@ async def regenerate_story(req: RegenerateStoryRequest):
             if lines and lines[-1].startswith("```"):
                 lines = lines[:-1]
             content = "\n".join(lines).strip()
-            
+
         parsed = json.loads(content)
         from app.api.schemas import RegenerateStoryResponse
+
         response = RegenerateStoryResponse.model_validate(parsed)
         return response
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="LLM reasoning request timed out.")
     except (json.JSONDecodeError, ValidationError) as e:
-        logger.error("Failed to parse or validate LLM response for story regeneration: %s", e)
-        raise HTTPException(status_code=502, detail=f"LLM response parsing or validation failed: {str(e)}")
+        logger.error(
+            "Failed to parse or validate LLM response for story regeneration: %s", e
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"LLM response parsing or validation failed: {str(e)}",
+        )
     except Exception as e:
         logger.error("Unexpected error in story regeneration: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to regenerate story: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to regenerate story: {str(e)}"
+        )
 
 
 @router.get("/documents/{document_id}/content")
@@ -623,6 +839,7 @@ async def get_document_content(document_id: str):
     if document_id in MOCK_DOCUMENT_STORAGE:
         content_bytes = MOCK_DOCUMENT_STORAGE[document_id]
         from app.services.file_inspection import detect_mime_and_type
+
         _, mime_type, _ = detect_mime_and_type(content_bytes)
         return Response(content=content_bytes, media_type=mime_type)
 
@@ -635,35 +852,55 @@ async def get_document_content(document_id: str):
     # 3. Check Redis cache for stashed bytes if no URL
     if not doc.file_url:
         from app.worker.state import load_input
+
         cached = load_input(doc.job_id)
         if cached:
             for cached_input in cached.get("raw_inputs", []) or []:
                 if cached_input.get("document_id") == document_id:
                     import base64
-                    content_bytes = base64.b64decode(cached_input.get("raw_bytes_b64", "") or "")
-                    return Response(content=content_bytes, media_type=doc.mime_type or "application/octet-stream")
+
+                    content_bytes = base64.b64decode(
+                        cached_input.get("raw_bytes_b64", "") or ""
+                    )
+                    return Response(
+                        content=content_bytes,
+                        media_type=doc.mime_type or "application/octet-stream",
+                    )
             b64 = cached.get("raw_bytes_b64", "")
             if b64:
                 import base64
+
                 content_bytes = base64.b64decode(b64)
-                return Response(content=content_bytes, media_type=doc.mime_type or "application/octet-stream")
+                return Response(
+                    content=content_bytes,
+                    media_type=doc.mime_type or "application/octet-stream",
+                )
 
     # 4. If URL exists, fetch the bytes using the secure fetcher
     if doc.file_url:
         from app.clients.backend import BackendDocumentClient, SourceDownloadError
+
         client = BackendDocumentClient()
         try:
-            content_bytes = await client.fetch_document_bytes({
-                "document_id": doc.backend_document_id,
-                "file_type": doc.source_type,
-                "mime_type": doc.mime_type,
-                "storage_key": doc.storage_key,
-                "file_url": doc.file_url,
-                "sha256_hash": doc.sha256_hash,
-            })
-            return Response(content=content_bytes, media_type=doc.mime_type or "application/octet-stream")
+            content_bytes = await client.fetch_document_bytes(
+                {
+                    "document_id": doc.backend_document_id,
+                    "file_type": doc.source_type,
+                    "mime_type": doc.mime_type,
+                    "storage_key": doc.storage_key,
+                    "file_url": doc.file_url,
+                    "sha256_hash": doc.sha256_hash,
+                }
+            )
+            return Response(
+                content=content_bytes,
+                media_type=doc.mime_type or "application/octet-stream",
+            )
         except SourceDownloadError as e:
-            raise HTTPException(status_code=400, detail=f"Source download failed: {str(e)}")
+            raise HTTPException(
+                status_code=400, detail=f"Source download failed: {str(e)}"
+            )
 
-    raise HTTPException(status_code=404, detail="Raw content is not cached or reachable")
-
+    raise HTTPException(
+        status_code=404, detail="Raw content is not cached or reachable"
+    )

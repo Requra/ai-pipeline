@@ -49,7 +49,8 @@ async def run_diagnostic():
             if lines and lines[-1].startswith("```"): lines = lines[:-1]
             content = "\n".join(lines).strip()
             
-        parsed = json.loads(content)
+        from app.utils.json_parsing import loads_loose
+        parsed = loads_loose(content)
         validated = ExtractionResponse.model_validate(parsed)
         print(f"JSON Parse/Validation: SUCCESS ({len(validated.requirements)} items)")
         

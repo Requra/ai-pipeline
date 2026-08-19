@@ -18,7 +18,7 @@ async def detect_file_type_node(state: PipelineState) -> dict:
     Inspect raw bytes to determine file type and metadata.
     Does not trust state['file_type'] from frontend.
     """
-    print("--- DETECT FILE TYPE NODE ---")
+    logger.info("--- DETECT FILE TYPE NODE ---")
     update_progress(state.get("job_id"), "detect_file_type", 5, "PROCESSING")
     
     raw_inputs = state.get("raw_inputs") or []
@@ -43,7 +43,8 @@ async def detect_file_type_node(state: PipelineState) -> dict:
                     "status": "rejected",
                     "error": f"FILE_TYPE_REJECTED: unsupported file format for '{filename}' (signature not recognized)",
                 }
-            max_size = MAX_AUDIO_SIZE if file_type == "audio" else MAX_DOC_SIZE
+            from app.config import settings
+            max_size = settings.MAX_AUDIO_BYTES if file_type == "audio" else settings.MAX_DOCUMENT_BYTES
             if len(file_bytes) > max_size:
                 return {
                     "status": "rejected",
@@ -66,16 +67,54 @@ async def detect_file_type_node(state: PipelineState) -> dict:
                     "sha256_hash": normalized.get("sha256_hash"),
                 })
 
-        if len(detected_kinds) != 1:
+        audio_count = sum(1 for item in normalized_inputs if item["file_type"] == "audio")
+        max_audio = getattr(settings, "MAX_AUDIO_SOURCES_PER_JOB", 3)
+        if audio_count > max_audio:
             return {
                 "status": "rejected",
-                "error": "FILE_TYPE_REJECTED: mixed document and audio inputs are not supported",
+                "error": f"FILE_TYPE_REJECTED: audio source count ({audio_count}) exceeds maximum allowed per job ({max_audio})",
             }
-        if detected_kinds == {"audio"} and len(normalized_inputs) > 1:
+
+        from app.services.source_processing.audio import get_audio_duration_seconds
+        total_audio_duration = 0.0
+        max_audio_duration = getattr(settings, "MAX_AUDIO_DURATION_SECONDS", 1800)
+        max_total_audio_duration = getattr(settings, "MAX_TOTAL_AUDIO_DURATION_SECONDS", 5400)
+        for item in normalized_inputs:
+            if item["file_type"] == "audio":
+                dur = get_audio_duration_seconds(item.get("raw_bytes") or b"", item.get("audio_format") or "mp3")
+                if dur is not None:
+                    if dur > max_audio_duration:
+                        return {
+                            "status": "rejected",
+                            "error": f"FILE_TYPE_REJECTED: audio duration {dur:.1f}s for '{item.get('filename')}' exceeds maximum allowed per file ({max_audio_duration}s)",
+                        }
+                    total_audio_duration += dur
+
+        if total_audio_duration > max_total_audio_duration:
             return {
                 "status": "rejected",
-                "error": "FILE_TYPE_REJECTED: multiple audio inputs are not supported",
+                "error": f"FILE_TYPE_REJECTED: aggregate audio duration ({total_audio_duration:.1f}s) exceeds maximum allowed per job ({max_total_audio_duration}s)",
             }
+
+        has_audio = "audio" in detected_kinds
+        has_doc = "document" in detected_kinds
+        if (has_audio and has_doc) or audio_count > 1:
+            if has_audio and has_doc and not getattr(settings, "ENABLE_MIXED_SOURCE_JOBS", True):
+                return {
+                    "status": "rejected",
+                    "error": "FILE_TYPE_REJECTED: mixed document and audio sources are disabled by ENABLE_MIXED_SOURCE_JOBS",
+                }
+            overall_file_type = "sources"
+        elif has_audio:
+            overall_file_type = "audio"
+        else:
+            overall_file_type = "document"
+
+        audio_fmt = None
+        for item in normalized_inputs:
+            if item.get("file_type") == "audio":
+                audio_fmt = item.get("audio_format")
+                break
 
         first = normalized_inputs[0]
         return {
@@ -87,8 +126,8 @@ async def detect_file_type_node(state: PipelineState) -> dict:
                 mime_type=first["mime_type"],
                 sha256_hash=first.get("sha256_hash") or hashlib.sha256(first["raw_bytes"]).hexdigest(),
             ),
-            "file_type": "audio" if detected_kinds == {"audio"} else "document",
-            "audio_format": first.get("audio_format") if detected_kinds == {"audio"} else None,
+            "file_type": overall_file_type,
+            "audio_format": audio_fmt,
             "status": "type_detected",
         }
 

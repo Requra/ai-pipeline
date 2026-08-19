@@ -1,6 +1,6 @@
-# Contributor onboarding
+# Contributor Onboarding
 
-Purpose: give a new developer a practical first path and safe change rules. Audience: contributors working on the API, worker, retrieval, or AI stages.
+Purpose: Give a new developer a practical first path and safe change rules. Audience: Contributors working on the API, worker, retrieval, or AI stages.
 
 ## First day
 
@@ -18,8 +18,9 @@ Start at the route in `app/main.py` or `app/api/internal.py`, follow `app/api/se
 
 | Change | Inspect first | Update/test |
 |---|---|---|
-| Add or change an endpoint | `app/api/internal.py`, `app/api/schemas.py`, auth dependency | OpenAPI artifact policy, API tests, status/error docs. |
+| Add or change an endpoint | `app/api/internal.py`, `app/api/schemas.py`, auth dependency | OpenAPI artifact policy (`docs/openapi.json`), API tests, status/error docs. |
 | Modify a pipeline stage | `app/graph/pipeline.py`, `PipelineState`, neighboring node contracts | Focused node tests, pipeline/contract tests, [04-ai-pipeline.md](04-ai-pipeline.md). |
+| Modify source prep / STT | `app/nodes/prepare_sources.py`, `app/services/source_processing/` | Source prep tests, STT fallback tests, [04-ai-pipeline.md](04-ai-pipeline.md). |
 | Change a prompt | `app/prompts/registry.py`, template, prompt snapshot hashes | Prompt loader/registry/snapshot tests and provider-mocked stage tests. |
 | Change a public result field | V1 models and `format_node.py` | Contract tests, backend integration review, API/data-flow docs. |
 | Change storage | `app/store/base.py`, memory store, ORM models, repositories | Migration, memory tests, marked DB integration test, storage docs. |
@@ -42,8 +43,8 @@ Run `poetry run pytest -q` and any focused tests. Include migrations for schema 
 
 ## Avoid these mistakes
 
-- Do not call the AI service's 15-node graph “14 nodes.”
-- Do not treat Redis as durable storage or assume a retry can recover expired input.
+- Do not call the AI service's 13-node graph “14 nodes” or “15 nodes.”
+- Do not treat Redis as durable storage or assume a retry can recover expired input without backend source references.
 - Do not assume a callback means the result is persisted at the receiver; polling is the durable retrieval path.
 - Do not add frontend/backend behavior to this repository's documentation as if it were implemented here.
 - Do not keep completed plans, generated reports, or duplicated endpoint walkthroughs as permanent Markdown.

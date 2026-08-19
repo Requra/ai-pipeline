@@ -169,6 +169,15 @@ def _conditional_approval_and_quantity_are_composable(
     return bool(approval_text and quantity_text and conditional.search(approval_text))
 
 
+_DISPOSITION_RANK = {
+    "accepted": 4,
+    "deferred": 3,
+    "proposed": 2,
+    "uncertain": 1,
+    "rejected": 0,
+}
+
+
 def _higher_priority(p1: str, p2: str) -> str:
     return p1 if _PRIORITY_RANK.get(p1, 1) >= _PRIORITY_RANK.get(p2, 1) else p2
 
@@ -185,6 +194,12 @@ def _merge_into(base: ExtractedRequirement, other: ExtractedRequirement) -> None
 
     base.confidence = max(base.confidence, other.confidence)
     base.priority = _higher_priority(base.priority, other.priority)
+
+    # Disposition precedence
+    base_disp = getattr(base, "disposition", "accepted")
+    other_disp = getattr(other, "disposition", "accepted")
+    if _DISPOSITION_RANK.get(other_disp, 0) > _DISPOSITION_RANK.get(base_disp, 0):
+        base.disposition = other_disp
 
     for label in other.candidate_labels:
         if label not in base.candidate_labels:
@@ -261,6 +276,25 @@ def _canonical_components(
     token_sets = [fact_tokens(req.text) for req in reqs]
     for left in range(len(reqs)):
         for right in range(left + 1, len(reqs)):
+            left_disp = getattr(reqs[left], "disposition", "accepted")
+            right_disp = getattr(reqs[right], "disposition", "accepted")
+
+            # Conflicting disposition (accepted vs rejected): never merge
+            if (left_disp == "accepted" and right_disp == "rejected") or (
+                left_disp == "rejected" and right_disp == "accepted"
+            ):
+                reqs[right].needs_review = True
+                reqs[left].needs_review = True
+                note = "[DISPOSITION_CONFLICT: accepted requirement conflicts with rejected proposal]"
+                reqs[right].review_reason = " ".join(
+                    part for part in (reqs[right].review_reason, note) if part
+                )
+                reqs[left].review_reason = " ".join(
+                    part for part in (reqs[left].review_reason, note) if part
+                )
+                actor_review_ids.append(reqs[right].id)
+                continue
+
             exact = bool(norms[left]) and norms[left] == norms[right]
             near = (
                 min(len(token_sets[left]), len(token_sets[right])) >= 4

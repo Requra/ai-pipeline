@@ -1,0 +1,28 @@
+{
+  "name": "requra-ai-migrate",
+  "billing": {
+    "deploymentPlan": "nf-compute-10"
+  },
+  "backoffLimit": 1,
+  "deployment": {
+    "docker": {
+      "configType": "customCommand",
+      "customCommand": "alembic upgrade head"
+    },
+    "vcs": {
+      "projectType": "github",
+      "projectUrl": "https://github.com/Requra/ai-pipeline",
+      "projectBranch": "feat/doc-audio-processing"
+    }
+  },
+  "buildSettings": {
+    "dockerfile": {
+      "buildEngine": "kaniko",
+      "dockerFilePath": "/ai-service/Dockerfile",
+      "dockerWorkDir": "/ai-service"
+    }
+  },
+  "settings": {
+    "backoffLimit": 1
+  }
+}

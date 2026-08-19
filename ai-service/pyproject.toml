@@ -52,4 +52,5 @@ testpaths = ["tests"]
 pythonpath = ["."]
 markers = [
     "integration: requires an explicitly configured external service",
+    "real_e2e: opt-in real provider end-to-end evaluation suite",
 ]

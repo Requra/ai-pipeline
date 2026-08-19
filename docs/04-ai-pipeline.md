@@ -1,166 +1,205 @@
-# AI pipeline
+# AI Pipeline Architecture & Execution Trace
 
-Purpose: trace the implemented Requra.AI AI flow from input to persisted output, including prompts, retrieval, validation, retries, and gaps. Audience: AI engineers, backend engineers, reviewers, and contributors changing pipeline behavior.
+Purpose: Trace the implemented Requra.AI pipeline from request arrival to persisted output, including source preparation, graph topology, prompts, retrieval, evidence grounding, validation, quality repair, and error handling. Audience: AI engineers, backend engineers, reviewers, and platform contributors.
 
 Code paths use the package shorthand `app/...` below; repository-relative, they are under `ai-service/app/...`.
 
 ## Implementation status legend
 
-- **Implemented** means reachable from the current graph or worker/API code and covered by tests or direct source inspection.
-- **Conditional** means implemented but controlled by configuration or per-job options.
-- **Compatibility** means present for older callers, not the preferred production path.
-- **Gap** means the repository does not implement the stronger behavior an older document claimed or a production system may eventually require.
+- **Implemented:** Reachable from the current active graph or worker/API code and covered by tests or direct source inspection.
+- **Conditional:** Implemented but controlled by configuration or per-job options (e.g., embeddings, conflict detection, quality repair).
+- **Compatibility:** Present for older callers or lower-level helpers, funneled into canonical paths.
+- **Operational Gap:** External infrastructure or operational policy not directly enforced in-process (e.g., external cron for retention).
 
 ## Entry points and inputs
 
 ### Production-shaped job entry point
 
-`POST /internal/jobs` in `ai-service/app/api/internal.py` accepts `CreateJobRequest` from `ai-service/app/api/schemas.py`. Every `/internal/*` route depends on `require_internal_auth()` and therefore expects the bearer value configured in `AI_INTERNAL_SERVICE_TOKEN`.
+`POST /internal/jobs` in `ai-service/app/api/internal.py` accepts `CreateJobRequest` from `ai-service/app/api/schemas.py`. Every `/internal/*` route requires `require_internal_auth()` and expects the bearer token configured in `AI_INTERNAL_SERVICE_TOKEN`.
 
-The four input types are:
+The primary input types are:
 
 | Input type | Required input | Initial file type | Pipeline path |
 |---|---|---|---|
-| `text` | non-empty `content` | `text` | ingest → parse/chunk |
-| `backend_transcript` | non-empty `content` | `transcript` | ingest → parse/chunk; no STT |
-| `backend_document` | `source_documents` references | `document` | worker fetch/recovery → detect → ingest → parse/chunk |
-| `backend_audio` | `source_documents` references | `audio` | worker fetch/recovery → detect → ingest → transcribe → parse/chunk |
+| `text` | non-empty `content` | `text` | detect → prepare_sources → build_source_index |
+| `backend_transcript` | non-empty `content` | `transcript` | detect → prepare_sources → build_source_index (no STT call) |
+| `backend_document` | `source_documents` references | `document` | worker recovery → detect → prepare_sources → build_source_index |
+| `backend_audio` | `source_documents` references | `audio` | worker recovery → detect → prepare_sources (duration check + STT) → build_source_index |
+| `backend_sources` | mixed `source_documents` | `sources` | worker recovery → detect → prepare_sources (parallel docs + STT) → build_source_index |
 
-`project_id` is required by the request schema; `tenant_id` is optional in the Python model but important for cross-tenant isolation. `content` and source references are validated in `create_job()` before job creation. The request fingerprint in `app/services/fingerprint.py` makes duplicate submission safe by distinguishing identical requests from reused job ids with different content/options.
+`project_id` is required by the request schema; `tenant_id` provides cross-tenant isolation in persistent stores. The request fingerprint in `app/services/fingerprint.py` prevents duplicate processing by distinguishing identical requests from reused job IDs with changed payloads.
 
-Compatibility entry points are also real and tested:
+Compatibility entry points:
 
-- `POST /process-json` and `POST /process` in `ai-service/app/main.py` are unauthenticated demo/dev routes.
-- `POST /internal/process-json` and `POST /internal/process` in `ai-service/app/api/internal.py` are protected compatibility routes.
-- All routes funnel into the same dispatch and graph path; they are not separate pipelines.
+- `POST /process-json` and `POST /process` in `app/main.py` are unauthenticated demo/dev routes.
+- `POST /internal/process-json` and `POST /internal/process` in `app/api/internal.py` are protected compatibility routes supporting multipart multi-document and mixed-source streaming.
+- All routes funnel into the same worker dispatch and graph execution path.
 
-## Pipeline overview
+## Active LangGraph Pipeline Topology
+
+The active pipeline in `app/graph/pipeline.py` is compiled by `build_pipeline()` as a **13-node DAG** with a single bounded quality repair cycle. `PIPELINE_RECURSION_LIMIT = 60` is a LangGraph super-step execution budget.
 
 ```mermaid
 flowchart LR
-    A["API job or compatibility upload"] --> B["Job validation, fingerprint, auth"]
-    B --> C["Worker input recovery\nRedis cache or backend source"]
-    C --> D["detect_file_type"]
-    D --> E["ingest\nparse, normalize, PII mask, relevance"]
-    E -->|audio| F["transcribe\nGroq or Deepgram"]
-    E -->|document/text/transcript| G["parse_to_chunks"]
-    F --> G
-    E -->|rejected/error| N["format"]
-    G --> H["build_source_index\nBM25 + optional chunk embeddings"]
-    H --> I["extract\nstructured requirements"]
-    I --> J["dedupe_requirements\nmerge + optional conflict detection"]
-    J --> K["retrieve_evidence\nlexical or hybrid"]
-    K --> L["classify"]
-    L --> M["evidence_grounding"]
-    M --> O["generate\nstories + acceptance criteria"]
-    O --> P["quality_gate"]
-    P -->|repair enabled and repairable issue| Q["repair_stories"]
-    Q --> P
-    P --> R["summarize"]
-    R --> N
-    N --> S["JobResult"]
-    S --> T["persist result, status, events"]
-    T --> U["polling or backend callback"]
+    A["detect_file_type"] --> B["prepare_sources"]
+    B -->|usable chunks| C["build_source_index"]
+    B -->|rejected / error| M["format"]
+    C --> D["extract"]
+    D --> E["dedupe_requirements"]
+    E --> F["retrieve_evidence"]
+    F --> G["classify"]
+    G --> H["evidence_grounding"]
+    H --> I["generate"]
+    I --> J["quality_gate"]
+    J -->|repairable issue & attempts remain| K["repair_stories"]
+    K --> J
+    J -->|passed / repair done| L["summarize"]
+    L --> M
+    M --> END(["[END]"])
 ```
 
-The graph is built in `ai-service/app/graph/pipeline.py` by `build_pipeline()` and exported as `graph`. It registers 15 nodes. `PIPELINE_RECURSION_LIMIT = 60` is a LangGraph step budget, not a cycle count. The only graph loop is quality repair back to `quality_gate` and is bounded by `MAX_REPAIR_ATTEMPTS`.
+## Source Preparation Subsystem (`prepare_sources`)
 
-## Detailed execution trace
+Modality-specific work is encapsulated behind `prepare_sources_node` (`app/nodes/prepare_sources.py`) and the service layer (`app/services/source_processing/`). Rather than placing separate `ingest`, `transcribe`, and `parse_to_chunks` nodes on the top-level graph, `prepare_sources` runs bounded concurrent extraction, transcription, PII masking, and chunking across heterogeneous sources, converging them into a single unified corpus before indexing.
 
-| # | Stage | Input | Processing and output | Implementation |
+```mermaid
+flowchart TD
+    subgraph Inputs["Heterogeneous Inputs"]
+        PDF["PDF Documents"]
+        DOCX["DOCX Documents"]
+        TXT["Plain Text / Notes"]
+        AUD["Audio Recordings"]
+        TRN["Transcripts"]
+    end
+
+    subgraph PrepBoundary["prepare_sources (Bounded Concurrency)"]
+        direction TB
+        subgraph DocTrack["Document Processing Track"]
+            D1["Format Extraction & Normalization"] --> D2["Pattern-Based PII Masking"]
+            D2 --> D3["Snippet Relevance Check"]
+            D3 --> D4["Sliding Window / Page Chunking"]
+        end
+
+        subgraph AudTrack["Audio Processing Track"]
+            A1["Signature & Duration Validation"] --> A2["ASR: Groq Whisper / Deepgram"]
+            A2 --> A3["Transcript Text Sanitization"]
+            A3 --> A4["Speech Chunking (Time & Speaker)"]
+        end
+    end
+
+    PDF --> D1
+    DOCX --> D1
+    TXT --> D1
+    TRN --> D1
+    AUD --> A1
+
+    D4 --> Corpus[("Unified Provenance-Rich Chunk Corpus")]
+    A4 --> Corpus
+    Corpus --> SharedIdx["Shared Source Index (BM25 + pgvector)"]
+```
+
+### Source Processing Capabilities
+
+1. **Document Track (`app/services/source_processing/document.py`):**
+   - PDF: Page-aware text extraction (PyMuPDF/fitz), retaining page numbers.
+   - DOCX: Paragraph and table XML parsing, retaining structural block references.
+   - Text/Transcripts: UTF-8 normalization, preserving speaker labels if present.
+   - PII Masking: Pattern-based credit card, secret key, email, and phone redaction before LLM exposure.
+   - Relevance: Tri-state structured evaluation (`relevant` | `uncertain` | `irrelevant`) using domain-agnostic prompt (`ingest_relevance_v1`) or conservative deterministic analysis with fail-open guarantees.
+   - Multi-Span Sampling: Representative head, middle, and tail text windows (bounded to 3,000 characters) to ensure requirements buried after greetings/introductions are captured.
+   - Chunking: Structural paragraph chunking for DOCX, page-aware chunking for PDF, or coordinate sliding windows.
+
+2. **Audio Track (`app/services/source_processing/audio.py`):**
+   - Validation: Magic byte inspection, ffmpeg audio integrity, and duration limits (`MAX_AUDIO_DURATION_SECONDS`).
+   - STT Engine: Primary Groq Whisper (`whisper-large-v3`) with automatic failover to Deepgram (`nova-2`).
+   - Concurrency: Bounded by `STT_CONCURRENCY` to protect provider rate limits.
+   - Quality Separation: Distinguishes transcription errors (e.g. `TRANSCRIBE_EMPTY_TRANSCRIPT`) from semantic irrelevance.
+   - Relevance: Evaluates transcribed speech against requirements intent across all industry domains.
+   - Chunking: Bounded semantic windows preserving utterance timestamps (`start_time_sec`, `end_time_sec`), speaker labels, and ASR confidence.
+
+3. **Error Isolation & Relevance Semantics:**
+   - **Domain-Agnostic Intent**: Requirements are evaluated for functional/operational intent across all domains (agriculture, healthcare, logistics, retail, IoT, sports, etc.) without requiring software jargon (API, sprint, backend).
+   - **Tri-State Decision Model**: Rejection requires high-confidence evidence of complete irrelevance (recipes, song lyrics, lorem ipsum, noise). Ambiguous or domain-specific sources evaluate to `uncertain` and fail open to continue extraction.
+   - **Provider Failure Resilience**: LLM timeouts, rate limits, or JSON errors trigger conservative deterministic analysis and fail open (`method: fail_open_fallback`) with observability warnings.
+   - **Multi-Source Resilience**: In mixed uploads, an irrelevant source is isolated (`SOURCE_REJECTED_IRRELEVANT` warning) while usable sources continue. The job only terminates as `REJECTED` if all submitted sources are definitively irrelevant.
+
+## Detailed 13-Node Execution Trace
+
+| # | Node | Input | Processing and Output | Primary Implementation |
 |---:|---|---|---|---|
-| 1 | Job/auth validation | HTTP request | Pydantic validation, input-type requirements, job-id sanitization, bearer auth for internal routes, fingerprint/idempotency decision. | `app/api/internal.py` → `create_job()`; `app/api/deps.py`; `app/api/service.py` → `handle_job_creation()` |
-| 2 | Input reconstruction | Inline text/bytes, source refs, durable job | Redis input cache is preferred in Redis/RQ mode; missing cache can be rebuilt from PostgreSQL source references and backend text/content endpoints. | `app/worker/state.py` → `build_worker_initial_state()`; `app/clients/backend.py` |
-| 3 | File detection | `raw_bytes` and declared type | Inspects signatures and size limits; emits `file_type` and `source_metadata` or an error. | `app/nodes/detect_file_type.py`; `app/services/file_inspection.py` |
-| 4 | Ingest/relevance | Bytes, text, file type | Extracts PDF/DOCX/text, normalizes whitespace, masks detected emails/phones/secrets and Luhn-valid card candidates when enabled, then checks relevance with a snippet. LLM failure falls back to heuristic relevance. | `app/nodes/ingest.py` → `ingest_node()`, `_run_relevance_check()` |
-| 5 | Audio transcription | Validated audio bytes | Validates ffmpeg, optionally compresses/splits audio into overlapping windows, calls configured Groq or Deepgram adapter, cleans transcript text and records source chunks. | `app/nodes/transcribe.py` → `transcribe_node()` |
-| 6 | Chunking | Normalized text/transcript | PDF pages are preserved where available; other text uses a 3,000-character window with 500-character overlap. Chunks retain source/page/speaker/time offsets. | `app/nodes/parse_to_chunks.py` → `parse_to_chunks_node()` |
-| 7 | Source index/embeddings | `chunks` | Builds a per-job in-memory BM25 `LexicalRetriever`. If `enable_embeddings` is true, generates chunk embeddings and persists them in the embedding store; failures are warnings, not immediate job failure. | `app/nodes/build_source_index.py`; `app/rag/source_index.py`; `app/rag/embeddings.py` |
-| 8 | Requirement extraction | Chunks and source text | Sends chunk batches to a structured-output LLM prompt, normalizes labels and JSON variants, aligns evidence quotes to source text, and lowers confidence for weak/fallback evidence. | `app/nodes/extract.py` → `extract_node()`; `extract_requirements_v2.md` |
-| 9 | Deduplication/conflicts | Extracted requirements | Exact/near duplicates are merged using normalized text/Jaccard similarity and actor rules. If conflict detection is enabled, optional in-memory requirement embeddings find candidates; batched LLM classification maps conflicts to warnings/issues. | `app/nodes/dedupe_requirements.py`; `app/rag/requirement_embeddings.py` |
-| 10 | Evidence retrieval | Deduped requirements and source index | Retrieves up to three BM25 hits per requirement, optionally merges vector hits through `app/rag/hybrid.py`, caps evidence at four items, records scores, and lowers confidence for weak support. | `app/nodes/retrieve_evidence.py` → `retrieve_evidence_node()` |
-| 11 | Classification | Requirements with evidence | Batches five requirements at a time, asks for FR/NFR/BR and special labels, clamps confidence, and applies a deterministic fallback when the LLM is unavailable. | `app/nodes/classify.py`; `classify_requirements_v1.md` |
-| 12 | Grounding validation | Classified requirements, chunks | Verifies every evidence quote is non-empty and present in a source chunk; missing or non-verbatim evidence becomes a quality issue. | `app/nodes/evidence_grounding.py` |
-| 13 | Story generation | Actionable classified requirements | Filters non-story labels, calls the v2 story prompt, maps returned requirement ids, normalizes actors/labels, creates acceptance criteria, preserves coverage, validates stories, and creates deterministic requirement-specific fallback stories when needed. | `app/nodes/generate.py`; `generate_user_stories_v2.md`; `app/validators/story_validator.py` |
-| 14 | Quality/repair | Requirements, stories, coverage, issues | `quality_gate` checks evidence, confidence, story shape, acceptance criteria, duplicates, and coverage, then computes `quality_report`. If enabled and a repairable story issue remains, `repair_stories` calls its prompt and returns to the gate within the attempt limit. | `app/nodes/quality_gate.py`; `app/services/quality_scoring.py`; `app/nodes/repair_stories.py` |
-| 15 | Summary/format | Final intermediate state | `summarize` creates a structured summary from a bounded artifact digest. `format` maps internal models to the public V1 `JobResult`, resolves `completed`/`partial`/`failed`/`rejected`, and removes internal embeddings/PII stats. | `app/nodes/summarize.py`; `app/nodes/format.py`; `app/schemas/items.py` |
+| 1 | `detect_file_type` | `raw_bytes`, `raw_inputs`, or declared type | Validates file signatures, media types, ZIP bomb limits, and size thresholds; outputs validated `file_type` and `source_metadata`. | `app/nodes/detect_file_type.py`, `app/services/file_inspection.py` |
+| 2 | `prepare_sources` | Validated raw inputs / source references | Executes bounded parallel document extraction and STT transcription, applies PII masking, validates relevance, and produces unified `chunks`. | `app/nodes/prepare_sources.py`, `app/services/source_processing/` |
+| 3 | `build_source_index` | `chunks` | Constructs an in-memory BM25 `LexicalRetriever`. If `enable_embeddings` is enabled, generates chunk vectors and persists to pgvector. | `app/nodes/build_source_index.py`, `app/rag/source_index.py` |
+| 4 | `extract` | `chunks` and source text | Batches chunks to `extract_requirements_v2` prompt; parses structured requirements with initial evidence quotes, priority, and confidence. | `app/nodes/extract.py`, `app/prompts/templates/extract_requirements_v2.md` |
+| 5 | `dedupe_requirements` | Extracted requirements | Deduplicates exact/near-duplicate requirements via normalized text & Jaccard similarity. If enabled, detects semantic conflict candidates via embeddings. | `app/nodes/dedupe_requirements.py`, `app/prompts/templates/detect_conflicts_v1.md` |
+| 6 | `retrieve_evidence` | Deduplicated requirements, source index | Queries BM25 index (and optional pgvector vector index) for top supporting chunks per requirement; attaches candidate evidence spans and relevance scores. | `app/nodes/retrieve_evidence.py`, `app/rag/hybrid.py` |
+| 7 | `classify` | Requirements with evidence | Groups requirements in batches of 5; prompts `classify_requirements_v1` to assign `Functional`, `Non-Functional`, `Business Rule`, constraints, and category labels. | `app/nodes/classify.py`, `app/prompts/templates/classify_requirements_v1.md` |
+| 8 | `evidence_grounding` | Classified requirements, source chunks | Verifies verbatim occurrence of quotes in source chunks. Checks numeric constraints and 3-state polarity; flags unsupported claims for review. | `app/nodes/evidence_grounding.py` |
+| 9 | `generate` | Actionable classified requirements | Formats actionable requirements; prompts `generate_user_stories_v2` to produce user stories, Given–When–Then acceptance criteria, and coverage mappings. | `app/nodes/generate.py`, `app/validators/story_validator.py` |
+| 10 | `quality_gate` | Requirements, stories, criteria, coverage | Runs deterministic structural & semantic checks; computes aggregate `quality_report` (groundedness, completeness, traceability, duplicate risk). | `app/nodes/quality_gate.py`, `app/services/quality_scoring.py` |
+| 11 | `repair_stories` | Failed stories & quality issues | If quality repair is enabled and repairable rule violations exist, invokes `repair_stories_v1` and loops back to `quality_gate` up to `MAX_REPAIR_ATTEMPTS`. | `app/nodes/repair_stories.py`, `app/prompts/templates/repair_stories_v1.md` |
+| 12 | `summarize` | Artifact digest, requirements, stories | Prompts `summarize_structured_v1` with a bounded digest to extract executive summary, scope, risks, assumptions, and stakeholder roles. | `app/nodes/summarize.py`, `app/prompts/templates/summarize_structured_v1.md` |
+| 13 | `format` | Final pipeline state | Assembles canonical `JobResult` contract (V1), populates Jira/Excel export rows, sets final lifecycle status (`completed`, `partial`, `rejected`, `failed`). | `app/nodes/format.py`, `app/schemas/items.py` |
 
-### Routing rules
+### Conditional Routing Rules
 
-`route_after_ingest()` in `app/graph/router.py` returns `format` on state error or `is_useful == False`, `transcribe` for audio, and `parse_to_chunks` otherwise. `route_after_quality_gate()` returns `repair_stories` only when `ENABLE_QUALITY_REPAIR` is true, attempts remain, active story issues exist, and their rules are in `REPAIRABLE_RULES`; all other paths go to `summarize`.
+1. **After Source Preparation (`route_after_prepare_sources`):**
+   - If `state["error"]` is set, `is_useful == False` (all sources irrelevant), or `chunks` is empty: route directly to `format`.
+   - Otherwise: continue to `build_source_index`.
 
-## Prompt and model map
+2. **After Quality Gate (`route_after_quality_gate`):**
+   - If `ENABLE_QUALITY_REPAIR` is true, `repair_attempts < MAX_REPAIR_ATTEMPTS`, and active story issues contain rules in `REPAIRABLE_RULES` (e.g., missing acceptance criteria, malformed story format): route to `repair_stories`.
+   - Otherwise: proceed to `summarize`.
 
-Prompt templates are executable source assets. `PromptId` and `PROMPT_MAP` in `app/prompts/registry.py` map ten ids to `app/prompts/templates/*.md`; `load_prompt()` reads UTF-8 content and caches it with `lru_cache`.
+## Semantic Grounding & Quality Hardening Rules
 
-| Prompt | Caller | Composition/output |
+1. **Candidate vs. Verified Evidence:** Retrieved chunks are candidate context. Evidence is published in `source_refs` only after verbatim quote presence and source chunk alignment are verified.
+2. **Three-State Polarity:** Distinguishes omission from direct contradiction across explicit negative and numeric constraints.
+3. **Weakest-Link Traceability:** Traceability coverage is calculated across requirement-to-story mappings, actionable coverage, and verified evidence coverage.
+4. **Multi-Document Summarization:** Long multi-source summaries use bounded hierarchical digests to prevent truncation or middle-document omission.
+5. **Agile Persona Normalization:** Generated stories normalize vague actors toward standardized agile personas while preserving underlying stakeholder constraints.
+
+## Prompt Asset Registry
+
+Runtime prompt templates are versioned markdown source assets loaded through `app/prompts/registry.py` with LRU caching:
+
+| Prompt ID | Target Node | Output Schema / Purpose |
 |---|---|---|
-| `ingest_relevance_v1` | `ingest_node` | System template plus bounded text snippet; structured relevance score/usefulness. |
-| `extract_requirements_v2` | `extract_node` | System template plus one chunk; structured requirement list with evidence. |
-| `detect_conflicts_v1` | `dedupe_requirements_node` | System template plus candidate requirement pairs; conflict classifications. |
-| `classify_requirements_v1` | `classify_node` | System template plus batches of five requirements; labels/confidence. |
-| `generate_user_stories_v2` | `generate_node` | System template plus formatted actionable requirements; stories and acceptance criteria. |
-| `repair_stories_v1` | `repair_stories_node` | System template plus failed stories/issues; repaired story items. |
-| `summarize_structured_v1` | `summarize_node` | System template plus bounded artifact digest; `StructuredSummary`. |
-| `regenerate_story_v1` | `/internal/stories/regenerate` | System template plus requirement, original story, context, and feedback; one story response. |
-| v1 extraction/generation templates | Registry compatibility | Registered and snapshot-tested assets; current nodes use the v2 extraction/generation templates. |
+| `ingest_relevance_v1` | `prepare_sources` (relevance) | Structured relevance decision (`is_useful`, `score`, `reason`). |
+| `extract_requirements_v2` | `extract` | Structured requirement candidates with evidence quotes and confidence. |
+| `detect_conflicts_v1` | `dedupe_requirements` | Semantic conflict classification between candidate requirement pairs. |
+| `classify_requirements_v1` | `classify` | FR / NFR / BR labels, confidence scores, and business categories. |
+| `generate_user_stories_v2` | `generate` | User stories, Given–When–Then criteria, story points (Fibonacci). |
+| `repair_stories_v1` | `repair_stories` | Repaired user stories targeting specific quality gate violations. |
+| `summarize_structured_v1` | `summarize` | Executive summary, key decisions, risks, assumptions, scope. |
+| `regenerate_story_v1` | `/internal/stories/regenerate` | Single-story regeneration incorporating user feedback. |
 
-`app/llm.py` → `ResilientLLMClient` uses temperature `0`, provider-specific OpenAI-compatible clients, configured primary provider, and optional JSON `LLM_FALLBACK_CHAIN`. It enriches response metadata with provider/model/latency/token usage. `get_llm()` supports OpenRouter, OpenAI, and Groq. Structured nodes parse model text with `app/utils/json_parsing.py` and Pydantic models; malformed JSON may receive a repair attempt where the node uses `loads_with_llm_repair()`.
+## Failure and Fallback Matrix
 
-## Retrieval and context handling
-
-This is source-grounding retrieval, not a standalone question-answering chatbot. The source index is stored in a bounded per-process registry keyed by job id; the `PipelineState` stores only its handle and lightweight stats. BM25 is always the primary local retriever. Hybrid mode adds PostgreSQL/pgvector vector hits and merges ranks; it does not replace quote verification. Chunk embeddings are persisted when enabled, while requirement embeddings used by conflict detection are held in memory and stripped from the public result.
-
-## Persistence and result delivery
-
-`execute_job()` in `app/worker/runner.py` adds an attempt, sets `PROCESSING`, streams node updates when supported, mirrors progress, and incrementally persists source documents/chunks after parsing/transcription. On a terminal graph result it calls `persist_result()`, writes the decomposed PostgreSQL rows through repositories, updates job status, records an event, clears the source index, and calls `_maybe_callback()` if configured. The result is available through `GET /internal/jobs/{job_id}/result` even when callback delivery fails.
-
-## Failure matrix
-
-| Failure | Detection | Retry/fallback | User-visible result | Logs/events |
-|---|---|---|---|---|
-| Missing/invalid internal token | `require_internal_auth()` | None | `401` or `403`; graph is not entered. | Auth warning. |
-| Invalid input/metadata/job id | Pydantic or route checks | Caller fixes request | `400`, `413`, `415`, or `422`. | Request id/access log. |
-| Unsafe, missing, too-large, or checksum-mismatched source | `BackendDocumentClient` and worker recovery exceptions | No provider retry; job fails or retry endpoint can create a new attempt after a terminal failure. | Failed job with `SOURCE_*` code. | Job event and sanitized warning/error. |
-| Relevance rejects input | `ingest_node` and `route_after_ingest` | No downstream processing | `rejected`/completed public result with usefulness/relevance and warnings. | Node warning/event. |
-| LLM transient provider error | `ResilientLLMClient` | Retryable provider errors and configured fallback providers; node-specific deterministic fallbacks may continue. | Partial/complete result depending on stage. | Provider/model/latency metadata and warnings; raw I/O only when enabled outside production. |
-| STT provider failure | `transcribe_node` | Configured provider path/fallback behavior; otherwise pipeline failure. | Failed or partial result. | `TRANSCRIBE_*` error codes. |
-| Empty/no index/no retrieval hits | Retrieval nodes | Continue with warnings and quote support checks. | Results may be partial or flagged for review. | `NO_RETRIEVED_EVIDENCE`/index warnings. |
-| Bad structured output | Pydantic/JSON parsing and node validators | JSON extraction/repair and deterministic generation fallbacks where implemented. | Warning, partial result, or failed stage. | Node warning and safe error code. |
-| Story quality issue | `quality_gate` | Optional bounded `repair_stories` loop. | Quality issues/report remain visible. | Quality events and warnings. |
-| Job cancellation/timeout/crash | Worker checks cancel flag and runtime budget | Cancellation stops between nodes; `/retry` is allowed for failed/cancelled jobs only. | `CANCELLED` or `FAILED`. | Attempt and terminal events. |
-| Result persistence failure | `persist_result()` exception | No silent success; runner marks failure. | `FAILED` and no false completion. | `PERSISTENCE_ERROR`. |
-| Callback failure | `send_callback()` returns false or rejects origin | No durable outbox retry currently; polling remains available. | Persisted job unchanged. | `callback_failed` warning event. |
-
-## Concept-to-code map
-
-| Concept | Implementation | Entry point | Important dependencies |
+| Failure Mode | Detection Point | Fallback / Recovery Strategy | Public Result State |
 |---|---|---|---|
-| Unified graph | `app.graph.pipeline.build_pipeline()` | Worker and Studio | LangGraph `StateGraph`, `PipelineState` |
-| Job lifecycle | `app.worker.runner.execute_job()` | `dispatch_job()` | `StoreBundle`, `JobStatus`, progress/events |
-| Model fallback | `app.llm.ResilientLLMClient` | `get_llm()` | LangChain OpenAI-compatible clients, provider keys |
-| Source index | `app.rag.source_index.build_source_index()` | `build_source_index_node()` | `LexicalRetriever`, BM25 scoring |
-| Hybrid search | `app.rag.hybrid.merge_hits()` and DB vector search | `retrieve_evidence_node()` | pgvector, optional embedding provider |
-| Public contract | `app.schemas.items.JobResult` and V1 models | `format_node()` | Pydantic |
-| Quality repair | `repair_stories_node()` | Quality router | `REPAIRABLE_RULES`, repair prompt |
-| Callback security | `BackendDocumentClient.send_callback()` | `_maybe_callback()` | backend origin allowlist, service token |
+| Unauthenticated request | `require_internal_auth` | None; request rejected immediately. | HTTP `401` / `403`. |
+| Invalid file bytes / MIME spoofing | `detect_file_type` | Signature validation rejects non-matching payloads. | HTTP `415 Unsupported Media Type`. |
+| Oversized payload | `detect_file_type` / API upload | Request bounded by 20MB document / 50MB audio limits. | HTTP `413 Payload Too Large`. |
+| All sources irrelevant | `prepare_sources` relevance check | Short-circuit via router to `format`. | `REJECTED` (`is_useful: false`). |
+| Partial source failure | `prepare_sources` worker | Valid sources continue; failed source recorded in warnings. | `PARTIAL` with warning details. |
+| Primary LLM rate limit / timeout | `ResilientLLMClient` | Exponential backoff retry; failover to `LLM_FALLBACK_CHAIN`. | Continued execution or graceful degradation. |
+| Primary STT provider failure | `process_audio_source` | Automatic failover from Groq Whisper to Deepgram Nova-2. | `COMPLETED` / `PARTIAL` with STT fallback warning. |
+| Empty retrieval results | `retrieve_evidence` | Requirement marked with low confidence and review warning. | `COMPLETED` with review flags. |
+| Story validation failure | `quality_gate` | Bounded repair loop (`repair_stories`) if enabled; else warnings. | `COMPLETED` with quality issues report. |
+| Worker process crash | Worker supervisor / RQ | Durable job status reflects `FAILED` or is eligible for `/retry`. | `FAILED` (no silent hang). |
+| Callback delivery failure | `send_callback` | Logged as event; does not affect persisted durable result. | Polling endpoint returns full result. |
 
-## Tests validating the flow
+## Concept-to-Code Map
 
-The main coverage is in `ai-service/tests/`:
-
-- `tests/test_pipeline.py`, `tests/test_e2e_mocked.py`, and `tests/test_contract_v1.py` cover graph and public contract behavior.
-- `tests/api/test_internal_jobs.py`, `test_job_idempotency.py`, and `test_internal_compatibility.py` cover auth, job lifecycle, compatibility routes, source security, cancellation, retry, and callbacks.
-- `tests/nodes/` covers each major stage, grounding, quality, repair, audio, multi-document behavior, and fallbacks.
-- `tests/rag/` covers BM25, hybrid merge, lexical retrieval, and vector-node behavior.
-- `tests/prompts/` covers registry, loader, UTF-8, and snapshot protection.
-- `tests/worker/test_runner.py` covers streaming fallback, persistence, cancellation, callback, crash, and status mapping.
-
-## Known gaps and risky areas
-
-- No frontend or backend implementation is available in this repository, so cross-service contract compatibility is verified only from the AI service's schemas/tests and the checked-in OpenAPI artifact.
-- Callback delivery is best effort without a durable outbox or retry scheduler.
-- Redis input cache expiry can make a job unrecoverable when durable backend source metadata/content is unavailable.
-- Production requires a real PostgreSQL/pgvector and backend source-recovery contract; this repository cannot verify those external services here.
-- Tenant/project fields are carried and used for durable vector filtering, but the Python request model permits a missing `tenant_id`; callers must supply it where isolation requires it.
-- The source index registry is process-local and bounded; it is rebuilt by the worker rather than shared across workers.
+| Architecture Concept | Primary Module | Key Function / Class |
+|---|---|---|
+| Pipeline Graph DAG | `app/graph/pipeline.py` | `build_pipeline()`, `graph` |
+| Graph Routers | `app/graph/router.py` | `route_after_prepare_sources()`, `route_after_quality_gate()` |
+| Source Processing & STT | `app/services/source_processing/` | `process_source_inputs()`, `process_audio_source()`, `process_document_source()` |
+| Lexical & Vector RAG | `app/rag/` | `LexicalRetriever`, `source_index.py`, `hybrid.py` |
+| Resilient LLM Engine | `app/llm.py` | `ResilientLLMClient`, `get_llm()` |
+| Quality Gate & Scoring | `app/services/quality_scoring.py` | `compute_quality_report()`, `quality_gate_node` |
+| Story Repair Engine | `app/nodes/repair_stories.py` | `repair_stories_node()`, `REPAIRABLE_RULES` |
+| Job Lifecycle & Recovery | `app/worker/runner.py`, `app/worker/state.py` | `execute_job()`, `build_worker_initial_state()` |
+| Public Contract Serialization | `app/nodes/format.py` | `format_node()`, `JobResult` |

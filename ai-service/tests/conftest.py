@@ -5,12 +5,13 @@ from dotenv import load_dotenv
 # Load environment variables for real API calls
 load_dotenv()
 
-# Force tests to use the in-memory store and in-process runner.  Keep explicit
-# empty values in the environment: app.config also calls load_dotenv() during
-# import, and deleting these keys lets that second load silently re-enable the
-# developer's real Postgres/Redis services for the unit suite.
+# Force tests to use the in-memory store and in-process runner.
 os.environ["DATABASE_URL"] = ""
 os.environ["REDIS_URL"] = ""
+
+from app.config import settings
+settings.DATABASE_URL = ""
+settings.REDIS_URL = ""
 
 @pytest.fixture
 def sample_pdf_bytes():

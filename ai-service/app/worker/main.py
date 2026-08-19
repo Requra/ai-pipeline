@@ -29,6 +29,13 @@ _REDIS_CONNECT_DELAY_SECONDS = 1.0
 
 
 def _get_pipeline():
+    try:
+        import app.main as main_mod
+        if getattr(main_mod, "pipeline", None) is not None:
+            return main_mod.pipeline
+    except Exception:
+        pass
+
     global _pipeline
     if _pipeline is None:
         from app.graph.pipeline import build_pipeline
@@ -40,6 +47,7 @@ def _get_pipeline():
 async def run_job_entry(job_id: str) -> str:
     """Reconstruct state from the durable store + input cache and run the job."""
     import time
+    from app.store.factory import get_stores, close_stores
     from app.store.models import JobStatus
     from app.worker.runner import _fail
 
@@ -75,6 +83,8 @@ async def run_job_entry(job_id: str) -> str:
 
 def run_job_entry_sync(job_id: str) -> str:
     """Synchronous entrypoint used by the RQ worker."""
+    from app.store.factory import reset_stores
+    reset_stores()
     return asyncio.run(run_job_entry(job_id))
 
 
@@ -105,13 +115,13 @@ def main() -> None:
 
     run_startup_checks()
 
-    from rq import Queue, Worker
+    from rq import Queue, SimpleWorker
 
     from app.queue.redis_queue import get_redis_connection
 
     conn = _connect_redis_with_retry(get_redis_connection)
     queue = Queue(settings.QUEUE_NAME, connection=conn)
-    worker = Worker([queue], connection=conn)
+    worker = SimpleWorker([queue], connection=conn)
     logger.info("AI worker starting — queue=%s", settings.QUEUE_NAME)
     worker.work(with_scheduler=True)
 

@@ -55,6 +55,12 @@ def reset_stores() -> None:
     """Drop the cached bundle (used by tests to isolate state)."""
     global _bundle
     _bundle = None
+    if settings.use_database:
+        try:
+            import app.store.db as db_mod
+            db_mod._db = None
+        except Exception:
+            pass
 
 
 async def close_stores() -> None:

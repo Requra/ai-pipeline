@@ -56,6 +56,51 @@ class OpenAICompatibleEmbedder:
         return await client.aembed_query(text)
 
 
+class ITIEmbedder:
+    """Embedder backed by the ITI Bedrock Gateway embedding API."""
+
+    def __init__(self, model: str, api_key: str) -> None:
+        self.model = model
+        base = settings.ITI_BASE_URL.rstrip("/")
+        if base.endswith("/student"):
+            base = base[:-8]
+        if "/api/v1" not in base:
+            base = f"{base}/api/v1"
+        self.base_url = base
+        self.api_key = api_key
+        self.timeout = settings.PROVIDER_TIMEOUT_SECONDS
+
+    async def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        import httpx
+        url = f"{self.base_url}/student/embed"
+        payload = {
+            "model_id": self.model,
+            "texts": list(texts),
+            "input_type": "search_document"
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}"
+        }
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            resp = await client.post(url, json=payload, headers=headers)
+            resp.raise_for_status()
+            res = resp.json()
+            emb = res.get("embedding") or res.get("embeddings")
+            if not emb:
+                raise ValueError(f"No embedding found in response: {res}")
+            if isinstance(emb, list):
+                if len(emb) > 0 and isinstance(emb[0], list):
+                    return emb
+                else:
+                    return [emb]
+            raise ValueError(f"Unexpected embedding format: {emb}")
+
+    async def embed_query(self, text: str) -> List[float]:
+        vectors = await self.embed_documents([text])
+        return vectors[0]
+
+
 # Test/override hook — when set, get_embedder() returns this instead.
 _override: Optional[Embedder] = None
 
@@ -69,9 +114,13 @@ def get_embedder() -> Optional[Embedder]:
     """Return a configured embedder, or None when embeddings are unusable."""
     if _override is not None:
         return _override
+    if not settings.ENABLE_EMBEDDINGS:
+        return None
     provider = settings.EMBEDDING_PROVIDER
     key = embedding_key_for(provider)
     if not key:
         logger.warning("embeddings requested but no API key for provider '%s'", provider)
         return None
+    if provider == "iti":
+        return ITIEmbedder(settings.EMBEDDING_MODEL, key)
     return OpenAICompatibleEmbedder(provider, settings.EMBEDDING_MODEL, key)

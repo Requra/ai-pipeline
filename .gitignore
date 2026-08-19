@@ -147,3 +147,14 @@ openai_key.txt
 
 response.json
 response22.json
+
+# LangGraph local runtime state & pickle caches
+.langgraph_api/
+**/.langgraph_api/
+*.pckl
+
+# Generated graph assets & temp folders
+pipeline_arch.png
+temp/
+tmp/
+ai-service/tmp/

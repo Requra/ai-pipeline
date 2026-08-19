@@ -1,0 +1,35 @@
+{
+  "name": "requra-ai-api",
+  "billing": {
+    "deploymentPlan": "nf-compute-micro"
+  },
+  "deployment": {
+    "instances": 1
+  },
+  "buildSettings": {
+    "buildEngine": "kaniko",
+    "dockerfile": {
+      "dockerFilePath": "/ai-service/Dockerfile",
+      "dockerWorkDir": "/ai-service"
+    }
+  },
+  "vcsData": {
+    "projectType": "github",
+    "projectUrl": "https://github.com/Requra/ai-pipeline",
+    "projectBranch": "feat/doc-audio-processing"
+  },
+  "ports": [
+    {
+      "name": "http",
+      "port": 8000,
+      "protocol": "HTTP",
+      "public": true
+    }
+  ],
+  "healthCheck": {
+    "enabled": true,
+    "path": "/health",
+    "port": 8000,
+    "protocol": "HTTP"
+  }
+}

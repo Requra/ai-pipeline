@@ -1,0 +1,25 @@
+{
+  "name": "requra-ai-worker",
+  "billing": {
+    "deploymentPlan": "nf-compute-micro"
+  },
+  "deployment": {
+    "instances": 1,
+    "docker": {
+      "cmd": "python -m app.worker.main"
+    }
+  },
+  "buildSettings": {
+    "buildEngine": "kaniko",
+    "dockerfile": {
+      "dockerFilePath": "/ai-service/Dockerfile",
+      "dockerWorkDir": "/ai-service"
+    }
+  },
+  "vcsData": {
+    "projectType": "github",
+    "projectUrl": "https://github.com/Requra/ai-pipeline",
+    "projectBranch": "feat/doc-audio-processing"
+  },
+  "ports": []
+}

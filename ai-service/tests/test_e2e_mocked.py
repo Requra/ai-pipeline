@@ -97,6 +97,7 @@ async def test_process_json_end_to_end_mocked():
     
     with patch("app.llm.get_llm", return_value=mock_llm), \
          patch("app.nodes.ingest.get_llm", return_value=mock_llm), \
+         patch("app.services.source_processing.extractors.get_llm", return_value=mock_llm), \
          patch("app.nodes.extract.get_llm", return_value=mock_llm), \
          patch("app.nodes.classify.get_llm", return_value=mock_llm), \
          patch("app.nodes.generate.get_llm", return_value=mock_llm), \
@@ -152,6 +153,7 @@ async def test_pdf_end_to_end_mocked():
     
     with patch("app.llm.get_llm", return_value=mock_llm), \
          patch("app.nodes.ingest.get_llm", return_value=mock_llm), \
+         patch("app.services.source_processing.extractors.get_llm", return_value=mock_llm), \
          patch("app.nodes.extract.get_llm", return_value=mock_llm), \
          patch("app.nodes.classify.get_llm", return_value=mock_llm), \
          patch("app.nodes.generate.get_llm", return_value=mock_llm), \
@@ -198,6 +200,7 @@ def test_api_process_json_returns_job_result(monkeypatch):
 
     monkeypatch.setattr("app.llm.get_llm", lambda *a, **k: mock_llm)
     monkeypatch.setattr("app.nodes.ingest.get_llm", lambda *a, **k: mock_llm)
+    monkeypatch.setattr("app.services.source_processing.extractors.get_llm", lambda *a, **k: mock_llm)
     monkeypatch.setattr("app.nodes.extract.get_llm", lambda *a, **k: mock_llm)
     monkeypatch.setattr("app.nodes.classify.get_llm", lambda *a, **k: mock_llm)
     monkeypatch.setattr("app.nodes.generate.get_llm", lambda *a, **k: mock_llm)

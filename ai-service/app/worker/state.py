@@ -22,9 +22,13 @@ from typing import Any, Dict, List, Optional
 from app.store.base import StoreBundle
 from app.store.models import AiJobRecord, InputType
 
+from app.config import settings
+
 logger = logging.getLogger("app.worker.state")
 
-_INPUT_TTL_SECONDS = 6 * 60 * 60  # transient input cache lifetime
+
+def _input_ttl_seconds() -> int:
+    return getattr(settings, "INPUT_CACHE_TTL_SECONDS", 86400)
 
 
 def make_initial_state(
@@ -61,6 +65,9 @@ def make_initial_state(
         "enable_hybrid_retrieval": enable_hybrid_retrieval,
         "source_metadata": None,
         "source_documents": source_documents or [],
+        "processed_sources": None,
+        "source_processing_stats": None,
+        "partial_source_failure": False,
         "chunks": [],
         "source_index_id": None,
         "retrieval_stats": None,
@@ -143,7 +150,7 @@ def stash_input(
     }
     try:
         conn = get_redis_connection()
-        ok = conn.set(_input_key(job_id), json.dumps(payload), ex=_INPUT_TTL_SECONDS)
+        ok = conn.set(_input_key(job_id), json.dumps(payload), ex=_input_ttl_seconds())
     except Exception as exc:  # pragma: no cover - infra dependent
         logger.warning("stash_input failed for %s: %s", job_id, type(exc).__name__)
         raise
@@ -242,6 +249,7 @@ async def build_worker_initial_state(
         if job.input_type in (
             InputType.BACKEND_DOCUMENT.value,
             InputType.BACKEND_AUDIO.value,
+            InputType.BACKEND_SOURCES.value,
         ):
             downloaded_inputs: List[Dict[str, Any]] = []
             for ref in source_documents:
@@ -249,6 +257,10 @@ async def build_worker_initial_state(
                 b = await backend_client.fetch_document_bytes(ref)
                 if b:
                     det_type, det_mime, det_subtype = detect_mime_and_type(b, ref.get("filename"))
+                    if det_type == "unknown":
+                        raise SourceSecurityError(
+                            f"Downloaded content type is unknown or signature invalid for '{ref.get('filename')}'"
+                        )
                     downloaded_inputs.append({
                         **ref,
                         "raw_bytes": b,
@@ -259,29 +271,49 @@ async def build_worker_initial_state(
             if downloaded_inputs:
                 # Re-run file inspection on every downloaded byte stream.
                 detected_types = {item["file_type"] for item in downloaded_inputs}
-                # Confirm type is valid for the job input type
-                expected_type = (
-                    "audio"
-                    if job.input_type == InputType.BACKEND_AUDIO.value
-                    else "document"
-                )
+                if job.input_type == InputType.BACKEND_AUDIO.value:
+                    if detected_types != {"audio"}:
+                        raise SourceSecurityError(
+                            "Downloaded content type is invalid for backend_audio"
+                        )
+                elif job.input_type == InputType.BACKEND_DOCUMENT.value:
+                    if not detected_types.issubset({"pdf", "docx", "text"}):
+                        raise SourceSecurityError(
+                            "Downloaded content type is invalid for backend_document"
+                        )
+                elif job.input_type == InputType.BACKEND_SOURCES.value:
+                    valid_kinds = {"pdf", "docx", "text", "audio"}
+                    if not detected_types.issubset(valid_kinds):
+                        raise SourceSecurityError(
+                            "Downloaded content type is invalid for backend_sources"
+                        )
+                    audio_count = sum(1 for item in downloaded_inputs if item["file_type"] == "audio")
+                    from app.config import settings
+                    max_audio = getattr(settings, "MAX_AUDIO_SOURCES_PER_JOB", 3)
+                    if audio_count > max_audio:
+                        raise SourceSecurityError(
+                            f"Audio source count ({audio_count}) exceeds maximum allowed per job ({max_audio})"
+                        )
 
-                is_type_match = (
-                    detected_types == {"audio"}
-                    if expected_type == "audio"
-                    else detected_types.issubset({"pdf", "docx", "text"})
-                )
-                if not is_type_match:
-                    raise SourceSecurityError(
-                        f"Downloaded content type is invalid for job input type"
-                    )
-                if len(downloaded_inputs) == 1:
+                if len(downloaded_inputs) == 1 and job.input_type != InputType.BACKEND_SOURCES.value:
                     raw_bytes = downloaded_inputs[0]["raw_bytes"]
                     file_type = downloaded_inputs[0]["file_type"]
                     audio_format = downloaded_inputs[0].get("audio_format") or audio_format
+                    raw_inputs = downloaded_inputs
                 else:
                     raw_inputs = downloaded_inputs
-                    file_type = "audio" if expected_type == "audio" else "document"
+                    has_audio = any(item["file_type"] == "audio" for item in downloaded_inputs)
+                    has_doc = any(item["file_type"] != "audio" for item in downloaded_inputs)
+                    audio_count = sum(1 for item in downloaded_inputs if item["file_type"] == "audio")
+                    if (has_audio and has_doc) or audio_count > 1:
+                        file_type = "sources"
+                    elif has_audio:
+                        file_type = "audio"
+                    else:
+                        file_type = "document"
+                    found_audio_fmt = next((item["audio_format"] for item in downloaded_inputs if item.get("audio_format")), None)
+                    if found_audio_fmt:
+                        audio_format = found_audio_fmt
         else:
             # backend_transcript or text
             texts = []

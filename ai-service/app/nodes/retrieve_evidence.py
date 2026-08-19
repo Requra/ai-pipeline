@@ -170,7 +170,7 @@ def _quote_support_score(
 async def retrieve_evidence_node(state: PipelineState) -> dict:
     print("--- RETRIEVE EVIDENCE NODE ---")
     job_id = state.get("job_id") or ""
-    update_progress(job_id, "retrieve_evidence", 60, "PROCESSING")
+    update_progress(job_id, "retrieve_evidence", 62, "PROCESSING")
 
     reqs: List[ExtractedRequirement] = state.get("extracted_requirements", []) or []
     if not reqs:

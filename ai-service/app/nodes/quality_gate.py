@@ -62,9 +62,9 @@ async def quality_gate_node(state: PipelineState) -> dict:
     print("--- QUALITY GATE NODE ---")
     update_progress(state.get("job_id"), "quality_gate", 90, "PROCESSING")
 
-    reqs: List[ClassifiedRequirement] = state.get("classified_requirements", [])
-    stories: List[UserStory] = state.get("user_stories", [])
-    coverages: List[RequirementCoverage] = state.get("requirement_coverages", [])
+    reqs: List[ClassifiedRequirement] = state.get("classified_requirements") or []
+    stories: List[UserStory] = state.get("user_stories") or []
+    coverages: List[RequirementCoverage] = state.get("requirement_coverages") or []
 
     existing_q = state.get("quality_issues", []) or []
 
@@ -516,8 +516,12 @@ async def quality_gate_node(state: PipelineState) -> dict:
                 details=f"Story {s.id} acceptance criteria cover only {coverage_score:.0%} of linked source clauses.",
             ))
 
-    # --- Combine, dedupe, score ----------------------------------------------
-    all_issues = _dedupe_issues(existing_q + new_issues)
+    # Retain non-story issues from upstream nodes (conflicts, grounding, pipeline); story issues are re-evaluated from current story state.
+    non_story_issues = [
+        q for q in existing_q
+        if (getattr(q, "item_type", None) or (q.get("item_type") if isinstance(q, dict) else None)) != "story"
+    ]
+    all_issues = _dedupe_issues(non_story_issues + new_issues)
 
     has_high = any(q.severity == "high" for q in all_issues)
     status = "needs_review" if has_high else state.get("status", "partial")

@@ -80,7 +80,7 @@ async def dispatch_job(
                 job_id,
                 initial_state or {},
                 pipeline,
-                use_stream=False,
+                use_stream=True,
                 request_id=request_id,
             )
 
