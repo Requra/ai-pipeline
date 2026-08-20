@@ -306,7 +306,7 @@ class ResilientLLMClient:
         if provider == "openrouter":
             return override_model or settings.OPENROUTER_MODEL or "openai/gpt-4o-mini"
         elif provider == "groq":
-            return override_model or settings.GROQ_MODEL or "llama-3.3-70b-versatile"
+            return override_model or settings.GROQ_MODEL or "openai/gpt-oss-20b"
         elif provider == "iti":
             return override_model or settings.ITI_PRIMARY_MODEL
         else:
