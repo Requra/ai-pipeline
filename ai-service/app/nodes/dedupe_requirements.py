@@ -95,6 +95,35 @@ def _actors_conflict(a: ExtractedRequirement, b: ExtractedRequirement) -> bool:
     return False
 
 
+def _evidence_document_ids(req: ExtractedRequirement) -> set[str]:
+    return {
+        evidence.document_id
+        for evidence in (getattr(req, "evidence", []) or [])
+        if getattr(evidence, "document_id", None)
+    }
+
+
+def _source_intent_matches(a: ExtractedRequirement, b: ExtractedRequirement) -> bool:
+    """Allow cross-source dedupe only for an explicitly matching proposition.
+
+    A high token overlap alone is not authority to merge requirements from two
+    uploads: similar wording can describe separate systems or policies. Exact
+    repeated text is safe. Paraphrases across sources additionally need the
+    same actor intent and a comparable extracted goal.
+    """
+    a_docs, b_docs = _evidence_document_ids(a), _evidence_document_ids(b)
+    if not a_docs or not b_docs or a_docs & b_docs:
+        return True
+    if _normalize_text(a.text) == _normalize_text(b.text):
+        return True
+    if _actors_conflict(a, b):
+        return False
+    a_goal, b_goal = fact_tokens(a.goal or ""), fact_tokens(b.goal or "")
+    if not a_goal or not b_goal:
+        return False
+    return _jaccard(a_goal, b_goal) >= 0.75
+
+
 def _numeric_constraint_context(text: str) -> set[str]:
     """Return the measurement concepts surrounding numeric constraints."""
     token_matches = list(re.finditer(r"[$€£]?\d[\d,]*(?:\.\d+)?|[a-z]+", (text or "").lower()))
@@ -302,11 +331,12 @@ def _canonical_components(
                 >= NEAR_DUPLICATE_THRESHOLD
             )
             contained = _containment_duplicate(reqs[left], reqs[right])
-            if exact or contained:
+            source_intent_matches = _source_intent_matches(reqs[left], reqs[right])
+            if (exact or contained) and source_intent_matches:
                 # Exact text with different actor fields is an extraction
                 # inconsistency, not a second source proposition.
                 union(left, right)
-            elif near:
+            elif near and source_intent_matches:
                 if _actors_conflict(reqs[left], reqs[right]):
                     reqs[right].needs_review = True
                     note = "[POSSIBLE_DUPLICATE: similar proposition has a materially different actor]"
@@ -316,6 +346,16 @@ def _canonical_components(
                     actor_review_ids.append(reqs[right].id)
                 else:
                     union(left, right)
+            elif exact or contained or near:
+                # Keep ambiguous cross-source overlap separate. It is safer
+                # to expose two traceable requirements than silently merge two
+                # potentially independent policies.
+                reqs[right].needs_review = True
+                note = "[POSSIBLE_CROSS_SOURCE_DUPLICATE: similar wording from distinct source intent]"
+                reqs[right].review_reason = " ".join(
+                    part for part in (reqs[right].review_reason, note) if part
+                )
+                actor_review_ids.append(reqs[right].id)
 
     grouped: dict[int, List[int]] = {}
     for index in range(len(reqs)):
@@ -750,7 +790,7 @@ async def dedupe_requirements_node(state: PipelineState) -> dict:
             code="POSSIBLE_DUPLICATE_REVIEW",
             message=(
                 f"{len(possible_dup_ids)} requirement(s) look similar to others but "
-                "differ by actor; kept separate and flagged for review."
+                "differ by actor or source intent; kept separate and flagged for review."
             ),
         ))
     
