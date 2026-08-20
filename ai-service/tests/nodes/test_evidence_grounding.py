@@ -447,6 +447,46 @@ async def test_grounding_accepts_audio_asr_numeric_protocol_and_adjacent_clause_
 
 
 @pytest.mark.asyncio
+async def test_grounding_caps_visible_audio_transcript_artifact_confidence(base_state):
+    source = (
+        "All communication between the client browser and the client. SAMR servers "
+        "must be encrypted using TLS 1.3 protocol."
+    )
+    state = base_state.copy()
+    state["chunks"] = [
+        SourceChunk(
+            chunk_id="audio-tls-artifact", text=source, start_char=0, end_char=len(source),
+            start_time_sec=0.0, end_time_sec=4.0, document_id="audio-1", language="en",
+            asr_confidence=0.95,
+        )
+    ]
+    state["classified_requirements"] = [
+        ClassifiedRequirement(
+            id=1,
+            text=(
+                "All communication between the client browser and the SAMR servers "
+                "must be encrypted using TLS 1.3 protocol."
+            ),
+            candidate_labels=["NFR"], labels=["NFR"], confidence=0.9,
+            evidence=[EvidenceSpan(
+                chunk_id="audio-tls-artifact", quote=source, document_id="audio-1",
+            )],
+        )
+    ]
+
+    result = await evidence_grounding_node(state)
+
+    requirement = result["classified_requirements"][0]
+    assert requirement.evidence
+    assert requirement.evidence[0].support_score == 0.70
+    assert requirement.needs_review
+    assert any(
+        issue.rule_violated == "evidence_low_transcription_confidence"
+        for issue in result["quality_issues"]
+    )
+
+
+@pytest.mark.asyncio
 async def test_grounding_recovers_complete_audio_clause_from_declared_source(base_state):
     source = (
         "Asset database records cannot be permanently deleted. They must be "
@@ -478,3 +518,30 @@ async def test_grounding_recovers_complete_audio_clause_from_declared_source(bas
     assert requirement.evidence
     assert "cannot be permanently deleted" in requirement.text.lower()
     assert "cannot be permanently deleted" in requirement.evidence[0].quote.lower()
+
+
+@pytest.mark.asyncio
+async def test_grounding_recovers_audio_evidence_when_extraction_omits_quote(base_state):
+    source = "The system must integrate with the existing LDAP Active Directory for user authentication."
+    state = base_state.copy()
+    state["chunks"] = [
+        SourceChunk(
+            chunk_id="audio-ldap", text=source, start_char=0, end_char=len(source),
+            start_time_sec=30.0, end_time_sec=38.0, document_id="audio-only", language="en",
+        )
+    ]
+    state["classified_requirements"] = [
+        ClassifiedRequirement(
+            id=1,
+            text="The system must integrate with the existing LDAP Active Directory for user authentication.",
+            candidate_labels=["Constraint"], labels=["Constraint"], confidence=0.8,
+            extraction_type="explicit", evidence=[],
+        )
+    ]
+
+    result = await evidence_grounding_node(state)
+
+    requirement = result["classified_requirements"][0]
+    assert requirement.evidence
+    assert requirement.evidence[0].document_id == "audio-only"
+    assert not any(issue.rule_violated == "missing_evidence" for issue in result["quality_issues"])

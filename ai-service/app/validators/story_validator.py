@@ -12,6 +12,7 @@ import re
 from typing import Dict, List, Sequence
 
 from app.services.semantic_quality import (
+    access_control_entails,
     clause_coverage,
     clear_story_mapping_mismatch,
     has_polarity_conflict,
@@ -20,6 +21,7 @@ from app.services.semantic_quality import (
     MIN_STORY_ALIGNMENT,
     meaningful_tokens,
     normalized_numbers,
+    proposition_support,
     source_fact_texts,
     split_requirement_clauses,
     story_alignment,
@@ -47,6 +49,46 @@ _GENERIC_AC_PATTERNS = (
 # One source-specific criterion is better than manufacturing a second generic
 # or duplicate criterion for an atomic one-clause requirement.
 MIN_ACCEPTANCE_CRITERIA = 1
+
+
+def _criterion_outcome(text: str) -> str:
+    """Return the asserted outcome, excluding Given/When test scaffolding."""
+    parts = re.split(r"\bthen\b", text or "", flags=re.IGNORECASE)
+    return parts[-1].strip() if parts else ""
+
+
+def _criterion_is_supported_by_verified_evidence(text: str, requirements: Sequence) -> bool:
+    """Check a criterion against citations when they exist for its requirement.
+
+    Do not infer an unsupported fact from a malformed canonical requirement:
+    verified quotes are the authority. The check is deliberately limited to a
+    clear no-support result, so valid inverse access-control outcomes and
+    partial, independently testable clauses are not rejected by lexical noise.
+    """
+    evidence_quotes = [
+        (getattr(evidence, "quote", "") or "").strip()
+        for requirement in requirements
+        for evidence in (getattr(requirement, "evidence", []) or [])
+        if (getattr(evidence, "quote", "") or "").strip()
+    ]
+    if not evidence_quotes:
+        return True
+    outcome = _criterion_outcome(text)
+    outcome_tokens = fact_tokens(outcome)
+    if not outcome_tokens:
+        return True
+    # The excluded role commonly appears in the Given clause while the denial
+    # appears in Then, so evaluate the complete criterion for this entailment.
+    if access_control_entails(text, evidence_quotes):
+        return True
+    for quote in evidence_quotes:
+        quote_tokens = fact_tokens(quote)
+        if not quote_tokens:
+            continue
+        overlap = len(outcome_tokens & quote_tokens) / len(outcome_tokens)
+        if overlap >= 0.50 or proposition_support(outcome, quote) >= 0.50:
+            return True
+    return False
 
 
 def is_generic_ac(text: str) -> bool:
@@ -79,6 +121,8 @@ def find_duplicate_acceptance_criterion_ids(story, requirements: Sequence = ()) 
             getattr(requirement, "text", "") or ""
         )
     ]
+    source_tokens = set().union(*(fact_tokens(clause) for clause in source_clauses)) if source_clauses else set()
+    dimension_stopwords = {"every", "each", "all", "any", "multiple", "other"}
 
     def best_source_clause(text: str) -> tuple[int | None, float]:
         if not source_clauses:
@@ -122,15 +166,46 @@ def find_duplicate_acceptance_criterion_ids(story, requirements: Sequence = ()) 
             union = tokens | prior_tokens
             similarity = len(tokens & prior_tokens) / len(union) if union else 0.0
             containment = len(tokens & prior_tokens) / min(len(tokens), len(prior_tokens))
+            if not source_clauses:
+                # Without linked source clauses, be deliberately strict. A
+                # shared Given/When scaffold is not enough evidence that two
+                # criteria test the same behavior. Equal measurements plus
+                # substantial overlap are a safe deterministic exception.
+                same_measurement = bool(normalized_numbers(text)) and (
+                    normalized_numbers(text) == normalized_numbers(prior_text)
+                )
+                if _norm(text) == _norm(prior_text) or (
+                    same_measurement and similarity >= 0.50 and containment >= 0.65
+                ):
+                    duplicates.append(
+                        getattr(criterion, "id", "") or f"criterion-{index + 1}"
+                    )
+                    break
+                continue
             source_index, source_score = best_source_clause(text)
             prior_source_index, prior_source_score = best_source_clause(prior_text)
             same_atomic_fact = (
                 source_index is not None
                 and source_index == prior_source_index
-                and source_score >= 0.25
-                and prior_source_score >= 0.25
+                and source_score >= 0.55
+                and prior_source_score >= 0.55
             )
-            if similarity >= 0.50 or containment >= 0.70 or same_atomic_fact:
+            left_dimensions = (tokens - prior_tokens) & source_tokens - dimension_stopwords
+            right_dimensions = (prior_tokens - tokens) & source_tokens - dimension_stopwords
+            if left_dimensions and right_dimensions:
+                # Distinct source-listed dimensions (for example team vs.
+                # priority, or notify vs. retain) are independent tests even
+                # when the criteria share the same setup and source clause.
+                continue
+            # Mapping to the same composite source clause is not, by itself,
+            # duplication: a rule can require notification *and* retention,
+            # or reporting by several distinct dimensions. Require strong
+            # proposition overlap in addition to the same-source signal.
+            if (
+                similarity >= 0.82
+                or containment >= 0.90
+                or (same_atomic_fact and similarity >= 0.40 and containment >= 0.78)
+            ):
                 duplicates.append(
                     getattr(criterion, "id", "") or f"criterion-{index + 1}"
                 )
@@ -194,6 +269,7 @@ def validate_story(story, reqs_by_id: Dict[int, object]) -> List[str]:
                 unsupported_numeric_claims(text, facts)
                 or unsupported_fact_terms(text, facts)
                 or has_polarity_conflict(text, facts)
+                or not _criterion_is_supported_by_verified_evidence(text, linked)
                 for text in criterion_texts
             ):
                 issues.append("unsupported_acceptance_fact")

@@ -124,6 +124,23 @@ def audio_text_requires_review(text: str) -> bool:
     )
 
 
+def audio_quote_requires_review(text: str) -> bool:
+    """Return true for a narrow, visible ASR artifact in a source quote.
+
+    Public quotes must remain verbatim for traceability, so this helper does
+    not repair them. It only prevents a clearly malformed transcript span from
+    receiving perfect evidence confidence when a safe internal normalization
+    would have removed the artifact. The pattern is intentionally limited to a
+    duplicated generic endpoint before an acronym-led technical subject.
+    """
+    return bool(re.search(
+        r"\b(?:and|or)\s+the\s+(?:client|server|service|system)\.\s+"
+        r"(?=[A-Z]{2,}\s+(?:servers?|services?|systems?)\b)",
+        text or "",
+        flags=re.IGNORECASE,
+    ))
+
+
 def _sentences(text: str) -> list[str]:
     return [part.strip() for part in re.split(r"(?<=[.!?؟])\s+|\n+", text or "") if part.strip()]
 

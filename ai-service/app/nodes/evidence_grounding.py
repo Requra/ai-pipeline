@@ -10,9 +10,12 @@ from app.services.semantic_quality import (
     unsupported_fact_terms,
     has_polarity_conflict,
     check_different_languages,
+    clause_requires_review,
+    evidence_covers_material_facts,
     fact_tokens,
 )
 from app.services.audio_semantics import (
+    audio_quote_requires_review,
     audio_text_requires_review,
     best_audio_evidence_clause,
     is_audio_chunk,
@@ -174,7 +177,18 @@ def _recover_audio_evidence_from_declared_source(
     }
     document_ids.discard(None)
     if not document_ids:
-        return None
+        # There is no declared evidence source to recover from. Infer a source
+        # only when the job contains exactly one audio document; this preserves
+        # source isolation in mixed and multi-recording uploads while allowing
+        # a valid audio-only extraction to recover from an omitted quote.
+        audio_document_ids = {
+            chunk.document_id
+            for chunk in chunks_by_id.values()
+            if is_audio_chunk(chunk) and chunk.document_id
+        }
+        if len(audio_document_ids) != 1:
+            return None
+        document_ids = audio_document_ids
 
     best = None
     for chunk in chunks_by_id.values():
@@ -216,7 +230,7 @@ def _recover_audio_evidence_from_declared_source(
     asr_confidence = getattr(chunk, "asr_confidence", None)
     low_asr_confidence = (
         asr_confidence is not None and float(asr_confidence) < MIN_ASR_CONFIDENCE
-    )
+    ) or audio_quote_requires_review(clause)
     published_support = min(support, 0.70) if low_asr_confidence else support
     from app.schemas.items import EvidenceSpan
 
@@ -252,7 +266,29 @@ async def evidence_grounding_node(state: PipelineState) -> dict:
     new_issues: List[QualityIssue] = []
     for req in classified:
         evidence = list(getattr(req, "evidence", []) or [])
+        if clause_requires_review(req.text):
+            _review(req, "INCOMPLETE_REQUIREMENT_CLAUSE")
+            req.evidence = []
+            req.quote_support_score = 0.0
+            new_issues.append(QualityIssue(
+                item_id=req.id,
+                item_type="requirement",
+                severity="high",
+                rule_violated="requirement_clause_integrity",
+                details="Requirement is an incomplete clause and cannot be published with a citation.",
+            ))
+            continue
         if not evidence:
+            recovered = _recover_audio_evidence_from_declared_source(
+                req, evidence, chunks_by_id, source_docs
+            )
+            if recovered is not None:
+                recovered_evidence, low_asr_confidence = recovered
+                req.evidence = [recovered_evidence]
+                req.quote_support_score = round(recovered_evidence.support_score, 4)
+                if low_asr_confidence:
+                    _review(req, "EVIDENCE_LOW_TRANSCRIPTION_CONFIDENCE")
+                continue
             _review(req, "EVIDENCE_MISSING: No evidence provided")
             new_issues.append(QualityIssue(
                 item_id=req.id,
@@ -424,11 +460,16 @@ async def evidence_grounding_node(state: PipelineState) -> dict:
                             req.text, supporting_clause
                         )
                     )
+                    incomplete_material_facts = not evidence_covers_material_facts(
+                        req.text,
+                        supporting_clause,
+                    )
                     if not (
                         numeric_mismatch
                         or unsupported_behavior
                         or polarity_conflict
                         or incomplete_audio_clause
+                        or incomplete_material_facts
                     ):
                         is_accepted = True
                         is_reviewable_verified = low_asr_confidence
@@ -441,7 +482,7 @@ async def evidence_grounding_node(state: PipelineState) -> dict:
                             rule_violated="evidence_semantic_mismatch",
                             details=(
                                 f"Evidence in chunk '{ev.chunk_id}' has mismatching numeric, "
-                                "behavior, polarity, or is an incomplete audio clause."
+                                "behavior, polarity, or lacks material requirement facts."
                             ),
                         ))
                         continue
@@ -474,12 +515,19 @@ async def evidence_grounding_node(state: PipelineState) -> dict:
                 # Provenance, quote, numeric, behavior, and polarity checks are
                 # identical for retrieval and fallback candidates. Once they
                 # pass, candidate origin must not cap verified confidence.
-                if low_asr_confidence:
+                transcript_artifact = audio_evidence and audio_quote_requires_review(
+                    supporting_clause
+                )
+                if low_asr_confidence or transcript_artifact:
                     ev.support_score = min(ev.support_score, 0.70)
                     ev.entailment_score = min(ev.entailment_score, 0.70)
                 verified.append(ev)
-                if is_reviewable_verified:
-                    marker = "EVIDENCE_LOW_TRANSCRIPTION_CONFIDENCE"
+                if is_reviewable_verified or transcript_artifact:
+                    marker = (
+                        "EVIDENCE_TRANSCRIPT_ARTIFACT"
+                        if transcript_artifact
+                        else "EVIDENCE_LOW_TRANSCRIPTION_CONFIDENCE"
+                    )
                     _review(req, marker)
                     new_issues.append(QualityIssue(
                         item_id=req.id,
@@ -487,8 +535,13 @@ async def evidence_grounding_node(state: PipelineState) -> dict:
                         severity="medium",
                         rule_violated="evidence_low_transcription_confidence",
                         details=(
-                            f"Evidence in chunk '{ev.chunk_id}' has low ASR confidence "
-                            f"({float(asr_confidence):.2f})."
+                            f"Evidence in chunk '{ev.chunk_id}' contains a visible "
+                            "transcription artifact."
+                            if transcript_artifact
+                            else (
+                                f"Evidence in chunk '{ev.chunk_id}' has low ASR confidence "
+                                f"({float(asr_confidence):.2f})."
+                            )
                         ),
                     ))
 
