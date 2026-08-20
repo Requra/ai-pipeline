@@ -23,6 +23,9 @@ from app.services.semantic_quality import (
     best_evidence_clause,
     clause_coverage,
     complete_requirement_from_evidence,
+    clause_requires_review,
+    discard_unattached_leading_fragment,
+    evidence_covers_material_facts,
     evaluate_polarity,
     fact_tokens,
     has_polarity_conflict,
@@ -46,6 +49,38 @@ def test_compact_duration_tokens_align_with_written_duration_tokens():
         "Performance must be under 2 seconds.",
         "Performance must be under 2s.",
     ) >= 0.60
+
+
+def test_clause_integrity_and_material_evidence_are_generic_not_audio_only():
+    assert clause_requires_review("during audits")
+    assert clause_requires_review("It must be encrypted")
+    requirement = (
+        "The dashboard shall load in less than 2 seconds under up to 500 active sessions."
+    )
+    assert not evidence_covers_material_facts(
+        requirement,
+        "The dashboard shall load in less than 2 seconds.",
+    )
+    assert evidence_covers_material_facts(requirement, requirement)
+
+
+def test_unattached_leading_fragment_is_not_merged_into_next_requirement():
+    cleaned, dropped = discard_unattached_leading_fragment(
+        "Directory for user authentication. Asset records must be soft-deleted."
+    )
+    assert dropped is True
+    assert cleaned == "Asset records must be soft-deleted."
+
+
+def test_unattached_fragment_is_removed_after_a_valid_adjacent_statement():
+    cleaned, dropped = discard_unattached_leading_fragment(
+        "The system must integrate with LDAP. Directory for user authentication. "
+        "Asset records must be soft-deleted."
+    )
+    assert dropped is True
+    assert cleaned == (
+        "The system must integrate with LDAP. Asset records must be soft-deleted."
+    )
 
 
 def test_adjacent_negative_and_positive_source_clauses_do_not_create_false_polarity():

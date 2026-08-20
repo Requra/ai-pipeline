@@ -179,6 +179,15 @@ class Settings:
     LLM_MAX_CONCURRENCY: int = _env_int("LLM_MAX_CONCURRENCY", 2)
     # Number of retries after the initial attempt (2 = at most 3 attempts).
     LLM_MAX_RETRIES: int = _env_int("LLM_MAX_RETRIES", 2)
+    # User-story generation can legitimately be much larger than extraction:
+    # each requirement may need a description plus several acceptance criteria.
+    # Keep this node-specific so raising its output budget does not increase
+    # cost for every other pipeline call.
+    GENERATION_MAX_TOKENS: int = _env_int("GENERATION_MAX_TOKENS", 4096)
+    # A failed full generation is retried in these small internal groups. This
+    # limits degradation to the affected requirements without changing the
+    # public request or response shape.
+    GENERATION_RECOVERY_BATCH_SIZE: int = _env_int("GENERATION_RECOVERY_BATCH_SIZE", 5)
     LLM_RETRY_BASE_SECONDS: float = _env_float("LLM_RETRY_BASE_SECONDS", 1.0)
     LLM_RETRY_MAX_SECONDS: float = _env_float("LLM_RETRY_MAX_SECONDS", 30.0)
     LLM_QUOTA_COOLDOWN_SECONDS: float = _env_float("LLM_QUOTA_COOLDOWN_SECONDS", 300.0)

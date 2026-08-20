@@ -70,6 +70,94 @@ def test_normalize_generation_items_key():
 
 
 @pytest.mark.asyncio
+async def test_generation_repairs_truncated_json_once_before_fallback(base_state):
+    """A malformed provider response gets one repair opportunity, not fallback."""
+    state = base_state.copy()
+    state["job_id"] = "json-repair"
+    state["classified_requirements"] = [
+        ClassifiedRequirement(
+            id=1,
+            text="Administrators shall register assets.",
+            actor="administrator",
+            goal="register assets",
+            candidate_labels=["FR"],
+            labels=["FR"],
+            confidence=1.0,
+            classification_confidence=1.0,
+            evidence=[],
+        )
+    ]
+    repaired = json.dumps({
+        "stories": [{
+            "source_requirement_id": 1,
+            "title": "Register assets",
+            "description": "As an administrator, I want to register assets, so that assets are recorded.",
+            "acceptance_criteria": [
+                "Given an administrator, when an asset is registered, then the asset is recorded."
+            ],
+            "labels": ["FR"],
+        }]
+    })
+    mock_llm = MagicMock()
+    mock_llm.ainvoke = AsyncMock(side_effect=[
+        '{"stories": [{"source_requirement_id": 1, "title": "Register',
+        MagicMock(content=repaired),
+    ])
+
+    with patch("app.nodes.generate.get_llm", return_value=mock_llm):
+        result = await generate_node(state)
+
+    assert mock_llm.ainvoke.await_count == 2
+    assert len(result["user_stories"]) == 1
+    assert not any(
+        warning["code"] == "GENERATE_LLM_FAILURE_FALLBACK"
+        for warning in result.get("warnings", [])
+    )
+
+
+@pytest.mark.asyncio
+async def test_full_generation_failure_recovers_in_small_batch_without_fallback(base_state):
+    """A large-response failure must not degrade stories when its batch recovers."""
+    state = base_state.copy()
+    state["job_id"] = "batch-recovery"
+    state["classified_requirements"] = [
+        ClassifiedRequirement(
+            id=1,
+            text="Administrators shall register assets.",
+            actor="administrator", goal="register assets",
+            candidate_labels=["FR"], labels=["FR"], confidence=1.0,
+            classification_confidence=1.0, evidence=[],
+        ),
+        ClassifiedRequirement(
+            id=2,
+            text="Users shall request asset checkout.",
+            actor="user", goal="request asset checkout",
+            candidate_labels=["FR"], labels=["FR"], confidence=1.0,
+            classification_confidence=1.0, evidence=[],
+        ),
+    ]
+    recovered = json.dumps({"stories": [
+        {"source_requirement_id": 1, "title": "Register assets", "description": "As an administrator, I want to register assets, so that assets are recorded.", "acceptance_criteria": ["Given an administrator, when an asset is registered, then the asset is recorded."], "labels": ["FR"]},
+        {"source_requirement_id": 2, "title": "Request asset checkout", "description": "As a user, I want to request asset checkout, so that checkout can be considered.", "acceptance_criteria": ["Given a user, when checkout is requested, then the request is recorded."], "labels": ["FR"]},
+    ]})
+    mock_llm = MagicMock()
+    mock_llm.ainvoke = AsyncMock(side_effect=[
+        RuntimeError("full response truncated"),
+        MagicMock(content=recovered),
+    ])
+
+    with patch("app.nodes.generate.get_llm", return_value=mock_llm):
+        result = await generate_node(state)
+
+    assert len(result["user_stories"]) == 2
+    assert result.get("status") != "partial"
+    assert not any(
+        issue.rule_violated == "generation_degraded"
+        for issue in result.get("quality_issues", [])
+    )
+
+
+@pytest.mark.asyncio
 async def test_fallback_does_not_contain_error_message(base_state):
     state = base_state.copy()
     state["job_id"] = "job1"

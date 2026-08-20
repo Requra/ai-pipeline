@@ -100,6 +100,48 @@ async def test_summary_removes_none_sentinel_and_restores_omitted_requirements(b
 
 
 @pytest.mark.asyncio
+async def test_unverified_requirement_is_open_question_not_confirmed_scope(base_state):
+    state = base_state.copy()
+    state["raw_text"] = "The recording may require biometric approval."
+    state["chunks"] = [
+        SourceChunk(
+            chunk_id="audio-1",
+            text="The recording may require biometric approval.",
+            start_char=0,
+            end_char=45,
+            document_id="audio-1",
+        )
+    ]
+    state["classified_requirements"] = [
+        ClassifiedRequirement(
+            id=1,
+            text="The system shall require biometric approval.",
+            candidate_labels=["FR"],
+            labels=["FR"],
+            confidence=0.5,
+            classification_confidence=0.5,
+            evidence=[],
+            needs_review=True,
+        )
+    ]
+    response = StructuredSummary(
+        executive_summary="The system requires biometric approval.",
+        key_decisions=[], open_questions=[], risks=[], assumptions=[],
+        action_items=[], stakeholders=[],
+        scope=["The system requires biometric approval."], out_of_scope=[],
+    ).model_dump_json()
+    mock_llm = MagicMock()
+    mock_llm.ainvoke = AsyncMock(return_value=MagicMock(content=response))
+
+    with patch("app.nodes.summarize.get_llm", return_value=mock_llm):
+        result = await summarize_node(state)
+
+    summary = result["summary"]
+    assert summary.scope == []
+    assert any("biometric approval" in item for item in summary.open_questions)
+
+
+@pytest.mark.asyncio
 async def test_summary_restores_explicit_stakeholders_and_key_constraints(base_state):
     state = base_state.copy()
     state["raw_text"] = "Administrators configure access. Availability is 99.9%."

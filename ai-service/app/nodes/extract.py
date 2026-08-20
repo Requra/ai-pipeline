@@ -23,7 +23,11 @@ import json
 import logging
 
 from app.config import settings
-from app.services.semantic_quality import infer_requirement_priority
+from app.services.semantic_quality import (
+    clause_requires_review,
+    discard_unattached_leading_fragment,
+    infer_requirement_priority,
+)
 from app.services.audio_semantics import (
     audio_text_requires_review,
     is_audio_chunk,
@@ -335,9 +339,17 @@ def normalize_extraction_payload(parsed: Any, chunk: SourceChunk) -> dict:
         audio_requirement = is_audio_chunk(chunk)
         if audio_requirement:
             text = normalize_audio_requirement_text(text)
+        text, dropped_fragment = discard_unattached_leading_fragment(text)
         priority = infer_requirement_priority(text, item.get("priority"))
         needs_review = bool(item.get("needs_review"))
         review_reason = item.get("review_reason")
+        if clause_requires_review(text):
+            needs_review = True
+            marker = "[INCOMPLETE_REQUIREMENT_CLAUSE]"
+            review_reason = f"{review_reason or ''} {marker}".strip()
+        if dropped_fragment:
+            marker = "[UNATTACHED_LEADING_FRAGMENT_DROPPED]"
+            review_reason = f"{review_reason or ''} {marker}".strip()
         if audio_requirement and audio_text_requires_review(text):
             needs_review = True
             marker = "[ASR_INCOMPLETE_FRAGMENT]"

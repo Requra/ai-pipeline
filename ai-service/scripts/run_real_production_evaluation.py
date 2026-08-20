@@ -15,7 +15,7 @@ from typing import Dict, Any, List, Optional
 
 # Set environment for real provider execution
 os.environ["LLM_PROVIDER"] = "groq"
-os.environ["GROQ_MODEL"] = "llama-3.3-70b-versatile"
+os.environ["GROQ_MODEL"] = "openai/gpt-oss-20b"
 os.environ["TRANSCRIBE_PROVIDER"] = "groq"
 os.environ["ENABLE_MIXED_SOURCE_JOBS"] = "true"
 os.environ["ENABLE_CONFLICT_DETECTION"] = "true"
@@ -42,7 +42,7 @@ class E2EEvaluationRunner:
             "metadata": {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "llm_provider": "groq",
-                "llm_model": "llama-3.3-70b-versatile",
+                "llm_model": "openai/gpt-oss-20b",
                 "stt_provider": "groq",
                 "stt_model": "whisper-large-v3",
                 "real_provider_execution_confirmed": True,

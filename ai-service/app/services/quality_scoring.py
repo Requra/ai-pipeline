@@ -127,6 +127,10 @@ _ROOT_CAUSE_MAP = {
     # Story completeness
     "story_empty_title": "STORY_COMPLETENESS",
     "story_missing_acceptance": "STORY_COMPLETENESS",
+    # Generation may fall back safely, but fallback wording is not equivalent
+    # to a fully validated model result. Keep that degradation visible in the
+    # existing score without adding response-contract fields.
+    "generation_degraded": "GENERATION_DEGRADED",
 }
 
 _COMPONENT_OWNED_ROOT_CAUSES = {
@@ -344,12 +348,15 @@ def compute_quality_scores(requirements: Sequence, stories: Sequence, quality_is
     penalizable_high_count = 0
     penalizable_medium_count = 0
     penalizable_low_count = 0
+    generation_degraded = False
 
     for (_, _, root_cause), info in grouped.items():
         if root_cause == "COMPLEMENTARY":
             continue
         if root_cause in _DIAGNOSTIC_ROOT_CAUSES:
             continue
+        if root_cause == "GENERATION_DEGRADED":
+            generation_degraded = True
         if root_cause not in _COMPONENT_OWNED_ROOT_CAUSES:
             sev = info["severity"]
             if sev == "high":
@@ -383,6 +390,18 @@ def compute_quality_scores(requirements: Sequence, stories: Sequence, quality_is
             overall = min(overall, 0.59)
         elif penalizable_medium_count:
             overall = min(overall, 0.79)
+        # A reported High user-facing defect is unresolved even when a
+        # component score already represents its dimension. Component
+        # ownership prevents double penalties; it must not permit a
+        # near-perfect score while the response still needs review.
+        if high_count:
+            overall = min(overall, 0.89)
+        # A response containing deterministic fallback stories is useful but
+        # cannot claim production-perfect quality. This cap is independent of
+        # component scores because the components cannot identify the origin
+        # of otherwise source-bound fallback wording.
+        if generation_degraded:
+            overall = min(overall, 0.89)
 
     return QualityScores(
         overall_score=round(overall, 4),

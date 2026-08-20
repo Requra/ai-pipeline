@@ -16,7 +16,7 @@ from typing import Dict, Any, List, Optional
 
 # Set environment for real provider execution
 os.environ["LLM_PROVIDER"] = "groq"
-os.environ["GROQ_MODEL"] = "llama-3.1-8b-instant"
+os.environ["GROQ_MODEL"] = "openai/gpt-oss-20b"
 os.environ["TRANSCRIBE_PROVIDER"] = "groq"
 os.environ["ENABLE_MIXED_SOURCE_JOBS"] = "true"
 os.environ["ENABLE_CONFLICT_DETECTION"] = "true"
@@ -48,7 +48,7 @@ class ProductionReadinessSuite:
     def __init__(self):
         from scripts.readiness_reporter import resolve_runtime_metadata
 
-        llm_model = getattr(settings, "GROQ_MODEL", "llama-3.1-8b-instant") or "llama-3.3-70b-versatile"
+        llm_model = getattr(settings, "GROQ_MODEL", "openai/gpt-oss-20b") or "openai/gpt-oss-120b"
         self.report_data: Dict[str, Any] = {
             "metadata": resolve_runtime_metadata(
                 llm_provider=getattr(settings, "LLM_PROVIDER", "groq"),

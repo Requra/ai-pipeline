@@ -12,7 +12,7 @@ Nothing here logs raw content; callers decide what (if anything) to log.
 from __future__ import annotations
 
 import json
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 _OPEN_TO_CLOSE = {"{": "}", "[": "]"}
 
@@ -100,8 +100,16 @@ def loads_loose(text: str) -> Any:
         return json.loads(span)  # may raise — caller handles
 
 
-async def _llm_repair(llm, bad_text: str, instruction: str) -> str:
-    raw = await llm.ainvoke([("system", instruction), ("user", bad_text or "")])
+async def _llm_repair(
+    llm,
+    bad_text: str,
+    instruction: str,
+    invocation_kwargs: Optional[Mapping[str, Any]] = None,
+) -> str:
+    raw = await llm.ainvoke(
+        [("system", instruction), ("user", bad_text or "")],
+        **dict(invocation_kwargs or {}),
+    )
     return getattr(raw, "content", None) or str(raw)
 
 
@@ -110,6 +118,7 @@ async def loads_with_llm_repair(
     llm: Any = None,
     *,
     instruction: str = DEFAULT_REPAIR_INSTRUCTION,
+    invocation_kwargs: Optional[Mapping[str, Any]] = None,
 ) -> Any:
     """Parse JSON, attempting exactly one LLM repair round on failure.
 
@@ -122,5 +131,10 @@ async def loads_with_llm_repair(
     except (ValueError, json.JSONDecodeError):
         if llm is None:
             raise
-        repaired = await _llm_repair(llm, text or "", instruction)
+        repaired = await _llm_repair(
+            llm,
+            text or "",
+            instruction,
+            invocation_kwargs,
+        )
         return loads_loose(repaired)

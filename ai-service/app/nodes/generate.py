@@ -1,11 +1,13 @@
 from app.schemas.pipeline_state import PipelineState
 from app.schemas.items import UserStory, AcceptanceCriterion, RequirementCoverage, QualityIssue
 from app.llm import get_llm
+from app.config import settings
 from app.prompts.loader import load_prompt
 from app.prompts.registry import PromptId
 from app.progress import update_progress
 from app.nodes.dedupe_requirements import canonicalize_requirements
 from app.nodes.extract import project_legacy_requirements
+from app.utils.json_parsing import loads_with_llm_repair
 from app.validators.story_validator import (
     find_duplicate_acceptance_criterion_ids,
     find_duplicate_story_ids,
@@ -30,7 +32,6 @@ from app.services.semantic_quality import (
 )
 from pydantic import BaseModel, Field
 from typing import List, Any, Optional
-import json
 import re
 import traceback
 
@@ -42,6 +43,15 @@ Convert these classified requirements into user stories:
 
 {items}
 """
+
+_GENERATION_JSON_REPAIR_INSTRUCTION = """
+Repair the malformed or truncated JSON supplied by the user. Return ONLY a
+valid JSON object in exactly this shape: {"stories": [...]}. Preserve only
+stories and acceptance criteria supported by the supplied data; do not invent
+facts, values, permissions, outcomes, or requirement IDs. If the final story
+is incomplete, omit that story rather than guessing its missing fields. Do not
+use markdown or add commentary.
+""".strip()
 
 
 # ---------------- STRUCTURED OUTPUT ----------------
@@ -144,6 +154,39 @@ def normalize_generation_payload(parsed: Any) -> dict:
         return {"stories": parsed["data"]}
 
     return parsed
+
+
+def _generation_kwargs() -> dict[str, int]:
+    return {
+        "max_tokens": max(512, int(getattr(settings, "GENERATION_MAX_TOKENS", 4096))),
+    }
+
+
+async def _invoke_generation_response(llm, system_prompt: str, requirements) -> GenerationResponse:
+    """Generate and parse one bounded requirements group.
+
+    The parser owns exactly one repair round. Callers can retry a failed full
+    group in smaller batches without exposing any new public response fields.
+    """
+    items_text = "\n\n".join(_format_requirement(req) for req in requirements)
+    generation_kwargs = _generation_kwargs()
+    raw = await llm.ainvoke([
+        ("system", system_prompt),
+        ("user", USER_PROMPT.format(items=items_text)),
+    ], **generation_kwargs)
+    content = getattr(raw, "content", None) or str(raw)
+    parsed = await loads_with_llm_repair(
+        content,
+        llm,
+        instruction=_GENERATION_JSON_REPAIR_INSTRUCTION,
+        invocation_kwargs=generation_kwargs,
+    )
+    return GenerationResponse.model_validate(normalize_generation_payload(parsed))
+
+
+def _requirement_batches(requirements, size: int):
+    batch_size = max(1, size)
+    return [requirements[index:index + batch_size] for index in range(0, len(requirements), batch_size)]
 
 def _format_requirement(req) -> str:
     labels = getattr(req, "labels", None) or [getattr(req, "label", "FR")]
@@ -280,13 +323,24 @@ def build_source_bound_acceptance_criteria(requirements, story_id: str) -> List[
             )
             if numeric_upper_bound_entails(boundary_text, [clause]):
                 criteria.append(boundary_text)
+    # Overlapping extraction clauses can create the same observable test twice.
+    # Deduplicate deterministic fallback text before assigning public IDs so a
+    # repeated criterion cannot leak into the response through punctuation or
+    # whitespace variations.
+    unique_criteria = []
+    seen = set()
+    for text in criteria:
+        key = re.sub(r"[^a-z0-9\u0600-\u06ff]+", " ", text.lower()).strip()
+        if key and key not in seen:
+            seen.add(key)
+            unique_criteria.append(text)
     return [
         AcceptanceCriterion(
             id=f"{story_id}_ac_{index + 1}",
             text=text.replace(" .", "."),
             criterion_type="Given-When-Then",
         )
-        for index, text in enumerate(criteria)
+        for index, text in enumerate(unique_criteria)
     ]
 
 
@@ -785,7 +839,10 @@ async def generate_node(state: PipelineState) -> dict:
     def finalize(payload: dict) -> dict:
         payload["classified_requirements"] = classified
         payload["functional_requirements"] = project_legacy_requirements(classified)
-        if canonical_changed:
+        # ``payload`` may contain generation-quality issues discovered after
+        # canonicalization. Do not overwrite them with the remapped upstream
+        # issues merely because a duplicate was merged before generation.
+        if canonical_changed and "quality_issues" not in payload:
             payload["quality_issues"] = canonical_issues
         if merged_count:
             warnings = list(payload.get("warnings", state.get("warnings", []) or []))
@@ -862,6 +919,9 @@ async def generate_node(state: PipelineState) -> dict:
         })
 
 
+    generation_degraded_requirement_ids: list[int] = []
+    generation_failure_kind: str | None = None
+
     try:
         llm = get_llm()
 
@@ -869,34 +929,40 @@ async def generate_node(state: PipelineState) -> dict:
             raise RuntimeError("LLM not initialized")
 
         system_prompt = load_prompt(PromptId.GENERATE_USER_STORIES_V2)
-        items_text = "\n\n".join(_format_requirement(req) for req in to_generate)
-
-        raw = await llm.ainvoke([
-            ("system", system_prompt),
-            ("user", USER_PROMPT.format(items=items_text))
-        ])
-        content = getattr(raw, "content", None) or str(raw)
-
-        # Strip common code fences
-        content = content.strip()
-        if content.startswith("```"):
-            lines = content.splitlines()
-            if lines[0].startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].startswith("```"):
-                lines = lines[:-1]
-            content = "\n".join(lines).strip()
-
         try:
-            parsed = json.loads(content)
-            normalized = normalize_generation_payload(parsed)
-            response = GenerationResponse.model_validate(normalized)
-        except Exception as pe:
-            print(f"Generation parse/validation error: {pe}")
-            print(f"Raw content: {content}")
-            raise pe
+            response = await _invoke_generation_response(
+                llm,
+                system_prompt,
+                to_generate,
+            )
+            llm_stories = response.stories if response else []
+        except Exception as initial_error:
+            # A full response can exceed a provider's output limit even after
+            # JSON repair. Retry isolated groups so only failed groups get
+            # deterministic source-bound fallback stories.
+            generation_failure_kind = type(initial_error).__name__
+            llm_stories = []
+            recovery_size = max(
+                1,
+                int(getattr(settings, "GENERATION_RECOVERY_BATCH_SIZE", 5)),
+            )
+            for batch in _requirement_batches(to_generate, recovery_size):
+                try:
+                    response = await _invoke_generation_response(
+                        llm,
+                        system_prompt,
+                        batch,
+                    )
+                    llm_stories.extend(response.stories if response else [])
+                except Exception as batch_error:
+                    generation_failure_kind = type(batch_error).__name__
+                    generation_degraded_requirement_ids.extend(
+                        req.id for req in batch
+                    )
 
-        llm_stories = response.stories if response else []
+            # If every batch recovers, all stories remain model-generated and
+            # there is no fallback degradation to score. Only failed batches
+            # become source-bound deterministic fallback stories below.
 
         req_map = {r.id: r for r in to_generate}
 
@@ -1061,6 +1127,8 @@ async def generate_node(state: PipelineState) -> dict:
                 requirement_coverages.append(coverage)
             else:
                 # 2. Fallback Path (LLM skipped this requirement)
+                if req.id not in generation_degraded_requirement_ids:
+                    generation_degraded_requirement_ids.append(req.id)
                 story_id = f"{job_id}_story_{req.id}"
                 actor = getattr(req, "actor", None)
                 goal = getattr(req, "goal", None)
@@ -1131,6 +1199,44 @@ async def generate_node(state: PipelineState) -> dict:
         reqs_by_id = {r.id: r for r in classified}
         issues_by_story = validate_stories(final_stories, reqs_by_id)
         duplicate_ids = find_duplicate_story_ids(final_stories)
+        generated_issues = list(canonical_issues if canonical_changed else (state.get("quality_issues", []) or []))
+        if generation_degraded_requirement_ids:
+            for req_id in dict.fromkeys(generation_degraded_requirement_ids):
+                generated_issues.append(QualityIssue(
+                    item_id=req_id,
+                    item_type="requirement",
+                    severity="medium",
+                    rule_violated="generation_degraded",
+                    details=(
+                        "Story generation required recovery or deterministic fallback "
+                        "for this requirement."
+                    ),
+                ))
+            existing_warnings = result_payload.get("warnings", state.get("warnings", []) or [])
+            failed_ids = ", ".join(
+                f"REQ-{req_id:03d}"
+                for req_id in dict.fromkeys(generation_degraded_requirement_ids)
+            )
+            all_fallback = set(generation_degraded_requirement_ids) >= {
+                req.id for req in to_generate
+            }
+            result_payload["warnings"] = existing_warnings + [{
+                "node_name": "generate",
+                "code": (
+                    "GENERATE_LLM_FAILURE_FALLBACK"
+                    if all_fallback else "GENERATE_BATCH_DEGRADED"
+                ),
+                "message": (
+                    (
+                        "Generation LLM failed or output could not be parsed; "
+                        "source-bound fallback stories generated."
+                        if all_fallback
+                        else "Generation recovery was required; source-bound fallback may have been used."
+                    )
+                    + f" Requirements: {failed_ids}. Error type: {generation_failure_kind or 'unknown'}."
+                ),
+            }]
+            result_payload["status"] = "partial"
         if issues_by_story or duplicate_ids:
             quality_rule_map = {
                 "unsupported_acceptance_fact": ("acceptance_criterion_unsupported_fact", "medium"),
@@ -1142,7 +1248,6 @@ async def generate_node(state: PipelineState) -> dict:
                 "missing_title": ("story_empty_title", "high"),
                 "insufficient_acceptance_criteria": ("story_missing_acceptance", "medium"),
             }
-            generated_issues = list(state.get("quality_issues", []) or [])
             story_indexes = {
                 story.id: index
                 for index, story in enumerate(final_stories, start=1)
@@ -1166,8 +1271,6 @@ async def generate_node(state: PipelineState) -> dict:
                         rule_violated=rule,
                         details=f"Generated story failed validation: {code}.",
                     ))
-            if generated_issues:
-                result_payload["quality_issues"] = generated_issues
             codes = sorted({code for codes in issues_by_story.values() for code in codes})
             parts = []
             if issues_by_story:
@@ -1180,6 +1283,8 @@ async def generate_node(state: PipelineState) -> dict:
                 "code": "GENERATE_STORY_QUALITY",
                 "message": "Generated story quality issues: " + "; ".join(parts) + ".",
             }]
+        if generated_issues:
+            result_payload["quality_issues"] = generated_issues
         return finalize(result_payload)
 
     except Exception as e:

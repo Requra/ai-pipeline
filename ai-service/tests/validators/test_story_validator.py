@@ -108,3 +108,79 @@ def test_distinct_boundary_acceptance_criteria_are_not_duplicates():
     ])
 
     assert find_duplicate_acceptance_criterion_ids(story) == []
+
+
+def test_distinct_actions_from_one_composite_requirement_are_not_duplicates():
+    requirement = ExtractedRequirement(
+        id=1,
+        text=(
+            "The system shall send escalation notifications to the primary on-call "
+            "group and retain delivery outcomes for troubleshooting."
+        ),
+        candidate_labels=["FR"],
+        confidence=0.9,
+    )
+    story = _story(acceptance_criteria=[
+        _ac(
+            "Given an escalation, when it occurs, then the system sends a notification to the primary on-call group.",
+            1,
+        ),
+        _ac(
+            "Given an escalation notification, when delivery completes, then the system retains the delivery outcome for troubleshooting.",
+            2,
+        ),
+    ])
+
+    assert find_duplicate_acceptance_criterion_ids(story, [requirement]) == []
+
+
+def test_validator_rejects_acceptance_fact_absent_from_verified_evidence():
+    requirement = ExtractedRequirement(
+        id=1,
+        text=(
+            "Directory for user authentication. Asset database records cannot be "
+            "permanently deleted and must be soft-deleted."
+        ),
+        candidate_labels=["FR"],
+        confidence=0.8,
+        evidence=[EvidenceSpan(
+            chunk_id="retention",
+            quote=(
+                "Asset database records cannot be permanently deleted. They must "
+                "be soft-deleted."
+            ),
+        )],
+    )
+    story = _story(acceptance_criteria=[
+        _ac(
+            "Given a user signs in, when authentication is requested, then the "
+            "system authenticates the user through the directory.",
+            1,
+        ),
+    ])
+
+    issues = validate_story(story, {1: requirement})
+
+    assert "unsupported_acceptance_fact" in issues
+
+
+def test_validator_keeps_access_denial_entailed_by_exclusive_permission():
+    requirement = ExtractedRequirement(
+        id=1,
+        text="Only administrators may retrieve archived reports.",
+        candidate_labels=["FR"],
+        confidence=0.9,
+        evidence=[EvidenceSpan(
+            chunk_id="permissions",
+            quote="Only administrators may retrieve archived reports.",
+        )],
+    )
+    story = _story(acceptance_criteria=[
+        _ac(
+            "Given a non-administrator, when retrieval of an archived report is "
+            "requested, then the request is denied.",
+            1,
+        ),
+    ])
+
+    assert "unsupported_acceptance_fact" not in validate_story(story, {1: requirement})

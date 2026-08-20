@@ -55,6 +55,28 @@ async def test_near_duplicates_merge():
 
 
 @pytest.mark.asyncio
+async def test_cross_source_paraphrases_without_matching_intent_stay_separate():
+    reqs = [
+        _req(
+            1,
+            "The system must export monthly invoices to a PDF file.",
+            goal="export finance invoices",
+            evidence=[EvidenceSpan(chunk_id="finance", quote="export invoices to PDF", document_id="finance-pdf")],
+        ),
+        _req(
+            2,
+            "The system must export the monthly invoices into a PDF file.",
+            goal=None,
+            evidence=[EvidenceSpan(chunk_id="operations", quote="export invoices to PDF", document_id="operations-audio")],
+        ),
+    ]
+
+    out = await dedupe_requirements_node(_state(reqs))
+
+    assert len(out["extracted_requirements"]) == 2
+
+
+@pytest.mark.asyncio
 async def test_identical_proposition_merges_despite_inconsistent_actor_fields():
     reqs = [
         _req(1, "The user can export invoices to PDF.", actor="customer"),

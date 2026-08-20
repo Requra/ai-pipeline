@@ -353,6 +353,7 @@ def _ensure_requirement_summary_coverage(
         *summary.out_of_scope,
     )
     represented_text = " ".join(fields)
+    has_source_chunks = bool(state.get("chunks", []) or [])
     for req in reqs:
         text = (getattr(req, "text", "") or "").strip()
         if not text or proposition_support(text, represented_text) >= 0.55:
@@ -362,7 +363,15 @@ def _ensure_requirement_summary_coverage(
         )
         disp = getattr(req, "disposition", "accepted")
 
-        if disp in ("rejected", "deferred") or "Out-of-Scope" in labels:
+        unresolved = bool(getattr(req, "needs_review", False)) or (
+            has_source_chunks and not (getattr(req, "evidence", None) or [])
+        )
+        if unresolved:
+            # An ungrounded or low-confidence extraction is a review item,
+            # never confirmed product scope. The existing open_questions field
+            # preserves the public response structure.
+            target = summary.open_questions
+        elif disp in ("rejected", "deferred") or "Out-of-Scope" in labels:
             target = summary.out_of_scope
         elif "Open Question" in labels or disp in ("proposed", "uncertain"):
             target = summary.open_questions
@@ -490,6 +499,15 @@ def _source_bind_summary_fields(
         or []
     )
     all_facts = source_fact_texts(reqs)
+    unresolved_facts = [
+        (getattr(req, "text", "") or "").strip()
+        for req in reqs
+        if (getattr(req, "text", "") or "").strip()
+        and (
+            getattr(req, "needs_review", False)
+            or (state.get("chunks", []) and not (getattr(req, "evidence", None) or []))
+        )
+    ]
 
     def supported(item: str, facts: list[str], threshold: float = 0.25) -> bool:
         if not item or not facts:
@@ -513,12 +531,18 @@ def _source_bind_summary_fields(
             ]
         )
 
+    def unresolved(item: str) -> bool:
+        return max(
+            (proposition_support(fact, item) for fact in unresolved_facts),
+            default=0.0,
+        ) >= 0.60
+
     summary.key_decisions = [
-        item for item in summary.key_decisions if supported(item, all_facts)
+        item for item in summary.key_decisions if supported(item, all_facts) and not unresolved(item)
     ]
-    summary.risks = [item for item in summary.risks if supported(item, all_facts)]
+    summary.risks = [item for item in summary.risks if supported(item, all_facts) and not unresolved(item)]
     summary.action_items = [
-        item for item in summary.action_items if supported(item, all_facts)
+        item for item in summary.action_items if supported(item, all_facts) and not unresolved(item)
     ]
     summary.assumptions = [
         item for item in summary.assumptions if supported(item, facts_for("Assumption"))
@@ -544,6 +568,14 @@ def _source_bind_summary_fields(
         for item in summary.open_questions
         if supported(item, explicit_questions) or item in pipeline_questions
     ]
+    summary.scope = [item for item in summary.scope if not unresolved(item)]
+
+    # Remove only executive-summary sentences that are solely about an
+    # unresolved requirement. Retain broad verified project context.
+    sentences = re.split(r"(?<=[.!?])\s+", summary.executive_summary or "")
+    summary.executive_summary = " ".join(
+        sentence for sentence in sentences if not unresolved(sentence)
+    ).strip()
     return summary
 
 

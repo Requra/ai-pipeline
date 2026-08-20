@@ -180,6 +180,114 @@ def fact_tokens(text: str) -> set[str]:
     return tokens
 
 
+def clause_requires_review(text: str) -> bool:
+    """Return whether text is an unsafe standalone requirement/citation clause.
+
+    This is intentionally conservative: it catches detached conjunctions,
+    dangling prepositions, and pronoun-led clauses with no stated antecedent.
+    A complete conditional such as ``When X, the system shall Y`` is allowed.
+    """
+    compact = re.sub(r"\s+", " ", (text or "").strip())
+    if len(compact) < 8:
+        return True
+    lowered = compact.lower().strip(" .;:,")
+    if not lowered:
+        return True
+    if re.match(
+        r"^(?:and|or|but|so|because|during|including|especially|also|"
+        r"while|whereas|ثم|و|أو|لكن|أثناء|بما\s+في\s+ذلك)\b",
+        lowered,
+    ):
+        return True
+    if re.search(
+        r"\b(?:and|or|but|because|with|without|for|to|of|in|on|at|"
+        r"during|when|if|unless|و|أو|من|إلى|في|على|عند|إذا)\s*$",
+        lowered,
+    ):
+        return True
+    if re.match(
+        r"^(?:it|they|them|this|that|these|those|هو|هي|هم|هذا|هذه)\s+"
+        r"(?:shall|must|should|will|can|may|is|are|يجب|يمكن|سيتم|هو|هي)\b",
+        lowered,
+    ):
+        return True
+    if re.match(r"^[A-Z]{2,}(?:\s+[A-Z][A-Za-z-]*){1,3}$", compact):
+        return True
+    return False
+
+
+def discard_unattached_leading_fragment(text: str) -> tuple[str, bool]:
+    """Remove an unattached noun fragment accidentally joined to a statement.
+
+    Speech-to-text and extraction models occasionally emit ``Directory for user
+    authentication. Records must ...`` as one requirement. The first sentence
+    has no requirement predicate and is not evidence for the second; retaining
+    it creates a fabricated composite requirement. The same fragment can also
+    appear after a valid preceding requirement when a model groups adjacent
+    source statements. Remove only a short, predicate-free standalone fragment
+    that is followed by a substantive requirement statement. This never joins
+    or invents source text.
+    """
+    source = re.sub(r"\s+", " ", (text or "").strip())
+    sentences = [
+        part.strip()
+        for part in re.split(r"(?<=[.!?؟])\s+", source)
+        if part.strip()
+    ]
+    if len(sentences) < 2:
+        return source, False
+    predicate_pattern = re.compile(
+        r"\b(?:shall|must|should|will|can|may|cannot|can't|is|are|"
+        r"يجب|يمكن|لا\s+يمكن|سيتم)\b",
+        re.IGNORECASE,
+    )
+    retained: list[str] = []
+    dropped = False
+    for index, sentence in enumerate(sentences):
+        candidate = sentence.rstrip(".!?؟")
+        following = " ".join(sentences[index + 1:])
+        is_unattached_fragment = (
+            bool(following)
+            and not predicate_pattern.search(candidate)
+            and 2 <= len(fact_tokens(candidate)) <= 8
+            and bool(predicate_pattern.search(following))
+        )
+        if is_unattached_fragment:
+            dropped = True
+            continue
+        retained.append(sentence)
+    return " ".join(retained).strip(), dropped
+
+
+def material_fact_coverage(requirement: str, evidence: str) -> float:
+    """Return conservative coverage of requirement facts by an evidence clause."""
+    requirement_tokens = fact_tokens(requirement)
+    evidence_tokens = fact_tokens(evidence)
+    if not requirement_tokens:
+        return 1.0
+    if not evidence_tokens:
+        return 0.0
+    modals = {"shall", "must", "should", "may", "can", "will"}
+    requirement_tokens -= modals
+    evidence_tokens -= modals
+    if not requirement_tokens:
+        return 1.0
+    return len(requirement_tokens & evidence_tokens) / len(requirement_tokens)
+
+
+def evidence_covers_material_facts(requirement: str, evidence: str) -> bool:
+    """Require a public citation to carry the requirement's material facts."""
+    if clause_requires_review(evidence):
+        return False
+    if unsupported_numeric_claims(requirement, [evidence]):
+        return False
+    if has_polarity_conflict(requirement, [evidence]):
+        return False
+    coverage = material_fact_coverage(requirement, evidence)
+    token_count = len(fact_tokens(requirement))
+    return coverage >= (1.0 if token_count <= 6 else 0.85)
+
+
 def proposition_support(source: str, candidate: str) -> float:
     """Return deterministic proposition support after fact normalization.
 
@@ -451,19 +559,24 @@ def _exclusive_access_scope_entails(text: str, sources: Iterable[str]) -> bool:
 def source_fact_texts(requirements: Sequence) -> list[str]:
     """Build the internal fact ledger for linked requirements.
 
-    The ledger intentionally contains only canonical requirement text and its
-    verified evidence quotes.  It is internal and does not change the response
-    contract.
+    Verified evidence is authoritative whenever it exists. Canonical text is
+    used only when the requirement has no verified source quote; otherwise a
+    malformed or over-broad extraction could incorrectly authorize an
+    acceptance criterion that is absent from the cited source. This is internal
+    and does not change the response contract.
     """
     facts: list[str] = []
     for req in requirements:
         text = (getattr(req, "text", "") or "").strip()
-        if text:
-            facts.append(text)
+        evidence_facts: list[str] = []
         for evidence in getattr(req, "evidence", []) or []:
             quote = (getattr(evidence, "quote", "") or "").strip()
             if quote:
-                facts.append(quote)
+                evidence_facts.append(quote)
+        if evidence_facts:
+            facts.extend(evidence_facts)
+        elif text:
+            facts.append(text)
     return list(dict.fromkeys(facts))
 
 

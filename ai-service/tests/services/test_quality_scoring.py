@@ -48,6 +48,24 @@ def test_clean_run_scores_high():
     assert s.overall_score == 1.0
 
 
+def test_generation_degradation_cannot_score_as_production_perfect():
+    from app.schemas.items import QualityIssue
+
+    score = compute_quality_scores(
+        [_req(1, evidence=True, quote_support=1.0)],
+        [_story("US1")],
+        [QualityIssue(
+            item_id=1,
+            item_type="requirement",
+            severity="medium",
+            rule_violated="generation_degraded",
+            details="Deterministic fallback was used.",
+        )],
+    )
+
+    assert score.overall_score < 0.90
+
+
 def test_missing_evidence_lowers_groundedness():
     reqs = [_req(1, evidence=True, quote_support=1.0), _req(2, evidence=False)]
     s = compute_quality_scores(reqs, [], [])
@@ -133,6 +151,25 @@ def test_high_severity_issue_counted():
     issues = [QualityIssue(item_id=1, item_type="requirement", severity="high", rule_violated="x", details="d")]
     s = compute_quality_scores([_req(1)], [], issues)
     assert s.high_severity_issue_count == 1
+
+
+def test_high_component_owned_defect_caps_near_perfect_score():
+    from app.schemas.items import QualityIssue
+
+    score = compute_quality_scores(
+        [_req(1, evidence=True, quote_support=1.0)],
+        [_story("US1")],
+        [QualityIssue(
+            item_id=1,
+            item_type="requirement",
+            severity="high",
+            rule_violated="missing_verified_evidence",
+            details="No verified evidence.",
+        )],
+    )
+
+    assert score.high_severity_issue_count == 1
+    assert score.overall_score <= 0.89
 
 
 def test_component_owned_duplicate_issues_are_not_double_penalized():
