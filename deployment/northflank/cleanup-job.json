@@ -15,7 +15,7 @@
     "vcs": {
       "projectType": "github",
       "projectUrl": "https://github.com/Requra/ai-pipeline",
-      "projectBranch": "feat/doc-audio-processing"
+      "projectBranch": "main"
     }
   },
   "buildSettings": {
