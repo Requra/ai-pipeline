@@ -606,10 +606,19 @@ async def process_json_compatibility(
 
 @router.get("/jobs/{job_id}")
 async def get_job(job_id: str):
-    view = await internal_status_view(job_id)
-    if view is None:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return view
+    try:
+        view = await internal_status_view(job_id)
+        if view is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return view
+    except Exception as e:
+        import traceback
+        try:
+            with open("C:/Users/shawk/AppData/Local/Temp/ai_job_err.txt", "w") as f:
+                traceback.print_exc(file=f)
+        except Exception:
+            pass
+        raise
 
 
 @router.get("/jobs/{job_id}/result")

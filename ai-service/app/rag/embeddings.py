@@ -5,8 +5,9 @@ Opt-in: only used when a job enables embeddings/hybrid retrieval. The default
 MVP path is lexical (BM25) and never calls an embedding provider, so this module
 imports its provider SDK lazily and is safe to import with no keys configured.
 
-The provider is chosen by ``EMBEDDING_PROVIDER`` (openai | openrouter) and uses
-the OpenAI-compatible embeddings API. A test/override hook (:func:`set_embedder`)
+The provider is chosen by ``EMBEDDING_PROVIDER`` (openai | openrouter | iti).
+OpenAI and OpenRouter use their OpenAI-compatible embeddings API; ITI uses its
+native Bedrock Gateway endpoint. A test/override hook (:func:`set_embedder`)
 lets the suite inject a deterministic embedder with no network calls.
 """
 
@@ -122,5 +123,5 @@ def get_embedder() -> Optional[Embedder]:
         logger.warning("embeddings requested but no API key for provider '%s'", provider)
         return None
     if provider == "iti":
-        return ITIEmbedder(settings.EMBEDDING_MODEL, key)
+        return ITIEmbedder(settings.ITI_EMBEDDING_MODEL, key)
     return OpenAICompatibleEmbedder(provider, settings.EMBEDDING_MODEL, key)

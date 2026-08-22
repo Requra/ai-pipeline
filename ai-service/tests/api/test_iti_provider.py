@@ -73,7 +73,8 @@ def test_response_parsing():
         "model_id": "nvidia.nemotron-super-3-120b",
         "region": "us-east-1",
         "status": "completed",
-        "actual_cost_usd": 0.0001
+        "actual_cost_usd": 0.0001,
+        "usage": {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
     }
     parsed = ITIChatResponse(raw_response)
     assert parsed.content == "Response from Nemotron"
@@ -81,7 +82,7 @@ def test_response_parsing():
     assert parsed.response_metadata["region"] == "us-east-1"
     assert parsed.response_metadata["status"] == "completed"
     assert parsed.response_metadata["actual_cost_usd"] == 0.0001
-    assert parsed.usage_metadata == {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    assert parsed.usage_metadata == {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}
 
 # 5. Client Invocation (Sync & Async)
 @patch("httpx.Client")
@@ -102,7 +103,7 @@ def test_iti_chat_invoke(mock_client_class, monkeypatch):
     mock_client.post.return_value = mock_resp
     
     client = ITIChatClient(model="nvidia.nemotron-super-3-120b")
-    res = client.invoke([("human", "test")])
+    res = client.invoke([("human", "test")], temperature=0, max_tokens=10)
     assert res.content == "OK"
     mock_client.post.assert_called_once()
     
@@ -110,6 +111,8 @@ def test_iti_chat_invoke(mock_client_class, monkeypatch):
     args, kwargs = mock_client.post.call_args
     assert args[0] == "http://test/api/v1/student/chat"
     assert kwargs["headers"]["Authorization"] == "Bearer test-key"
+    assert kwargs["json"]["temperature"] == 0
+    assert kwargs["json"]["max_tokens"] == 10
 
 @pytest.mark.asyncio
 @patch("httpx.AsyncClient")
@@ -203,6 +206,23 @@ def test_fallback_deduplication(monkeypatch):
     assert client.providers[1] == {"provider": "iti", "model": "openai.gpt-oss-120b-1:0"}
     assert client.providers[2] == {"provider": "groq", "model": "llama-3.3-70b-versatile"}
 
+
+def test_iti_same_provider_three_model_fallback_chain(monkeypatch):
+    monkeypatch.setattr(settings, "ITI_PRIMARY_MODEL", "nvidia.nemotron-super-3-120b")
+    monkeypatch.setattr(settings, "LLM_FALLBACK_CHAIN", json.dumps([
+        {"provider": "iti", "model": "openai.gpt-oss-120b-1:0"},
+        {"provider": "iti", "model": "mistral.mistral-large-3-675b-instruct"},
+        {"provider": "iti", "model": "nvidia.nemotron-super-3-120b"},
+    ]))
+
+    client = ResilientLLMClient(primary_provider="iti")
+
+    assert client.providers == [
+        {"provider": "iti", "model": "nvidia.nemotron-super-3-120b"},
+        {"provider": "iti", "model": "openai.gpt-oss-120b-1:0"},
+        {"provider": "iti", "model": "mistral.mistral-large-3-675b-instruct"},
+    ]
+
 # 8. Embeddings (Single & Batch)
 @pytest.mark.asyncio
 @patch("httpx.AsyncClient")
@@ -234,6 +254,19 @@ async def test_iti_embed_single_and_batch(mock_async_client_class, monkeypatch):
     # Test embed_documents
     docs_vecs = await embedder.embed_documents(["doc1", "doc2"])
     assert docs_vecs == [[0.1, 0.2], [0.3, 0.4]]
+
+
+def test_get_iti_embedder_uses_approved_titan_model(monkeypatch):
+    monkeypatch.setattr(settings, "ENABLE_EMBEDDINGS", True)
+    monkeypatch.setattr(settings, "EMBEDDING_PROVIDER", "iti")
+    monkeypatch.setattr(settings, "ITI_API_KEY", "test-key")
+    monkeypatch.setattr(settings, "EMBEDDING_MODEL", "unrelated-model")
+    monkeypatch.setattr(settings, "ITI_EMBEDDING_MODEL", "amazon.titan-embed-text-v1")
+
+    embedder = get_embedder()
+
+    assert isinstance(embedder, ITIEmbedder)
+    assert embedder.model == "amazon.titan-embed-text-v1"
 
 # 9. Embedding Invalid Response
 @pytest.mark.asyncio

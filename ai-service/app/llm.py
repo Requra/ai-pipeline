@@ -160,17 +160,19 @@ def _quota_cooldown_remaining(provider: str, model: str) -> float:
 class ITIChatResponse:
     def __init__(self, data: dict):
         self.content = data.get("output_text", "")
+        usage = data.get("usage") or {}
         self.response_metadata = {
+            "request_id": data.get("request_id"),
             "model": data.get("model_id"),
             "region": data.get("region"),
             "status": data.get("status"),
+            "estimated_cost_usd": data.get("estimated_cost_usd"),
             "actual_cost_usd": data.get("actual_cost_usd"),
         }
-        # Mock usage metadata to satisfy downstream expectation of prompt/completion/total tokens
         self.usage_metadata = {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0
+            "prompt_tokens": usage.get("input_tokens", 0),
+            "completion_tokens": usage.get("output_tokens", 0),
+            "total_tokens": usage.get("total_tokens", 0),
         }
 
 class ITIChatClient:
@@ -222,6 +224,9 @@ class ITIChatClient:
         }
         if system_prompt:
             payload["system_prompt"] = system_prompt
+        for field in ("temperature", "max_tokens"):
+            if kwargs.get(field) is not None:
+                payload[field] = kwargs[field]
             
         headers = {
             "Content-Type": "application/json",
@@ -250,6 +255,9 @@ class ITIChatClient:
         }
         if system_prompt:
             payload["system_prompt"] = system_prompt
+        for field in ("temperature", "max_tokens"):
+            if kwargs.get(field) is not None:
+                payload[field] = kwargs[field]
             
         headers = {
             "Content-Type": "application/json",
