@@ -5,8 +5,12 @@ from app.llm import ITIChatClient
 from app.rag.embeddings import ITIEmbedder
 
 @pytest.mark.skipif(
-    not os.environ.get("ITI_API_KEY"),
-    reason="ITI_API_KEY is not set in environment"
+    not (
+        os.environ.get("RUN_ITI_LIVE_TESTS", "").strip().lower()
+        in {"1", "true", "yes"}
+        and os.environ.get("ITI_API_KEY")
+    ),
+    reason="Set RUN_ITI_LIVE_TESTS=1 and ITI_API_KEY to run live ITI tests",
 )
 def test_iti_chat_live_success():
     """Verify the approved chat model can be invoked through the real gateway."""
@@ -19,8 +23,12 @@ def test_iti_chat_live_success():
     assert response.usage_metadata["total_tokens"] > 0
 
 @pytest.mark.skipif(
-    not os.environ.get("ITI_API_KEY"),
-    reason="ITI_API_KEY is not set in environment"
+    not (
+        os.environ.get("RUN_ITI_LIVE_TESTS", "").strip().lower()
+        in {"1", "true", "yes"}
+        and os.environ.get("ITI_API_KEY")
+    ),
+    reason="Set RUN_ITI_LIVE_TESTS=1 and ITI_API_KEY to run live ITI tests",
 )
 @pytest.mark.asyncio
 async def test_iti_embed_live_success():

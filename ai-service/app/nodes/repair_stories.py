@@ -121,7 +121,13 @@ async def repair_stories_node(state: PipelineState) -> dict:
             "repair_attempts": attempts + 1
         }
 
-    llm = get_llm()
+    # Repairs are the only quality-sensitive LLM pass. Keep extraction and
+    # routine classification on the primary model, while allowing the verified
+    # ITI quality model to improve repairs without adding latency everywhere.
+    quality_model = (
+        settings.ITI_QUALITY_MODEL if settings.LLM_PROVIDER == "iti" else None
+    )
+    llm = get_llm(model_name=quality_model) if quality_model else get_llm()
     if llm is None:
         logger.warning("LLM reasoning service not initialized. Skipping quality repair pass.")
         return {

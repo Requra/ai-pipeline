@@ -67,7 +67,7 @@ from app.services.job_store import sanitize_job_id
 from app.startup import build_readiness_report, run_startup_checks
 from app.store.factory import close_stores
 from app.store.models import JobOptions
-from app.worker.dispatch import dispatch_job
+from app.worker.dispatch import JobDispatchError, dispatch_job
 from app.worker.state import make_initial_state
 
 logger = logging.getLogger("app.main")
@@ -93,6 +93,17 @@ app = FastAPI(
     description="LangGraph execution microservice",
     lifespan=lifespan,
 )
+
+
+@app.exception_handler(JobDispatchError)
+async def job_dispatch_exception_handler(_request: Request, _exc: JobDispatchError):
+    """Return a retriable response after marking the newly-created job FAILED."""
+    return JSONResponse(
+        status_code=503,
+        content={
+            "detail": "Job dispatch is unavailable; the job was marked FAILED and may be retried."
+        },
+    )
 
 
 # ---------------------------------------------------------------------------

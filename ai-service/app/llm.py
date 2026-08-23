@@ -10,7 +10,7 @@ import httpx
 import openai
 from typing import Optional, List, Dict, Any
 from langchain_openai import ChatOpenAI
-from app.config import settings
+from app.config import SUPPORTED_LLM_PROVIDERS, llm_key_for, settings
 
 logger = logging.getLogger(__name__)
 
@@ -302,11 +302,22 @@ class ResilientLLMClient:
         for fb in self.fallback_chain:
             fb_provider = fb.get("provider")
             fb_model = fb.get("model")
-            if fb_provider and fb_model:
+            if (
+                fb_provider
+                and fb_model
+                and fb_provider in SUPPORTED_LLM_PROVIDERS
+                and llm_key_for(fb_provider)
+            ):
                 key = (fb_provider, fb_model)
                 if key not in seen:
                     seen.add(key)
                     self.providers.append({"provider": fb_provider, "model": fb_model})
+            elif fb_provider and fb_model:
+                logger.warning(
+                    "Ignoring unusable LLM fallback provider=%s model=%s; provider is unsupported or its key is absent.",
+                    fb_provider,
+                    fb_model,
+                )
 
     def _get_default_model(
         self, provider: str, override_model: Optional[str] = None
@@ -461,7 +472,10 @@ class ResilientLLMClient:
                         )
                         last_error = exc
                         if not self._is_retryable_error(exc):
-                            raise exc
+                            # Authentication/configuration failures cannot be
+                            # repaired by retrying this provider.  Move to a
+                            # configured fallback immediately, if one exists.
+                            break
                         break  # move to next provider
                     delay = _retry_delay_seconds(exc, attempt)
                     logger.warning(
@@ -551,7 +565,9 @@ class ResilientLLMClient:
                         )
                         last_error = exc
                         if not self._is_retryable_error(exc):
-                            raise exc
+                            # Permanent failures never back off, but a
+                            # separately configured provider may still work.
+                            break
                         break  # move to next provider
                     delay = _retry_delay_seconds(exc, attempt)
                     logger.warning(

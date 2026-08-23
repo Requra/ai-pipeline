@@ -266,6 +266,11 @@ class Settings:
     @property
     def llm_fallback_chain(self) -> List[Dict[str, Any]]:
         if not self.LLM_FALLBACK_CHAIN:
+            # ITI exposes an explicit, same-gateway fallback model.  Keep this
+            # provider-specific default narrow: other providers must opt in
+            # explicitly so an unknown OpenAI credential is never tried.
+            if self.LLM_PROVIDER == "iti" and self.ITI_FALLBACK_MODEL:
+                return [{"provider": "iti", "model": self.ITI_FALLBACK_MODEL}]
             return []
         import json
         try:

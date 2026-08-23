@@ -207,6 +207,21 @@ def test_fallback_deduplication(monkeypatch):
     assert client.providers[2] == {"provider": "groq", "model": "llama-3.3-70b-versatile"}
 
 
+def test_iti_default_fallback_model_is_used_when_chain_is_not_overridden(monkeypatch):
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "iti")
+    monkeypatch.setattr(settings, "ITI_API_KEY", "test-key")
+    monkeypatch.setattr(settings, "ITI_PRIMARY_MODEL", "nvidia.nemotron-super-3-120b")
+    monkeypatch.setattr(settings, "ITI_FALLBACK_MODEL", "openai.gpt-oss-120b-1:0")
+    monkeypatch.setattr(settings, "LLM_FALLBACK_CHAIN", None)
+
+    client = ResilientLLMClient(primary_provider="iti")
+
+    assert client.providers == [
+        {"provider": "iti", "model": "nvidia.nemotron-super-3-120b"},
+        {"provider": "iti", "model": "openai.gpt-oss-120b-1:0"},
+    ]
+
+
 def test_iti_same_provider_three_model_fallback_chain(monkeypatch):
     monkeypatch.setattr(settings, "ITI_PRIMARY_MODEL", "nvidia.nemotron-super-3-120b")
     monkeypatch.setattr(settings, "LLM_FALLBACK_CHAIN", json.dumps([

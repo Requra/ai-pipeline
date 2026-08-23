@@ -3,7 +3,7 @@ import time
 import asyncio
 import httpx
 import openai
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 from app.llm import (
     ResilientLLMClient,
     _is_permanent_quota_error,
@@ -30,6 +30,7 @@ def _clear_quota_cooldown():
 
 def test_resilient_llm_client_fallback(monkeypatch):
     monkeypatch.setattr(settings, "LLM_PROVIDER", "openrouter")
+    monkeypatch.setattr(settings, "GROQ_API_KEY", "test-groq-key")
     monkeypatch.setattr(settings, "LLM_FALLBACK_CHAIN", '[{"provider":"groq","model":"llama-3.3-70b-versatile"}]')
 
     client = ResilientLLMClient(primary_provider="openrouter")
@@ -74,8 +75,9 @@ def test_resilient_llm_client_fallback(monkeypatch):
     assert mock_fallback.invoke.call_count == 1
 
 
-def test_resilient_llm_client_non_retryable_error(monkeypatch):
+def test_resilient_llm_client_non_retryable_error_uses_configured_fallback(monkeypatch):
     monkeypatch.setattr(settings, "LLM_PROVIDER", "openrouter")
+    monkeypatch.setattr(settings, "GROQ_API_KEY", "test-groq-key")
     monkeypatch.setattr(settings, "LLM_FALLBACK_CHAIN", '[{"provider":"groq","model":"llama-3.3-70b-versatile"}]')
 
     client = ResilientLLMClient(primary_provider="openrouter")
@@ -89,6 +91,7 @@ def test_resilient_llm_client_non_retryable_error(monkeypatch):
     )
 
     mock_fallback = MagicMock()
+    mock_fallback.invoke.return_value = MockAIMessage(content="fallback after auth failure")
 
     def mock_instantiate(provider, model):
         if provider == "openrouter":
@@ -97,12 +100,59 @@ def test_resilient_llm_client_non_retryable_error(monkeypatch):
 
     monkeypatch.setattr(client, "_instantiate_client", mock_instantiate)
 
-    with pytest.raises(openai.AuthenticationError):
-        client.invoke("hello")
+    response = client.invoke("hello")
 
-    # Non-retryable error should fail immediately without retries or fallbacks
+    # Non-retryable error should fail immediately without a retry, but a
+    # configured, credentialed fallback may still complete the request.
+    assert response.content == "fallback after auth failure"
     assert mock_primary.invoke.call_count == 1
-    assert mock_fallback.invoke.call_count == 0
+    assert mock_fallback.invoke.call_count == 1
+
+
+def test_resilient_llm_client_ignores_fallback_without_credential(monkeypatch):
+    monkeypatch.setattr(settings, "GROQ_API_KEY", None)
+    monkeypatch.setattr(
+        settings,
+        "LLM_FALLBACK_CHAIN",
+        '[{"provider":"groq","model":"llama-3.3-70b-versatile"}]',
+    )
+
+    client = ResilientLLMClient(primary_provider="openrouter")
+
+    assert client.providers == [{"provider": "openrouter", "model": settings.OPENROUTER_MODEL}]
+
+
+@pytest.mark.asyncio
+async def test_async_non_retryable_error_uses_configured_fallback(monkeypatch):
+    monkeypatch.setattr(settings, "GROQ_API_KEY", "test-groq-key")
+    monkeypatch.setattr(
+        settings,
+        "LLM_FALLBACK_CHAIN",
+        '[{"provider":"groq","model":"llama-3.3-70b-versatile"}]',
+    )
+    client = ResilientLLMClient(primary_provider="openrouter")
+
+    primary = MagicMock()
+    primary.ainvoke = AsyncMock(
+        side_effect=openai.AuthenticationError(
+            message="Invalid API key",
+            response=httpx.Response(401, request=httpx.Request("POST", "http://test")),
+            body=None,
+        )
+    )
+    fallback = MagicMock()
+    fallback.ainvoke = AsyncMock(return_value=MockAIMessage(content="async fallback"))
+    monkeypatch.setattr(
+        client,
+        "_instantiate_client",
+        lambda provider, _model: primary if provider == "openrouter" else fallback,
+    )
+
+    response = await client.ainvoke("hello")
+
+    assert response.content == "async fallback"
+    assert primary.ainvoke.await_count == 1
+    assert fallback.ainvoke.await_count == 1
 
 
 def test_exhausted_token_quota_skips_retries_and_uses_fallback(monkeypatch):

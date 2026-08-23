@@ -13,7 +13,7 @@
     {
       "protocol": "HTTP",
       "type": "readinessProbe",
-      "path": "/health",
+      "path": "/ready",
       "port": 8000,
       "initialDelaySeconds": 60,
       "periodSeconds": 60,

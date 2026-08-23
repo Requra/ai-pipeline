@@ -14,12 +14,25 @@ on queue type:
 
 from __future__ import annotations
 
+import time
 from typing import Any, Dict, Optional
 
-from app.config import settings
-from app.queue.factory import get_queue
+from app.queue.factory import QueueUnavailableError, get_queue
 from app.store.factory import get_stores
-from app.worker.runner import execute_job
+from app.worker.runner import _fail, execute_job
+
+
+class JobDispatchError(RuntimeError):
+    """The durable job was marked FAILED because it could not be dispatched."""
+
+
+async def _mark_dispatch_failed(job_id: str, code: str, message: str) -> None:
+    """Turn a dispatch failure into an observable terminal job state.
+
+    Job creation is durable and happens before queue submission.  Without this
+    compensation a Redis/cache failure leaves a persisted job QUEUED forever.
+    """
+    await _fail(get_stores(), job_id, code, message, time.time())
 
 
 async def dispatch_job(
@@ -31,7 +44,15 @@ async def dispatch_job(
     request_id: Optional[str] = None,
     cache_input: Optional[Dict[str, Any]] = None,
 ) -> None:
-    queue = get_queue()
+    try:
+        queue = get_queue()
+    except QueueUnavailableError as exc:
+        await _mark_dispatch_failed(
+            job_id,
+            "QUEUE_UNAVAILABLE",
+            "Configured job queue is unavailable; job was not dispatched.",
+        )
+        raise JobDispatchError("Configured job queue is unavailable") from exc
 
     from app.queue.redis_queue import RedisQueue
     use_redis = isinstance(queue, RedisQueue)
@@ -97,9 +118,23 @@ async def dispatch_job(
         try:
             stash_input(job_id, **cache_input)
         except Exception as exc:
-            raise RuntimeError(f"INPUT_CACHE_FAILED: {exc}") from exc
+            await _mark_dispatch_failed(
+                job_id,
+                "INPUT_CACHE_FAILED",
+                "Transient input could not be stored for worker recovery.",
+            )
+            raise JobDispatchError(
+                "INPUT_CACHE_FAILED: transient input could not be stored"
+            ) from exc
 
     try:
         queue.enqueue(job_id)
     except Exception as exc:
-        raise RuntimeError(f"QUEUE_DISPATCH_FAILED: {exc}") from exc
+        await _mark_dispatch_failed(
+            job_id,
+            "QUEUE_DISPATCH_FAILED",
+            "Job queue rejected the dispatch request.",
+        )
+        raise JobDispatchError(
+            "QUEUE_DISPATCH_FAILED: job queue rejected the dispatch request"
+        ) from exc

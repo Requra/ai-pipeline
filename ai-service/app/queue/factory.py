@@ -10,6 +10,15 @@ from app.queue.base import QueueClient
 _queue: Optional[QueueClient] = None
 
 
+class QueueUnavailableError(RuntimeError):
+    """Raised when the configured durable queue cannot accept jobs.
+
+    Falling back to an API-local queue while a separate RQ worker is deployed
+    strands jobs in the API process.  Callers must surface this as a failed
+    dispatch instead of acknowledging a job that no worker can consume.
+    """
+
+
 def get_queue() -> QueueClient:
     global _queue
     from app.queue.redis_queue import RedisQueue
@@ -26,21 +35,18 @@ def get_queue() -> QueueClient:
 
             if settings.is_production:
                 try:
-                    if rq.ping():
-                        _queue = rq
-                        logger.info("Successfully connected to Redis queue.")
-                    else:
-                        from app.queue.inprocess import InProcessQueue
-                        logger.warning("Redis queue is configured but connection ping failed. Falling back to in-process queue!")
-                        _queue = InProcessQueue()
+                    if not rq.ping():
+                        raise QueueUnavailableError("Redis queue ping returned false")
                 except Exception as exc:
-                    from app.queue.inprocess import InProcessQueue
-                    logger.warning(
-                        "Failed to connect to Redis queue (%s: %s). Falling back to in-process queue!",
+                    logger.error(
+                        "Configured Redis queue is unavailable (%s); refusing API-local fallback.",
                         type(exc).__name__,
-                        exc
                     )
-                    _queue = InProcessQueue()
+                    raise QueueUnavailableError(
+                        "Configured Redis queue is unavailable; job was not enqueued."
+                    ) from exc
+                _queue = rq
+                logger.info("Successfully connected to Redis queue.")
             else:
                 _queue = rq
         else:

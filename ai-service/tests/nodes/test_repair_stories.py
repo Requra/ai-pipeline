@@ -145,7 +145,11 @@ async def test_repair_replaces_only_failed_stories(base_state_repair):
     })
     mock_llm.ainvoke = AsyncMock(return_value=mock_response)
     
-    with patch("app.nodes.repair_stories.get_llm", return_value=mock_llm):
+    with (
+        patch("app.nodes.repair_stories.get_llm", return_value=mock_llm) as get_llm_mock,
+        patch.object(settings, "LLM_PROVIDER", "iti"),
+        patch.object(settings, "ITI_QUALITY_MODEL", "mistral.mistral-large-3-675b-instruct"),
+    ):
         out = await repair_stories_node(state)
         
         updated = out["user_stories"]
@@ -165,6 +169,10 @@ async def test_repair_replaces_only_failed_stories(base_state_repair):
         assert coverage.acceptance_criteria_ids == [
             criterion.id for criterion in covered_story.acceptance_criteria
         ]
+
+    get_llm_mock.assert_called_once_with(
+        model_name="mistral.mistral-large-3-675b-instruct"
+    )
 
 
 @pytest.mark.asyncio
