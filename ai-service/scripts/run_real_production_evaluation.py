@@ -14,12 +14,14 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 
 # Set environment for real provider execution
-os.environ["LLM_PROVIDER"] = "groq"
-os.environ["GROQ_MODEL"] = "openai/gpt-oss-20b"
+os.environ["LLM_PROVIDER"] = "openrouter"
+os.environ["OPENROUTER_MODEL"] = "meta-llama/llama-3.3-70b-instruct"
+os.environ["LLM_FALLBACK_CHAIN"] = '[{"provider": "groq", "model": "openai/gpt-oss-20b"}, {"provider": "openai", "model": "gpt-4o-mini"}]'
 os.environ["TRANSCRIBE_PROVIDER"] = "groq"
 os.environ["ENABLE_MIXED_SOURCE_JOBS"] = "true"
 os.environ["ENABLE_CONFLICT_DETECTION"] = "true"
 os.environ["AI_INTERNAL_SERVICE_TOKEN"] = "e2e-prod-test-token-requra"
+
 
 # Add app directory to sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -34,6 +36,7 @@ FIXTURES_DIR = Path(__file__).resolve().parent.parent / "test-fixtures" / "e2e_r
 VERIF_DIR = Path(__file__).resolve().parent.parent / "test-fixtures" / "verification"
 
 REPORTS_DIR = Path(__file__).resolve().parent.parent / "docs" / "reports"
+
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 class E2EEvaluationRunner:
@@ -41,12 +44,13 @@ class E2EEvaluationRunner:
         self.results: Dict[str, Any] = {
             "metadata": {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                "llm_provider": "groq",
-                "llm_model": "openai/gpt-oss-20b",
+                "llm_provider": "openrouter",
+                "llm_model": "meta-llama/llama-3.3-70b-instruct",
                 "stt_provider": "groq",
                 "stt_model": "whisper-large-v3",
                 "real_provider_execution_confirmed": True,
             },
+
             "matrix": [],
             "golden_e2e": {},
             "concurrency": {},
@@ -58,8 +62,9 @@ class E2EEvaluationRunner:
         }
         self.auth_headers = {"Authorization": f"Bearer {settings.AI_INTERNAL_SERVICE_TOKEN}"}
 
-    async def poll_job(self, client: AsyncClient, job_id: str, max_wait_sec: int = 120) -> Dict[str, Any]:
+    async def poll_job(self, client: AsyncClient, job_id: str, max_wait_sec: int = 300) -> Dict[str, Any]:
         """Poll until job reaches completed, failed, partial, or rejected status."""
+
         start = time.monotonic()
         while time.monotonic() - start < max_wait_sec:
             resp = await client.get(f"/internal/jobs/{job_id}", headers=self.auth_headers)

@@ -33,7 +33,10 @@ async def dispatch_job(
 ) -> None:
     queue = get_queue()
 
-    if not settings.use_redis_queue:
+    from app.queue.redis_queue import RedisQueue
+    use_redis = isinstance(queue, RedisQueue)
+
+    if not use_redis:
         stores = get_stores()
 
         async def _factory() -> None:

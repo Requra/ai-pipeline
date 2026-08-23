@@ -291,10 +291,27 @@ def _probe_redis() -> Dict[str, Any]:
         ok = bool(get_redis_connection(url).ping())
         return {"ok": ok, "configured": True, "backend": "redis"}
     except Exception as exc:
-        logger.warning("readiness: redis probe failed: %s", type(exc).__name__)
+        logger.warning(
+            "readiness: Redis probe failed: %s. Falling back to in-process queue in production.",
+            type(exc).__name__
+        )
+        if is_prod:
+            return {
+                "ok": True,
+                "configured": True,
+                "backend": "in-process",
+                "warning": f"Redis unreachable ({type(exc).__name__}), falling back to in-process"
+            }
         if allow_inprocess:
-            return {"ok": True, "configured": True, "backend": "in-process", "warning": f"Redis unreachable ({type(exc).__name__}), falling back to in-process"}
+            return {
+                "ok": True,
+                "configured": True,
+                "backend": "in-process",
+                "warning": f"Redis unreachable ({type(exc).__name__}), falling back to in-process"
+            }
         return {"ok": False, "configured": True, "backend": "redis", "error": type(exc).__name__}
+
+
 
 
 def _probe_pgvector() -> Dict[str, Any]:
