@@ -24,7 +24,14 @@ Requra.AI is an evidence-grounded requirements engineering microservice that tra
   <a href="docs/04-ai-pipeline.md">AI pipeline</a> ·
   <a href="docs/05-api-and-data-flow.md">API workflow</a> ·
   <a href="docs/02-local-development.md">Local setup</a> ·
-  <a href="docs/07-testing-debugging-and-observability.md">Tests &amp; observability</a>
+  <a href="docs/07-testing-debugging-and-observability.md">Tests &amp; observability</a> ·
+  <a href="https://github.com/Requra/.github/releases/download/launch-film/requra-flagship-demo-1080p.mp4">Watch this service in the product</a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/Requra/.github/releases/download/launch-film/requra-flagship-demo-1080p.mp4">
+    <img src="docs/assets/readme/requra-launch-demo-cover.webp" alt="Watch the Requra.AI product demo — this pipeline's requirements, evidence, and story generation shown end to end in the real product" width="72%">
+  </a>
 </p>
 
 ## Why Requra.AI?
@@ -157,7 +164,7 @@ Jobs have fingerprints, attempt history, lifecycle status, events, cancellation 
 
 ### Unified source preparation & mixed-source processing
 
-The `prepare_sources` node accepts heterogeneous sources (PDF, DOCX, TXT, Audio, Transcripts), processes them concurrently with bounded limits (`SOURCE_MAX_CONCURRENCY`, `STT_MAX_CONCURRENCY`), checks per-source relevance, redacts PII, and merges them into one shared chunk corpus before indexing.
+The `prepare_sources` node accepts heterogeneous sources (PDF, DOCX, TXT, Audio, Transcripts), processes them concurrently with bounded limits (`SOURCE_PROCESS_CONCURRENCY`, `STT_CONCURRENCY`), checks per-source relevance, redacts PII, and merges them into one shared chunk corpus before indexing.
 
 **Code:** [`app/nodes/prepare_sources.py`](ai-service/app/nodes/prepare_sources.py), [`app/services/source_processing/`](ai-service/app/services/source_processing/)
 
@@ -407,6 +414,8 @@ Verified with the repository’s default test suite:
 | Prompt snapshots | [`tests/prompts/`](ai-service/tests/prompts/) | Registry, UTF-8 loading, caching, and template snapshots |
 | Security validation | [`test_internal_compatibility.py`](ai-service/tests/api/test_internal_compatibility.py), [`test_ready.py`](ai-service/tests/test_ready.py) | File/source guards, checksum/host behavior, safe readiness output |
 
+Verified locally: **642 passed, 2 skipped, 2 failed** out of 646 collected tests (`poetry run pytest -q`, in-memory/in-process default configuration). The 2 failures are `401 Unauthorized` responses from the external `iti` embedding provider in an environment with no configured `iti` credentials — an environment gap, not a regression against the default OpenRouter/OpenAI/Groq path.
+
 Run checks from `ai-service`:
 
 ```bash
@@ -473,12 +482,12 @@ ai-pipeline/
 These are current implementation boundaries and the clearest next hardening opportunities:
 
 - **Best-effort callbacks:** delivery has no durable outbox or automatic retry scheduler. Polling is the reliable fallback.
-- **Transient input cache:** Redis input expires after six hours. Recovery can fail when cached input and backend source recovery are both unavailable.
+- **Transient input cache:** Redis input expires after 24 hours (`INPUT_CACHE_TTL_SECONDS`). Recovery can fail when cached input and backend source recovery are both unavailable.
 - **Process-local lexical index:** the per-job BM25 registry is bounded and local to one worker process; it is not shared across workers.
 - **External systems not included:** this repository contains only the AI service. Backend/frontend compatibility can be assessed from local schemas, tests, and OpenAPI, but not proven end to end here.
 - **Caller-dependent tenant isolation:** `tenant_id` is optional in the request model, so isolation depends on integration callers providing the expected tenant/project identifiers.
 - **Limited observability backend:** request IDs, logs, durable events, status, and readiness exist; there is no repository-wide metrics backend or distributed tracing exporter.
-- **Conditional capabilities:** provider-backed features require their matching credentials; embeddings, hybrid retrieval, semantic conflict detection, and story repair additionally depend on feature flags or per-job options. Story repair is disabled by default. Not every provider is called on every run.
+- **Conditional capabilities:** provider-backed features require their matching credentials; embeddings, hybrid retrieval, semantic conflict detection, and story repair additionally depend on feature flags or per-job options. Story repair (`ENABLE_QUALITY_REPAIR`) and conflict detection (`ENABLE_CONFLICT_DETECTION`) are both enabled by default; embeddings and hybrid retrieval are opt-in. Not every provider is called on every run.
 - **Configuration does not always skip graph nodes:** `generate_user_stories` and `generate_summary` are persisted/fingerprinted options, but the active graph does not currently use them to bypass `generate` or `summarize`.
 - **Scheduled retention automation:** retention cleanup is available via CLI command (`python -m app.maintenance.cleanup`) but requires an external cron/scheduler in production.
 - **Export structures, not external writes:** the result contains Jira-compatible and Excel-ready data; it does not create Jira tickets, and the Excel file artifact is currently unavailable by default.
@@ -486,7 +495,7 @@ These are current implementation boundaries and the clearest next hardening oppo
 
 ## Project ecosystem
 
-This repository contains the **Requra.AI AI service**: API contracts, graph orchestration, model/STT/retrieval integrations, persistence adapters, worker execution, migrations, and tests. The calling backend and frontend are external systems and are not implemented in this source tree.
+This repository contains the **Requra.AI AI service**: API contracts, graph orchestration, model/STT/retrieval integrations, persistence adapters, worker execution, migrations, and tests. The calling backend ([`Requra/backend`](https://github.com/Requra/backend)) and frontend ([`Requra/frontend`](https://github.com/Requra/frontend)) are external systems and are not implemented in this source tree. See the [organization profile](https://github.com/Requra) for the full platform story.
 
 ---
 
